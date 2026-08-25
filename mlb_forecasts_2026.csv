@@ -1,1 +1,1 @@
-game_pk,home_team,away_team,home_prob,away_prob,predicted_edge,timestamp
+game_pk,home_team,away_team,home_prob,away_prob,predicted_edge,timestamp,predicted_home_runs,predicted_away_runs
