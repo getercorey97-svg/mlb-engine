@@ -1,23 +1,20 @@
-name: Automated MLB Engine Pipeline
+name: MLB Engine Pipeline
 
 on:
+  workflow_dispatch:
   schedule:
-    # Runs daily at 15:00 UTC (11:00 AM EDT)
-    - cron: '0 15 * * *'
-  workflow_dispatch: # Allows manual trigger from GitHub UI
+    - cron: '0 15 * * *' # Runs daily at 3:00 PM UTC (11:00 AM EDT)
 
 jobs:
   run-engine:
     runs-on: ubuntu-latest
-    
     permissions:
-      contents: write # Required to push database updates back to repo
-
+      contents: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set Up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -27,15 +24,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy requests
 
-      - name: Run MLB Engine Pipeline
+      - name: Run Full Pipeline (Ingestion + Monte Carlo)
         run: python run_pipeline.py
 
-      - name: Commit and Push Updated Database & CSV
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Commit and Push Updated Database
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add mlb_engine.db mlb_forecasts_2026.csv
-          git commit -m "Automated update: MLB database and forecasts [skip ci]" || echo "No changes to commit"
+          git add mlb_engine.db
+          git commit -m "Auto-update database with fresh ingestion and simulations [skip ci]" || echo "No changes to commit"
           git push
