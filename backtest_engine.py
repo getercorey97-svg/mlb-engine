@@ -53,6 +53,12 @@ def run_backtest_engine(days_back=14):
     except sqlite3.OperationalError:
         pass
 
+    # Clear tables ONCE at the start so historical data accumulates properly across all days
+    cursor.execute("DELETE FROM Daily_Lineups")
+    cursor.execute("DELETE FROM Model_Forecasts")
+    cursor.execute("DELETE FROM Post_Match_Analysis")
+    conn.commit()
+
     total_games = 0
     correct_predictions = 0
     brier_score_sum = 0.0
@@ -72,9 +78,6 @@ def run_backtest_engine(days_back=14):
         except Exception:
             continue
             
-        cursor.execute("DELETE FROM Daily_Lineups")
-        cursor.execute("DELETE FROM Model_Forecasts")
-        
         day_games_count = 0
         games_data = []
         
@@ -97,7 +100,6 @@ def run_backtest_engine(days_back=14):
                     VALUES (?, ?, ?, ?, ?)
                 ''', (game_pk, away_team, home_team, away_pitcher, home_pitcher))
                 
-                # Insert placeholder row so engine.py UPDATE statement finds the game record
                 cursor.execute('''
                     INSERT OR REPLACE INTO Model_Forecasts (game_pk, home_team, away_team, timestamp)
                     VALUES (?, ?, ?, 'BACKTEST_INIT')
@@ -117,7 +119,7 @@ def run_backtest_engine(days_back=14):
             
         conn.commit()
         
-        # Execute the main engine simulation for this batch
+        # Execute the main engine simulation for this batch date
         run_ultimate_monte_carlo()
         
         cursor = conn.cursor()
