@@ -1,1 +1,1 @@
-game_date,away_team,home_team,away_pitcher,home_pitcher,away_prob,home_prob,predicted_edge
+game_pk,home_team,away_team,home_prob,away_prob,predicted_edge,timestamp
