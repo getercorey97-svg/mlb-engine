@@ -61,7 +61,6 @@ def run_backtest_engine(days_back=14):
     
     print("-" * 60)
     
-    # Iterate day by day to hydrate Daily_Lineups and execute the main engine module
     current_date = start_date
     while current_date <= end_date:
         date_str = current_date.strftime('%Y-%m-%d')
@@ -73,7 +72,6 @@ def run_backtest_engine(days_back=14):
         except Exception:
             continue
             
-        # Clear Daily_Lineups and Model_Forecasts for this backtest batch day
         cursor.execute("DELETE FROM Daily_Lineups")
         cursor.execute("DELETE FROM Model_Forecasts")
         
@@ -99,6 +97,12 @@ def run_backtest_engine(days_back=14):
                     VALUES (?, ?, ?, ?, ?)
                 ''', (game_pk, away_team, home_team, away_pitcher, home_pitcher))
                 
+                # Insert placeholder row so engine.py UPDATE statement finds the game record
+                cursor.execute('''
+                    INSERT OR REPLACE INTO Model_Forecasts (game_pk, home_team, away_team, timestamp)
+                    VALUES (?, ?, ?, 'BACKTEST_INIT')
+                ''', (game_pk, home_team, away_team))
+                
                 games_data.append({
                     'game_pk': game_pk,
                     'home_team': home_team,
@@ -113,10 +117,9 @@ def run_backtest_engine(days_back=14):
             
         conn.commit()
         
-        # Execute the main engine module for this day's lineup
+        # Execute the main engine simulation for this batch
         run_ultimate_monte_carlo()
         
-        # Re-open connection cursor after engine run
         cursor = conn.cursor()
         
         for g in games_data:
