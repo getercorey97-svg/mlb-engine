@@ -1,15 +1,19 @@
 import sqlite3
 from datetime import datetime
+from evolve_engine import execute_factual_post_mortem
 from ingest_stats import ingest_mlb_data
 from engine import run_ultimate_monte_carlo
 
 def run_full_pipeline():
     print(f"[{datetime.now()}] Starting GitHub Actions MLB Engine Pipeline...")
     
-    # Step 1: Ingest fresh data to prevent fallback constants and default clustering
+    # Phase 1: Post-Match Analysis & Database Evolution
+    execute_factual_post_mortem()
+    
+    # Phase 2: Ingest fresh daily matchups
     ingest_mlb_data()
     
-    # Step 2: Execute Ultimate Monte Carlo Simulation across daily matchups
+    # Phase 3: Execute Ultimate Monte Carlo Simulation
     run_ultimate_monte_carlo()
     
     print("MLB Engine Pipeline execution completed successfully.")
