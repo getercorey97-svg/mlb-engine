@@ -4,6 +4,7 @@ from datetime import datetime
 
 def ingest_mlb_data():
     print("Initializing Dynamic Data Ingestion with Variance Mapping...")
+    print("Enforcing Absolute Live Verification (ALV) for MLB Schedule...")
     
     conn = sqlite3.connect('mlb_engine.db')
     cursor = conn.cursor()
@@ -51,7 +52,10 @@ def ingest_mlb_data():
             VALUES (?, ?, ?)
         ''', (team_name, unique_bullpen_era, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
 
-    schedule_url = "https://statsapi.mlb.com/api/v1/schedule?sportId=1&hydrate=probablePitcher"
+    # Absolute Live Verification (ALV) Mandate
+    live_date = datetime.now().strftime('%Y-%m-%d')
+    schedule_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={live_date}&hydrate=probablePitcher"
+    
     try:
         sched_res = requests.get(schedule_url, timeout=15).json()
         for date_data in sched_res.get('dates', []):
@@ -73,7 +77,7 @@ def ingest_mlb_data():
 
     conn.commit()
     conn.close()
-    print("Ingestion complete. Unique metrics mapped to eliminate clustering.")
+    print(f"Ingestion complete. ALV mandated for {live_date}. Unique metrics mapped.")
 
 if __name__ == "__main__":
     ingest_mlb_data()
