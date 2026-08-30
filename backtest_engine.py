@@ -8,19 +8,11 @@ def run_backtest_engine(days_back=14):
     print(f"Initializing Engine-Linked Backtesting Framework (Past {days_back} days)...")
     print("Strict Adherence to Factual Post-Mortem Mandate: Zero synthetic data permitted.")
     
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days_back)
+    end_date = datetime.now() - timedelta(days=1)
+    start_date = end_date - timedelta(days=days_back - 1)
     
     start_str = start_date.strftime('%Y-%m-%d')
     end_str = end_date.strftime('%Y-%m-%d')
-    
-    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={start_str}&endDate={end_str}&hydrate=probablePitcher"
-    
-    try:
-        response = requests.get(url, timeout=15).json()
-    except Exception as e:
-        print(f"API Error fetching historical schedule: {e}")
-        return
         
     conn = sqlite3.connect('mlb_engine.db')
     cursor = conn.cursor()
@@ -53,9 +45,7 @@ def run_backtest_engine(days_back=14):
     except sqlite3.OperationalError:
         pass
 
-    # Clear tables ONCE at the start so historical data accumulates properly across all days
-    cursor.execute("DELETE FROM Daily_Lineups")
-    cursor.execute("DELETE FROM Model_Forecasts")
+    # Clear analytics table at start
     cursor.execute("DELETE FROM Post_Match_Analysis")
     conn.commit()
 
@@ -70,20 +60,25 @@ def run_backtest_engine(days_back=14):
     current_date = start_date
     while current_date <= end_date:
         date_str = current_date.strftime('%Y-%m-%d')
-        current_date += timedelta(days=1)
         
         day_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&hydrate=probablePitcher"
         try:
             day_res = requests.get(day_url, timeout=10).json()
         except Exception:
+            current_date += timedelta(days=1)
             continue
             
+        # Isolate tables for the current day to prevent compounding accumulation
+        cursor.execute("DELETE FROM Daily_Lineups")
+        cursor.execute("DELETE FROM Model_Forecasts")
+        conn.commit()
+        
         day_games_count = 0
         games_data = []
         
         for date_data in day_res.get('dates', []):
             for game in date_data.get('games', []):
-                if game['status']['abstractGameState'] != 'Final':
+                if game.get('status', {}).get('abstractGameState') != 'Final':
                     continue
                     
                 game_pk = game['gamePk']
@@ -115,11 +110,12 @@ def run_backtest_engine(days_back=14):
                 day_games_count += 1
         
         if day_games_count == 0:
+            current_date += timedelta(days=1)
             continue
             
         conn.commit()
         
-        # Execute the main engine simulation for this batch date
+        # Execute engine simulation strictly for this isolated day slate
         run_ultimate_monte_carlo()
         
         cursor = conn.cursor()
@@ -162,6 +158,8 @@ def run_backtest_engine(days_back=14):
                 units_won += 0.909
             else:
                 units_won -= 1.000
+
+        current_date += timedelta(days=1)
 
     conn.commit()
     conn.close()
