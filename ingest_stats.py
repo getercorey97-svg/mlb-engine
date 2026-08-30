@@ -43,12 +43,12 @@ def ingest_mlb_data():
         unique_bullpen_era = round(3.70 + ((team_id % 10) * 0.1), 2)
         
         cursor.execute('''
-            INSERT OR REPLACE INTO Team_Offense (team_name, ops, updated_at)
+            INSERT OR IGNORE INTO Team_Offense (team_name, ops, updated_at)
             VALUES (?, ?, ?)
         ''', (team_name, unique_ops, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         
         cursor.execute('''
-            INSERT OR REPLACE INTO Team_Bullpen (team_name, team_era, updated_at)
+            INSERT OR IGNORE INTO Team_Bullpen (team_name, team_era, updated_at)
             VALUES (?, ?, ?)
         ''', (team_name, unique_bullpen_era, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
 
@@ -69,7 +69,7 @@ def ingest_mlb_data():
                         unique_xera = round(3.40 + ((pitcher_id % 20) * 0.09), 2)
                         
                         cursor.execute('''
-                            INSERT OR REPLACE INTO Pitcher_Stats (last_name, est_era, updated_at)
+                            INSERT OR IGNORE INTO Pitcher_Stats (last_name, est_era, updated_at)
                             VALUES (?, ?, ?)
                         ''', (last_name, unique_xera, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
     except Exception as e:
