@@ -73,8 +73,8 @@ def run_ultimate_monte_carlo():
         home_lambda_bullpen = (adj_away_bullpen * home_ops_mult * park_factor) * 0.33
         home_lambda_total = home_lambda_starter + home_lambda_bullpen
         
-        # 4. Execute Stochastic Monte Carlo Simulation (10,000 Iterations) with Variance Capping
-        iterations = 10000
+        # 4. Execute High-Precision Stochastic Monte Carlo Simulation (50,000 Iterations)
+        iterations = 50000
         
         away_sims = np.random.poisson(away_lambda_total, iterations)
         home_sims = np.random.poisson(home_lambda_total, iterations)
@@ -113,8 +113,7 @@ def run_ultimate_monte_carlo():
     conn.commit()
     conn.close()
     print("-" * 60)
-    print("Execution complete. 100% resolution achieved with blowout variance mitigation.")
+    print("Execution complete. High-precision convergence achieved with 50,000 iterations.")
 
 if __name__ == "__main__":
     run_ultimate_monte_carlo()
-
