@@ -33,4 +33,5 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add mlb_engine.db
           git commit -m "Auto-update database with fresh ingestion and simulations [skip ci]" || echo "No changes to commit"
+          git pull --rebase origin main
           git push
