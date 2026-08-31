@@ -81,6 +81,13 @@ def run_ultimate_monte_carlo():
         home_lambda_bullpen = (adj_away_bullpen * home_ops_mult * park_factor * density_multiplier * umpire_multiplier) * 0.33
         home_lambda_total = home_lambda_starter + home_lambda_bullpen
         
+        # --- SAFETY CLAMP: Prevent lam < 0 or NaN crash ---
+        if pd.isna(away_lambda_total) or away_lambda_total < 0.1:
+            away_lambda_total = 3.50
+        if pd.isna(home_lambda_total) or home_lambda_total < 0.1:
+            home_lambda_total = 3.50
+        # --------------------------------------------------
+
         # Calculate Combined Total Runs (Over/Under Line)
         total_runs = away_lambda_total + home_lambda_total
         
@@ -89,7 +96,7 @@ def run_ultimate_monte_carlo():
         
         away_sims = np.random.poisson(away_lambda_total, iterations)
         home_sims = np.random.poisson(home_lambda_total, iterations)
-        
+
         # Resolve Extra Innings (Controlled ghost runner impact)
         ties = away_sims == home_sims
         while np.any(ties):
