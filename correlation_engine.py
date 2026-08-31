@@ -22,7 +22,7 @@ def calculate_pearson_r(x, y):
     return r, "Valid"
 
 def run_correlation_engine():
-    print("Initializing Feature Importance & Correlation Discovery Engine...")
+    print("Initializing SOTA Feature Importance & Correlation Discovery Engine...")
     
     conn = sqlite3.connect('mlb_engine.db')
     cursor = conn.cursor()
@@ -39,23 +39,23 @@ def run_correlation_engine():
     );
     ''')
     
-    # Direct query without hard dependencies on external lookup tables
+    # Direct query pulling core predictions AND the new thermodynamic/environmental variables
     query = '''
     SELECT 
         p.game_pk,
         p.actual_winner,
         p.home_score,
         p.away_score,
-        p.model_correct,
-        m.home_team,
-        m.away_team,
         m.home_prob,
         m.away_prob,
         m.predicted_edge,
         m.predicted_home_runs,
-        m.predicted_away_runs
+        m.predicted_away_runs,
+        COALESCE(dl.air_density, 1.225) AS air_density,
+        COALESCE(dl.uv_modifier, 1.0) AS uv_modifier
     FROM Post_Match_Analysis p
     INNER JOIN Model_Forecasts m ON p.game_pk = m.game_pk
+    LEFT JOIN Daily_Lineups dl ON p.game_pk = dl.game_pk
     WHERE m.predicted_home_runs IS NOT NULL AND m.predicted_away_runs IS NOT NULL
     '''
     
@@ -78,14 +78,16 @@ def run_correlation_engine():
     df['actual_run_diff'] = np.abs(df['home_score'] - df['away_score'])
     df['pred_run_diff'] = np.abs(df['predicted_home_runs'] - df['predicted_away_runs'])
 
-    # Features evaluated against run discrepancy
+    # Features evaluated against run discrepancy (Now includes Air Density & UV Contrast)
     features_to_test = {
         "Model_Predicted_Edge": df['predicted_edge'].values,
         "Projected_Total_Runs": df['total_pred_runs'].values,
         "Home_Win_Probability": df['home_prob'].values,
         "Away_Win_Probability": df['away_prob'].values,
         "Expected_Run_Differential": df['pred_run_diff'].values,
-        "Actual_Blowout_Margin": df['actual_run_diff'].values
+        "Actual_Blowout_Margin": df['actual_run_diff'].values,
+        "Air_Density_Thermodynamics": df['air_density'].values,
+        "UV_Visual_Contrast": df['uv_modifier'].values
     }
 
     current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -110,7 +112,7 @@ def run_correlation_engine():
     conn.commit()
     conn.close()
     print("-" * 65)
-    print("Correlation Engine execution complete. Discrepancy matrix updated.")
+    print("Correlation Engine execution complete. Discrepancy matrix updated with SOTA variables.")
 
 if __name__ == "__main__":
     run_correlation_engine()
