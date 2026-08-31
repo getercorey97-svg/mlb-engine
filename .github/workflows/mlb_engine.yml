@@ -3,7 +3,8 @@ name: MLB Engine Pipeline
 on:
   workflow_dispatch:
   schedule:
-    - cron: '25 15 * * *' # Runs strictly once daily at 3:25 PM UTC (11:25 AM EDT)
+    - cron: '30 15 * * *' # Runs daily at 11:30 AM EDT (Morning pipeline: Statcast & early pitchers)[span_3](start_span)[span_3](end_span)[span_4](start_span)[span_4](end_span)
+    - cron: '0 21 * * *'  # Runs daily at 5:00 PM EDT (Evening pipeline: Night lineups & umpire assignments)
 
 jobs:
   run-engine:
@@ -31,8 +32,7 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add mlb_engine.db
-          git commit -m "Auto-update database with fresh ingestion and simulations [skip ci]" || echo "No changes to commit"
-          git pull --rebase origin main
+          git add -A
+          git commit -m "Auto-update database with fresh pipeline ingestion and simulations [skip ci]" || echo "No changes to commit"
+          git pull --rebase --autostash
           git push
-
