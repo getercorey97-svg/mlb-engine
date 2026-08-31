@@ -27,6 +27,13 @@ def ingest_mlb_data():
         );
     ''')
 
+    # Safely add the updated_at column if tables already exist from an older schema version
+    for table in ['Pitcher_Stats', 'Team_Offense', 'Team_Bullpen']:
+        try:
+            cursor.execute(f'ALTER TABLE {table} ADD COLUMN updated_at TEXT;')
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
     teams_url = "https://statsapi.mlb.com/api/v1/teams?sportId=1"
     try:
         response = requests.get(teams_url, timeout=15).json()
