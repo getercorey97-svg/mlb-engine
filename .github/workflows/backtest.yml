@@ -20,7 +20,7 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests
+          pip install pandas numpy requests scikit-learn lightgbm pybaseball
 
       - name: Run Backtest Framework
         run: python backtest_engine.py
@@ -29,7 +29,16 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add mlb_engine.db
+          
+          # Stage ALL modified or created files to prevent pull conflicts
+          git add -A
+          
+          # Commit the changes, bypassing if there is nothing new
           git commit -m "Auto-update database with backtest analytics [skip ci]" || echo "No changes to commit"
-          git pull --rebase origin main
+          
+          # Pull any remote changes using autostash to prevent overwrite conflicts
+          git pull --rebase --autostash
+          
+          # Push the final payload back to your repository
           git push
+ 
