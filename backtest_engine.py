@@ -80,12 +80,20 @@ def run_backtest_engine(days_back=14):
         );
     ''')
     
-    # Failsafe schema updates 
+    # Failsafe schema updates for Model_Forecasts
     for col in ["predicted_edge REAL", "predicted_home_runs REAL", "predicted_away_runs REAL"]:
         try:
             cursor.execute(f"ALTER TABLE Model_Forecasts ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
+            
+    # Failsafe schema updates for Daily_Lineups (Fixes the OperationalError)
+    for col in ["lineup_status TEXT", "air_density REAL", "status TEXT"]:
+        try:
+            cursor.execute(f"ALTER TABLE Daily_Lineups ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+            
     try:
         cursor.execute("ALTER TABLE Post_Match_Analysis ADD COLUMN processed_at TEXT")
     except sqlite3.OperationalError:
