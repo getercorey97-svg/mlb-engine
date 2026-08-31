@@ -2,8 +2,8 @@ import sqlite3
 import numpy as np
 
 def run_ultimate_monte_carlo():
-    print("Initializing Ultimate Monte Carlo Engine with Dynamic Modifiers & Blowout Variance Dampening...")
-    print("Synthesizing Statcast, Offense, Bullpens, Dynamic Modifiers, and Park Factors...")
+    print("Initializing Ultimate Monte Carlo Engine with Dynamic Modifiers, Air Density & Blowout Variance Dampening...")
+    print("Synthesizing Statcast, Offense, Bullpens, Dynamic Modifiers, Air Density, and Park Factors...")
     
     conn = sqlite3.connect('mlb_engine.db')
     cursor = conn.cursor()
@@ -15,8 +15,8 @@ def run_ultimate_monte_carlo():
         except sqlite3.OperationalError:
             pass
 
-    # Retrieve all active matchups
-    cursor.execute("SELECT game_pk, away_team, home_team, away_pitcher, home_pitcher FROM Daily_Lineups")
+    # Retrieve all active matchups including the new air density metric
+    cursor.execute("SELECT game_pk, away_team, home_team, away_pitcher, home_pitcher, air_density FROM Daily_Lineups")
     games = cursor.fetchall()
     
     if not games:
@@ -35,7 +35,10 @@ def run_ultimate_monte_carlo():
     print("-" * 60)
     
     for game in games:
-        game_pk, away, home, away_pitcher, home_pitcher = game
+        game_pk, away, home, away_pitcher, home_pitcher, air_density = game
+        
+        # Convert Density to an aerodynamic Run Multiplier
+        density_multiplier = 1.000 + ((1.225 - air_density) * 1.5) if air_density else 1.000
         
         # 1. Fetch Dynamic Feedback Modifiers
         away_off_mod = get_metric('Dynamic_Modifiers', 'offensive_modifier', 'team_name', away, 1.000)
@@ -65,12 +68,12 @@ def run_ultimate_monte_carlo():
         adj_home_bullpen = home_bullpen * home_pitch_mod
         adj_away_bullpen = away_bullpen * away_pitch_mod
         
-        away_lambda_starter = (adj_home_starter_xera * away_ops_mult * park_factor) * 0.66
-        away_lambda_bullpen = (adj_home_bullpen * away_ops_mult * park_factor) * 0.33
+        away_lambda_starter = (adj_home_starter_xera * away_ops_mult * park_factor * density_multiplier) * 0.66
+        away_lambda_bullpen = (adj_home_bullpen * away_ops_mult * park_factor * density_multiplier) * 0.33
         away_lambda_total = away_lambda_starter + away_lambda_bullpen
         
-        home_lambda_starter = (adj_away_starter_xera * home_ops_mult * park_factor) * 0.66
-        home_lambda_bullpen = (adj_away_bullpen * home_ops_mult * park_factor) * 0.33
+        home_lambda_starter = (adj_away_starter_xera * home_ops_mult * park_factor * density_multiplier) * 0.66
+        home_lambda_bullpen = (adj_away_bullpen * home_ops_mult * park_factor * density_multiplier) * 0.33
         home_lambda_total = home_lambda_starter + home_lambda_bullpen
         
         # 4. Execute High-Precision Stochastic Monte Carlo Simulation (50,000 Iterations)
@@ -108,7 +111,7 @@ def run_ultimate_monte_carlo():
         ''', (away_prob, home_prob, edge, float(home_lambda_total), float(away_lambda_total), game_pk))
         
         print(f"[{away_pitcher} vs {home_pitcher}]")
-        print(f"SIM: {away} ({away_prob:.1%}) @ {home} ({home_prob:.1%}) | Exp Runs: {away_lambda_total:.2f}-{home_lambda_total:.2f} | Edge: {edge:.3f}\n")
+        print(f"SIM (50k): {away} ({away_prob:.1%}) @ {home} ({home_prob:.1%}) | Exp Runs: {away_lambda_total:.2f}-{home_lambda_total:.2f} | Edge: {edge:.3f}\n")
 
     conn.commit()
     conn.close()
