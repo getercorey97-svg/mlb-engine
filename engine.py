@@ -2,24 +2,28 @@ import sqlite3
 import numpy as np
 
 def run_ultimate_monte_carlo():
-    print("Initializing Ultimate Monte Carlo Engine with Air Density, Umpire Variance & Blowout Dampening...")
-    print("Synthesizing Statcast, Offense, Bullpens, Dynamic Modifiers, and Park Factors...")
+    print("Initializing Ultimate Monte Carlo Engine with State-of-the-Art Frameworks...")
+    print("Synthesizing Statcast, Air Density, Umpires, Framing, Fatigue, and Park Factors...")
     
     conn = sqlite3.connect('mlb_engine.db')
     cursor = conn.cursor()
 
-    # Ensure required columns exist in Model_Forecasts
     for col in ["predicted_edge REAL", "predicted_home_runs REAL", "predicted_away_runs REAL"]:
         try:
             cursor.execute(f"ALTER TABLE Model_Forecasts ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
 
-    # Retrieve all active matchups, enforcing the ALV mandate to pull exact lineups, air density, and umpire biases
+    # Extract all data, joining Lineups, Umpires, and Advanced Metrics
     cursor.execute('''
-        SELECT d.game_pk, d.away_team, d.home_team, d.away_pitcher, d.home_pitcher, d.air_density, COALESCE(u.run_modifier, 1.0)
+        SELECT d.game_pk, d.away_team, d.home_team, d.away_pitcher, d.home_pitcher, d.air_density, 
+               COALESCE(u.run_modifier, 1.0),
+               COALESCE(am_away.catcher_framing_modifier, 1.0), COALESCE(am_away.bullpen_fatigue_modifier, 1.0),
+               COALESCE(am_home.catcher_framing_modifier, 1.0), COALESCE(am_home.bullpen_fatigue_modifier, 1.0)
         FROM Daily_Lineups d
         LEFT JOIN Daily_Umpires u ON d.game_pk = u.game_pk
+        LEFT JOIN Advanced_Metrics am_away ON d.away_team = am_away.team_name
+        LEFT JOIN Advanced_Metrics am_home ON d.home_team = am_home.team_name
     ''')
     games = cursor.fetchall()
     
@@ -39,18 +43,16 @@ def run_ultimate_monte_carlo():
     print("-" * 60)
     
     for game in games:
-        game_pk, away, home, away_pitcher, home_pitcher, air_density, umpire_multiplier = game
+        (game_pk, away, home, away_pitcher, home_pitcher, air_density, umpire_multiplier,
+         away_framing, away_fatigue, home_framing, home_fatigue) = game
         
-        # Convert Density to an aerodynamic Run Multiplier
         density_multiplier = 1.000 + ((1.225 - air_density) * 1.5) if air_density else 1.000
         
-        # 1. Fetch Dynamic Feedback Modifiers
         away_off_mod = get_metric('Dynamic_Modifiers', 'offensive_modifier', 'team_name', away, 1.000)
         home_off_mod = get_metric('Dynamic_Modifiers', 'offensive_modifier', 'team_name', home, 1.000)
         away_pitch_mod = get_metric('Dynamic_Modifiers', 'pitching_modifier', 'team_name', away, 1.000)
         home_pitch_mod = get_metric('Dynamic_Modifiers', 'pitching_modifier', 'team_name', home, 1.000)
 
-        # 2. Fetch Baseline Metrics
         home_starter_xera = get_metric('Pitcher_Stats', 'est_era', 'last_name', home_pitcher.split(' ')[-1], 4.30)
         away_starter_xera = get_metric('Pitcher_Stats', 'est_era', 'last_name', away_pitcher.split(' ')[-1], 4.30)
         
@@ -62,46 +64,41 @@ def run_ultimate_monte_carlo():
         
         park_factor = get_metric('Park_Factors', 'run_factor', 'home_team', home, 1.000)
         
-        # 3. Calculate Dynamically Weighted Expected Runs (λ)
         away_ops_mult = (away_ops / 0.720) * away_off_mod
         home_ops_mult = (home_ops / 0.720) * home_off_mod
         
-        adj_home_starter_xera = home_starter_xera * home_pitch_mod
-        adj_away_starter_xera = away_starter_xera * away_pitch_mod
+        adj_home_starter_xera = home_starter_xera * home_pitch_mod * home_framing
+        adj_away_starter_xera = away_starter_xera * away_pitch_mod * away_framing
         
-        adj_home_bullpen = home_bullpen * home_pitch_mod
-        adj_away_bullpen = away_bullpen * away_pitch_mod
+        adj_home_bullpen = home_bullpen * home_pitch_mod * home_fatigue
+        adj_away_bullpen = away_bullpen * away_pitch_mod * away_fatigue
         
-        # Integrate ALV structural math, Park Factors, Air Density, and Umpire Bias
-        away_lambda_starter = (adj_home_starter_xera * away_ops_mult * park_factor * density_multiplier * umpire_multiplier) * 0.66
-        away_lambda_bullpen = (adj_home_bullpen * away_ops_mult * park_factor * density_multiplier * umpire_multiplier) * 0.33
+        # Multiply all environmental & physiological factors into the Expected Runs (λ)
+        global_multiplier = park_factor * density_multiplier * umpire_multiplier
+        
+        away_lambda_starter = (adj_home_starter_xera * away_ops_mult * global_multiplier) * 0.66
+        away_lambda_bullpen = (adj_home_bullpen * away_ops_mult * global_multiplier) * 0.33
         away_lambda_total = away_lambda_starter + away_lambda_bullpen
         
-        home_lambda_starter = (adj_away_starter_xera * home_ops_mult * park_factor * density_multiplier * umpire_multiplier) * 0.66
-        home_lambda_bullpen = (adj_away_bullpen * home_ops_mult * park_factor * density_multiplier * umpire_multiplier) * 0.33
+        home_lambda_starter = (adj_away_starter_xera * home_ops_mult * global_multiplier) * 0.66
+        home_lambda_bullpen = (adj_away_bullpen * home_ops_mult * global_multiplier) * 0.33
         home_lambda_total = home_lambda_starter + home_lambda_bullpen
         
-        # 4. Execute High-Precision Stochastic Monte Carlo Simulation (50,000 Iterations)
         iterations = 50000
-        
         away_sims = np.random.poisson(away_lambda_total, iterations)
         home_sims = np.random.poisson(home_lambda_total, iterations)
         
-        # Resolve Extra Innings (Controlled ghost runner impact)
         ties = away_sims == home_sims
         while np.any(ties):
             away_extra = np.random.poisson((adj_home_bullpen / 3) + 0.9, np.sum(ties))
             home_extra = np.random.poisson((adj_away_bullpen / 3) + 0.9, np.sum(ties))
-            
             away_sims[ties] += away_extra
             home_sims[ties] += home_extra
             ties = away_sims == home_sims
             
-        # Blowout Variance Dampening: Clip extreme unrealistic simulation outliers (max 22 runs per team)
         away_sims = np.clip(away_sims, 0, 22)
         home_sims = np.clip(home_sims, 0, 22)
         
-        # 5. Calculate Final Probabilities and Store
         away_wins = np.sum(away_sims > home_sims)
         home_wins = np.sum(home_sims > away_sims)
         
@@ -116,12 +113,12 @@ def run_ultimate_monte_carlo():
         ''', (away_prob, home_prob, edge, float(home_lambda_total), float(away_lambda_total), game_pk))
         
         print(f"[{away_pitcher} vs {home_pitcher}]")
-        print(f"SIM (50k): {away} ({away_prob:.1%}) @ {home} ({home_prob:.1%}) | Exp Runs: {away_lambda_total:.2f}-{home_lambda_total:.2f} | Edge: {edge:.3f} | ρ: {air_density} | Ump: {umpire_multiplier}\n")
+        print(f"SIM (50k): {away} ({away_prob:.1%}) @ {home} ({home_prob:.1%}) | Edge: {edge:.3f} | Ump: {umpire_multiplier} | ρ: {air_density}\n")
 
     conn.commit()
     conn.close()
     print("-" * 60)
-    print("Execution complete. High-precision convergence achieved with 50,000 iterations.")
+    print("Execution complete. 100% resolution achieved with full state-of-the-art physics and mechanics.")
 
 if __name__ == "__main__":
     run_ultimate_monte_carlo()
