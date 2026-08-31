@@ -15,7 +15,7 @@ HISTORICAL_UMPIRE_BIAS = {
     "Default": 1.000
 }
 
-# Centralized coordinates for Air Density
+# Centralized coordinates for Air Density & UV
 STADIUMS = {
     "Atlanta Braves": (33.8907, -84.4677),
     "Colorado Rockies": (39.7559, -104.9942),
@@ -25,8 +25,8 @@ STADIUMS = {
     "Default": (39.8283, -98.5795)
 }
 
-def get_historical_air_density(team_name, date_str):
-    """Calculates historical stadium air density using Open-Meteo Archive API."""
+def get_historical_atmosphere(team_name, date_str):
+    """Calculates historical stadium air density using Open-Meteo Archive API[span_1](start_span)[span_1](end_span)."""
     coords = STADIUMS.get(team_name, STADIUMS["Default"])
     url = "https://archive-api.open-meteo.com/v1/archive"
     params = {
@@ -34,19 +34,23 @@ def get_historical_air_density(team_name, date_str):
         "longitude": coords[1],
         "start_date": date_str,
         "end_date": date_str,
-        "hourly": "surface_pressure,temperature_2m"
+        "hourly": "surface_pressure,temperature_2m,cloud_cover"
     }
     try:
         res = requests.get(url, params=params, timeout=10).json()
-        # Extract mid-day atmospheric conditions
+        # Extract mid-day atmospheric conditions[span_2](start_span)[span_2](end_span)
         temp_c = res['hourly']['temperature_2m'][12] 
         pressure_hpa = res['hourly']['surface_pressure'][12]
+        clouds = res['hourly']['cloud_cover'][12]
         
         temp_k = temp_c + 273.15
         pressure_pa = pressure_hpa * 100
-        return round(pressure_pa / (287.05 * temp_k), 4)
+        density = round(pressure_pa / (287.05 * temp_k), 4)
+        
+        uv_modifier = 1.03 if clouds > 70 else 1.00
+        return density, uv_modifier
     except Exception:
-        return 1.225
+        return 1.225, 1.00
 
 def run_backtest_engine(days_back=14):
     print(f"Initializing Historical Seeding Framework with Air Density & Umpires (Past {days_back} days)...")
@@ -60,7 +64,7 @@ def run_backtest_engine(days_back=14):
     conn = sqlite3.connect('mlb_engine.db')
     cursor = conn.cursor()
     
-    # Securely build the required schemas before simulating
+    # Securely build the required schemas before simulating to prevent crashes[span_3](start_span)[span_3](end_span)
     cursor.executescript('''
         CREATE TABLE IF NOT EXISTS Model_Forecasts (
             game_pk INTEGER PRIMARY KEY, home_team TEXT, away_team TEXT, 
@@ -73,32 +77,23 @@ def run_backtest_engine(days_back=14):
         );
         CREATE TABLE IF NOT EXISTS Daily_Lineups (
             game_pk INTEGER PRIMARY KEY, away_team TEXT, home_team TEXT, 
-            away_pitcher TEXT, home_pitcher TEXT, lineup_status TEXT, air_density REAL, status TEXT
+            away_pitcher TEXT, home_pitcher TEXT, lineup_status TEXT, 
+            air_density REAL, uv_modifier REAL, status TEXT
         );
         CREATE TABLE IF NOT EXISTS Daily_Umpires (
             game_pk INTEGER PRIMARY KEY, home_plate_umpire TEXT, run_modifier REAL
         );
+        CREATE TABLE IF NOT EXISTS Biological_Modifiers (
+            team_name TEXT PRIMARY KEY, jet_lag_runs_penalty REAL
+        );
+        CREATE TABLE IF NOT EXISTS Dynamic_Modifiers (
+            team_name TEXT PRIMARY KEY,
+            offensive_modifier REAL DEFAULT 1.0,
+            pitching_modifier REAL DEFAULT 1.0,
+            last_updated TEXT
+        );
     ''')
     
-    # Failsafe schema updates for Model_Forecasts
-    for col in ["predicted_edge REAL", "predicted_home_runs REAL", "predicted_away_runs REAL"]:
-        try:
-            cursor.execute(f"ALTER TABLE Model_Forecasts ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
-            
-    # Failsafe schema updates for Daily_Lineups (Fixes the OperationalError)
-    for col in ["lineup_status TEXT", "air_density REAL", "status TEXT"]:
-        try:
-            cursor.execute(f"ALTER TABLE Daily_Lineups ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
-            
-    try:
-        cursor.execute("ALTER TABLE Post_Match_Analysis ADD COLUMN processed_at TEXT")
-    except sqlite3.OperationalError:
-        pass
-
     cursor.execute("DELETE FROM Post_Match_Analysis")
     conn.commit()
 
@@ -114,7 +109,7 @@ def run_backtest_engine(days_back=14):
     while current_date <= end_date:
         date_str = current_date.strftime('%Y-%m-%d')
         
-        # Pull historical lineup AND official umpire assignments
+        # Pull historical lineup AND official umpire assignments[span_4](start_span)[span_4](end_span)
         day_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&hydrate=probablePitcher,officials"
         try:
             day_res = requests.get(day_url, timeout=10).json()
@@ -144,7 +139,6 @@ def run_backtest_engine(days_back=14):
                 home_pitcher = game['teams']['home'].get('probablePitcher', {}).get('fullName', 'Unknown Pitcher')
                 away_pitcher = game['teams']['away'].get('probablePitcher', {}).get('fullName', 'Unknown Pitcher')
                 
-                # Umpire Isolation
                 officials = game.get('officials', [])
                 hp_umpire = "Unknown / TBD"
                 for official in officials:
@@ -153,13 +147,12 @@ def run_backtest_engine(days_back=14):
                         break
                 run_modifier = HISTORICAL_UMPIRE_BIAS.get(hp_umpire, HISTORICAL_UMPIRE_BIAS["Default"])
                 
-                # Air Density Isolation
-                air_density = get_historical_air_density(home_team, date_str)
+                air_density, uv_mod = get_historical_atmosphere(home_team, date_str)
                 
                 cursor.execute('''
-                    INSERT OR REPLACE INTO Daily_Lineups (game_pk, away_team, home_team, away_pitcher, home_pitcher, lineup_status, air_density, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (game_pk, away_team, home_team, away_pitcher, home_pitcher, "Confirmed", air_density, "Final"))
+                    INSERT OR REPLACE INTO Daily_Lineups (game_pk, away_team, home_team, away_pitcher, home_pitcher, lineup_status, air_density, uv_modifier, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (game_pk, away_team, home_team, away_pitcher, home_pitcher, "Confirmed", air_density, uv_mod, "Final"))
                 
                 cursor.execute('''
                     INSERT OR REPLACE INTO Daily_Umpires (game_pk, home_plate_umpire, run_modifier)
@@ -186,7 +179,7 @@ def run_backtest_engine(days_back=14):
             
         conn.commit()
         
-        # Triggers engine.py directly, which now utilizes the umpires and weather seeded above
+        # Triggers engine.py directly[span_5](start_span)[span_5](end_span)
         run_ultimate_monte_carlo()
         
         cursor = conn.cursor()
@@ -232,7 +225,6 @@ def run_backtest_engine(days_back=14):
 
         current_date += timedelta(days=1)
 
-    # Securely close all SQLite operations at the end of execution
     conn.commit()
     conn.close()
     
