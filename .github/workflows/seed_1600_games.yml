@@ -1,0 +1,43 @@
+name: Seed 1600 SOTA Games
+
+on:
+  workflow_dispatch: # Allows you to manually trigger the workflow from the Actions tab[span_2](start_span)[span_2](end_span)[span_3](start_span)[span_3](end_span)
+
+jobs:
+  seed-database:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas numpy
+
+      - name: Run Historical Seeding Script
+        run: python seed_1600_sota_engine.py
+
+      - name: Commit and Push Updated Database
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Stage ALL modified or created files to prevent pull conflicts[span_4](start_span)[span_4](end_span)
+          git add -A
+          
+          # Commit the changes, bypassing if there is nothing new[span_5](start_span)[span_5](end_span)
+          git commit -m "Seed 1600 historical MLB games with thermodynamics [skip ci]" || echo "No changes to commit"
+          
+          # Pull any remote changes using autostash to prevent overwrite conflicts[span_6](start_span)[span_6](end_span)
+          git pull --rebase --autostash
+          
+          # Push the final payload back to your repository[span_7](start_span)[span_7](end_span)
+          git push
