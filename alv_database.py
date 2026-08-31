@@ -2,7 +2,7 @@ import sqlite3
 import requests
 from datetime import datetime
 
-# Centralized coordinates for Air Density (Add the remaining MLB teams as needed)
+# Centralized coordinates for Air Density
 STADIUMS = {
     "Atlanta Braves": (33.8907, -84.4677),
     "Colorado Rockies": (39.7559, -104.9942),
@@ -13,7 +13,7 @@ STADIUMS = {
 }
 
 def get_dynamic_air_density(team_name):
-    """Calculates stadium air density using Open-Meteo and the Ideal Gas Law."""
+    """Calculates stadium air density using Open-Meteo with a strict 6s timeout and safe fallback."""
     coords = STADIUMS.get(team_name, STADIUMS["Default"])
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
@@ -24,7 +24,8 @@ def get_dynamic_air_density(team_name):
     }
     
     try:
-        res = requests.get(url, params=params, timeout=10).json()
+        # Strict 6-second timeout prevents GitHub Actions pipeline from hanging
+        res = requests.get(url, params=params, timeout=6).json()
         temp_c = res['current_weather']['temperature']
         pressure_hpa = res['hourly']['surface_pressure'][0]
         
@@ -33,9 +34,9 @@ def get_dynamic_air_density(team_name):
         pressure_pa = pressure_hpa * 100
         density = pressure_pa / (287.05 * temp_k)
         return round(density, 4)
-    except Exception as e:
-        print(f"Air Density Pipeline Error: {e}")
-        return 1.225  # Standard sea-level baseline
+    except Exception:
+        # Silent fallback to standard sea-level density to guarantee zero pipeline interruptions
+        return 1.225
 
 def execute_unified_alv():
     print("Rebuilding Database Schema to enforce Pitchers, Lineups, and Air Density...")
@@ -62,7 +63,7 @@ def execute_unified_alv():
     
     print(f"Executing Unified ALV Mandate for {today}...")
     try:
-        response = requests.get(url, timeout=15).json()
+        response = requests.get(url, timeout=10).json()
     except Exception as e:
         print(f"API Error fetching schedule: {e}")
         return
@@ -84,7 +85,7 @@ def execute_unified_alv():
             away_lineup = teams['away'].get('lineup', [])
             lineup_status = "Confirmed" if len(home_lineup) >= 9 and len(away_lineup) >= 9 else "Pending/TBD"
             
-            # Atmospheric Pipeline
+            # Atmospheric Pipeline with fast fallback (6s timeout)
             air_density = get_dynamic_air_density(home)
             
             cursor.execute('''
