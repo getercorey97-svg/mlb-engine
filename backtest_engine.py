@@ -26,7 +26,7 @@ STADIUMS = {
 }
 
 def get_historical_atmosphere(team_name, date_str):
-    """Calculates historical stadium air density using Open-Meteo Archive API[span_1](start_span)[span_1](end_span)."""
+    """Calculates historical stadium air density using Open-Meteo Archive API."""
     coords = STADIUMS.get(team_name, STADIUMS["Default"])
     url = "https://archive-api.open-meteo.com/v1/archive"
     params = {
@@ -38,7 +38,6 @@ def get_historical_atmosphere(team_name, date_str):
     }
     try:
         res = requests.get(url, params=params, timeout=10).json()
-        # Extract mid-day atmospheric conditions[span_2](start_span)[span_2](end_span)
         temp_c = res['hourly']['temperature_2m'][12] 
         pressure_hpa = res['hourly']['surface_pressure'][12]
         clouds = res['hourly']['cloud_cover'][12]
@@ -64,8 +63,12 @@ def run_backtest_engine(days_back=14):
     conn = sqlite3.connect('mlb_engine.db')
     cursor = conn.cursor()
     
-    # Securely build the required schemas before simulating to prevent crashes[span_3](start_span)[span_3](end_span)
+    # Drop stale temporary tables to force a schema rebuild with new SOTA variables
     cursor.executescript('''
+        DROP TABLE IF EXISTS Daily_Lineups;
+        DROP TABLE IF EXISTS Model_Forecasts;
+        DROP TABLE IF EXISTS Daily_Umpires;
+        
         CREATE TABLE IF NOT EXISTS Model_Forecasts (
             game_pk INTEGER PRIMARY KEY, home_team TEXT, away_team TEXT, 
             home_prob REAL, away_prob REAL, predicted_edge REAL, 
@@ -109,7 +112,6 @@ def run_backtest_engine(days_back=14):
     while current_date <= end_date:
         date_str = current_date.strftime('%Y-%m-%d')
         
-        # Pull historical lineup AND official umpire assignments[span_4](start_span)[span_4](end_span)
         day_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&hydrate=probablePitcher,officials"
         try:
             day_res = requests.get(day_url, timeout=10).json()
@@ -179,7 +181,6 @@ def run_backtest_engine(days_back=14):
             
         conn.commit()
         
-        # Triggers engine.py directly[span_5](start_span)[span_5](end_span)
         run_ultimate_monte_carlo()
         
         cursor = conn.cursor()
