@@ -3,12 +3,13 @@ name: MLB Engine Pipeline
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 15 * * *' # Runs daily at 11:30 AM EDT (Morning pipeline: Statcast & early pitchers)[span_3](start_span)[span_3](end_span)[span_4](start_span)[span_4](end_span)
+    - cron: '30 15 * * *' # Runs daily at 11:30 AM EDT (Morning pipeline: Statcast & early pitchers)
     - cron: '0 21 * * *'  # Runs daily at 5:00 PM EDT (Evening pipeline: Night lineups & umpire assignments)
 
 jobs:
   run-engine:
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' # Prevents duplicate schedule runs on secondary branches
     permissions:
       contents: write
     steps:
@@ -23,7 +24,7 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests
+          pip install pandas numpy requests scikit-learn
 
       - name: Run Full Pipeline (Ingestion + Monte Carlo)
         run: python run_pipeline.py
