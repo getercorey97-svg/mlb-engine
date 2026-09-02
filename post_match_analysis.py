@@ -3,22 +3,27 @@ import requests
 from datetime import datetime, timedelta
 
 def update_dynamic_weights(cursor, name, predicted_runs, actual_runs, is_offense=True, is_pitcher=False):
-    """Calculates Error Delta and dynamically updates either Team or Pitcher modifiers."""
-    LEARNING_RATE = 0.02
+    """Calculates Error Delta and applies an Adaptive Learning Rate with a 0.47 Volatility Ceiling."""
     error_delta = actual_runs - predicted_runs
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Adaptive Learning Rate: Scales dynamically based on error magnitude
+    base_lr = 0.015
+    adaptive_lr = min(0.08, base_lr + (abs(error_delta) * 0.005))
     
     if is_pitcher:
         cursor.execute('SELECT f5_run_modifier FROM Pitcher_Modifiers WHERE pitcher_name = ?', (name,))
         result = cursor.fetchone()
         mod = result[0] if result else 1.0
-        new_mod = max(0.80, min(1.20, mod + (error_delta * LEARNING_RATE)))
+        
+        # 0.47 Volatility Ceiling (Limits modifiers to +/- 47% from baseline 1.0)
+        new_mod = max(0.53, min(1.47, mod + (error_delta * adaptive_lr)))
         
         cursor.execute('''
             INSERT OR REPLACE INTO Pitcher_Modifiers (pitcher_name, f5_run_modifier, last_updated) 
             VALUES (?, ?, ?)
         ''', (name, new_mod, current_time))
-        print(f"  [Micro-Evolution] {name} F5 SP Modifier: {mod:.3f} -> {new_mod:.3f}")
+        print(f"  [Micro-Evolution] {name} F5 SP Modifier: {mod:.3f} -> {new_mod:.3f} (LR: {adaptive_lr:.3f})")
         return
 
     cursor.execute('SELECT offensive_modifier, pitching_modifier FROM Dynamic_Modifiers WHERE team_name = ?', (name,))
@@ -27,13 +32,13 @@ def update_dynamic_weights(cursor, name, predicted_runs, actual_runs, is_offense
     off_mod, pitch_mod = result
     
     if is_offense:
-        new_off_mod = max(0.85, min(1.15, off_mod + (error_delta * LEARNING_RATE)))
+        new_off_mod = max(0.53, min(1.47, off_mod + (error_delta * adaptive_lr)))
         cursor.execute('UPDATE Dynamic_Modifiers SET offensive_modifier = ?, last_updated = ? WHERE team_name = ?', (new_off_mod, current_time, name))
-        print(f"  [Dynamic Update] {name} Offense: {off_mod:.3f} -> {new_off_mod:.3f} (Delta: {error_delta:+.2f})")
+        print(f"  [Dynamic Update] {name} Offense: {off_mod:.3f} -> {new_off_mod:.3f} (LR: {adaptive_lr:.3f})")
     else:
-        new_pitch_mod = max(0.85, min(1.15, pitch_mod + (error_delta * LEARNING_RATE)))
+        new_pitch_mod = max(0.53, min(1.47, pitch_mod + (error_delta * adaptive_lr)))
         cursor.execute('UPDATE Dynamic_Modifiers SET pitching_modifier = ?, last_updated = ? WHERE team_name = ?', (new_pitch_mod, current_time, name))
-        print(f"  [Dynamic Update] {name} Pitching: {pitch_mod:.3f} -> {new_pitch_mod:.3f} (Delta: {error_delta:+.2f})")
+        print(f"  [Dynamic Update] {name} Pitching: {pitch_mod:.3f} -> {new_pitch_mod:.3f} (LR: {adaptive_lr:.3f})")
 
 def run_post_match_analysis():
     print("Executing Factual Post-Mortem (Full Game & F5 Linescores)...")
@@ -51,6 +56,12 @@ def run_post_match_analysis():
         pitcher_name TEXT PRIMARY KEY, k_modifier REAL DEFAULT 1.0, f5_run_modifier REAL DEFAULT 1.0, last_updated TEXT
     );
     ''')
+
+    for col in ["home_f5_score INTEGER", "away_f5_score INTEGER"]:
+        try:
+            cursor.execute(f"ALTER TABLE Post_Match_Analysis ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
     
     for date_str in dates_to_check:
         url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&hydrate=linescore,probablePitcher"
@@ -80,13 +91,11 @@ def run_post_match_analysis():
                     h_f5 += inning.get('home', {}).get('runs', 0)
                     a_f5 += inning.get('away', {}).get('runs', 0)
                 
-                # Full Game Forecast
                 try:
                     cursor.execute('SELECT home_prob, away_prob, predicted_home_runs, predicted_away_runs FROM Model_Forecasts WHERE game_pk = ?', (game_pk,))
                     fg_fc = cursor.fetchone()
                 except sqlite3.OperationalError: fg_fc = None
                 
-                # F5 Forecast
                 try:
                     cursor.execute('SELECT f5_exp_home_runs, f5_exp_away_runs FROM F5_Forecasts WHERE game_pk = ?', (game_pk,))
                     f5_fc = cursor.fetchone()
@@ -102,7 +111,6 @@ def run_post_match_analysis():
                     update_dynamic_weights(cursor, home_team, fg_fc[3], away_score, is_offense=False)
                 
                 if f5_fc:
-                    # Update starting pitcher specific parameters based on F5 results
                     update_dynamic_weights(cursor, home_p, f5_fc[0], away_f5, is_pitcher=True)
                     update_dynamic_weights(cursor, away_p, f5_fc[1], home_f5, is_pitcher=True)
 
