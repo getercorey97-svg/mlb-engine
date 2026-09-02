@@ -3,20 +3,18 @@ import requests
 from datetime import datetime, timedelta
 
 def update_dynamic_weights(cursor, name, predicted_runs, actual_runs, is_offense=True, is_pitcher=False):
-    """Calculates Error Delta and applies an Adaptive Learning Rate with a 0.47 Volatility Ceiling."""
+    """Calculates Error Delta and applies an Adaptive Learning Rate with a Volatility Ceiling."""
     error_delta = actual_runs - predicted_runs
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # Adaptive Learning Rate: Scales dynamically based on error magnitude
-    base_lr = 0.015
-    adaptive_lr = min(0.08, base_lr + (abs(error_delta) * 0.005))
+    base_lr = 0.03
+    adaptive_lr = min(0.15, base_lr + (abs(error_delta) * 0.015))
     
     if is_pitcher:
         cursor.execute('SELECT f5_run_modifier FROM Pitcher_Modifiers WHERE pitcher_name = ?', (name,))
         result = cursor.fetchone()
         mod = result[0] if result else 1.0
         
-        # 0.47 Volatility Ceiling (Limits modifiers to +/- 47% from baseline 1.0)
         new_mod = max(0.53, min(1.47, mod + (error_delta * adaptive_lr)))
         
         cursor.execute('''
@@ -44,8 +42,10 @@ def run_post_match_analysis():
     print("Executing Factual Post-Mortem (Full Game & F5 Linescores)...")
     dates_to_check = [(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'), datetime.now().strftime('%Y-%m-%d')]
     
-    conn = sqlite3.connect('mlb_engine.db')
+    conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL;")
+    cursor.execute("PRAGMA busy_timeout=10000;")
     
     cursor.executescript('''
     CREATE TABLE IF NOT EXISTS Post_Match_Analysis (
@@ -84,7 +84,7 @@ def run_post_match_analysis():
                 
                 actual_winner = home_team if home_score > away_score else away_team
                 
-                # F5 Linescore Extraction
+                # F5 Linescore Extraction (Using consistent variable names h_f5 and a_f5)
                 linescore = game.get('linescore', {}).get('innings', [])
                 h_f5, a_f5 = 0, 0
                 for inning in linescore[:5]:
@@ -111,8 +111,9 @@ def run_post_match_analysis():
                     update_dynamic_weights(cursor, home_team, fg_fc[3], away_score, is_offense=False)
                 
                 if f5_fc:
-                    update_dynamic_weights(cursor, home_p, f5_fc[0], away_f5, is_pitcher=True)
-                    update_dynamic_weights(cursor, away_p, f5_fc[1], home_f5, is_pitcher=True)
+                    # Corrected to use defined variables h_f5 and a_f5
+                    update_dynamic_weights(cursor, home_p, f5_fc[0], a_f5, is_pitcher=True)
+                    update_dynamic_weights(cursor, away_p, f5_fc[1], h_f5, is_pitcher=True)
 
                 cursor.execute('''
                     INSERT OR REPLACE INTO Post_Match_Analysis (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
