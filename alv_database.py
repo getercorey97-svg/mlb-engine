@@ -1,5 +1,7 @@
 import sqlite3
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from datetime import datetime
 
 # Centralized coordinates for Air Density
@@ -15,30 +17,42 @@ STADIUMS = {
     "Default": (39.8283, -98.5795)
 }
 
-def get_dynamic_air_density(team_name):
-    """Calculates stadium air density using Open-Meteo and the Ideal Gas Law."""
+def get_robust_session():
+    """Builds a requests session that auto-retries on timeouts or server drops."""
+    session = requests.Session()
+    retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+    return session
+
+def get_dynamic_atmosphere(team_name, session):
+    """Calculates stadium air density and UV contrast using Open-Meteo."""
     coords = STADIUMS.get(team_name, STADIUMS["Default"])
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": coords[0],
         "longitude": coords[1],
         "current_weather": True,
-        "hourly": "surface_pressure"
+        "hourly": "surface_pressure,cloud_cover"
     }
     
     try:
-        res = requests.get(url, params=params, timeout=10).json()
+        res = session.get(url, params=params, timeout=10).json()
         temp_c = res['current_weather']['temperature']
         pressure_hpa = res['hourly']['surface_pressure'][0]
+        cloud_cover = res['hourly']['cloud_cover'][0]
         
         # Corrected Ideal Gas Law: ρ = P / (R * T)
         temp_k = temp_c + 273.15
         pressure_pa = pressure_hpa * 100
-        density = pressure_pa / (287.05 * temp_k)
-        return round(density, 4)
+        density = round(pressure_pa / (287.05 * temp_k), 4)
+        
+        # UV Contrast Logic
+        uv_modifier = 1.03 if cloud_cover > 70 else 1.00
+        
+        return density, uv_modifier
     except Exception as e:
-        print(f"Air Density Pipeline Error: {e}")
-        return 1.225  # Standard sea-level baseline
+        print(f"Atmospheric Pipeline fell back to standard due to API lag: {e}")
+        return 1.225, 1.00
 
 def execute_unified_alv():
     print("Rebuilding Database Schema to enforce Pitchers, Lineups, and Air Density...")
@@ -56,6 +70,7 @@ def execute_unified_alv():
         home_pitcher TEXT,
         lineup_status TEXT,
         air_density REAL,
+        uv_modifier REAL,
         status TEXT
     );
     ''')
@@ -63,11 +78,14 @@ def execute_unified_alv():
     today = datetime.now().strftime('%Y-%m-%d')
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today}&hydrate=probablePitcher,lineups"
     
+    session = get_robust_session()
     print(f"Executing Unified ALV Mandate for {today}...")
+    
     try:
-        response = requests.get(url, timeout=15).json()
+        response = session.get(url, timeout=15).json()
     except Exception as e:
         print(f"API Error fetching schedule: {e}")
+        conn.close()
         return
 
     for date_data in response.get('dates', []):
@@ -86,15 +104,15 @@ def execute_unified_alv():
             away_lineup = teams['away'].get('lineup', [])
             lineup_status = "Confirmed" if len(home_lineup) >= 9 and len(away_lineup) >= 9 else "Pending/TBD"
             
-            # Fetch Corrected Air Density
-            air_density = get_dynamic_air_density(home)
+            # Fetch Corrected Air Density and UV
+            air_density, uv_modifier = get_dynamic_atmosphere(home, session)
             
             cursor.execute('''
-            INSERT INTO Daily_Lineups (game_pk, game_date, away_team, home_team, away_pitcher, home_pitcher, lineup_status, air_density, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (game_pk, today, away, home, away_pitcher, home_pitcher, lineup_status, air_density, status))
+            INSERT INTO Daily_Lineups (game_pk, game_date, away_team, home_team, away_pitcher, home_pitcher, lineup_status, air_density, uv_modifier, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (game_pk, today, away, home, away_pitcher, home_pitcher, lineup_status, air_density, uv_modifier, status))
             
-            print(f"Verified & Mapped: {away} @ {home} | ρ: {air_density}")
+            print(f"Verified & Mapped: {away} @ {home} | ρ: {air_density} | UV: {uv_modifier}")
 
     conn.commit()
     print("-" * 50)
