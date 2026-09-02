@@ -2,124 +2,118 @@ import sqlite3
 import requests
 from datetime import datetime, timedelta
 
-def update_dynamic_weights(cursor, team_name, predicted_runs, actual_runs, is_offense=True):
-    """
-    Calculates the Factual Error Delta and updates the Dynamic_Modifiers table.
-    Learning rate is set to 0.02 with clamps between 0.85 and 1.15.
-    """
+def update_dynamic_weights(cursor, name, predicted_runs, actual_runs, is_offense=True, is_pitcher=False):
+    """Calculates Error Delta and dynamically updates either Team or Pitcher modifiers."""
     LEARNING_RATE = 0.02
     error_delta = actual_runs - predicted_runs
-    
-    cursor.execute('SELECT offensive_modifier, pitching_modifier FROM Dynamic_Modifiers WHERE team_name = ?', (team_name,))
-    result = cursor.fetchone()
-    
-    if not result:
-        return
-        
-    off_mod, pitch_mod = result
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
+    if is_pitcher:
+        cursor.execute('SELECT f5_run_modifier FROM Pitcher_Modifiers WHERE pitcher_name = ?', (name,))
+        result = cursor.fetchone()
+        mod = result[0] if result else 1.0
+        new_mod = max(0.80, min(1.20, mod + (error_delta * LEARNING_RATE)))
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO Pitcher_Modifiers (pitcher_name, f5_run_modifier, last_updated) 
+            VALUES (?, ?, ?)
+        ''', (name, new_mod, current_time))
+        print(f"  [Micro-Evolution] {name} F5 SP Modifier: {mod:.3f} -> {new_mod:.3f}")
+        return
+
+    cursor.execute('SELECT offensive_modifier, pitching_modifier FROM Dynamic_Modifiers WHERE team_name = ?', (name,))
+    result = cursor.fetchone()
+    if not result: return
+    off_mod, pitch_mod = result
+    
     if is_offense:
-        new_off_mod = off_mod + (error_delta * LEARNING_RATE)
-        new_off_mod = max(0.85, min(1.15, new_off_mod))
-        
-        cursor.execute('''
-            UPDATE Dynamic_Modifiers 
-            SET offensive_modifier = ?, last_updated = ? 
-            WHERE team_name = ?
-        ''', (new_off_mod, current_time, team_name))
-        print(f"  [Dynamic Weight Update] {team_name} Offensive Modifier: {off_mod:.3f} -> {new_off_mod:.3f} (Delta: {error_delta:+.2f})")
+        new_off_mod = max(0.85, min(1.15, off_mod + (error_delta * LEARNING_RATE)))
+        cursor.execute('UPDATE Dynamic_Modifiers SET offensive_modifier = ?, last_updated = ? WHERE team_name = ?', (new_off_mod, current_time, name))
+        print(f"  [Dynamic Update] {name} Offense: {off_mod:.3f} -> {new_off_mod:.3f} (Delta: {error_delta:+.2f})")
     else:
-        new_pitch_mod = pitch_mod + (error_delta * LEARNING_RATE)
-        new_pitch_mod = max(0.85, min(1.15, new_pitch_mod))
-        
-        cursor.execute('''
-            UPDATE Dynamic_Modifiers 
-            SET pitching_modifier = ?, last_updated = ? 
-            WHERE team_name = ?
-        ''', (new_pitch_mod, current_time, team_name))
-        print(f"  [Dynamic Weight Update] {team_name} Pitching Modifier: {pitch_mod:.3f} -> {new_pitch_mod:.3f} (Delta: {error_delta:+.2f})")
+        new_pitch_mod = max(0.85, min(1.15, pitch_mod + (error_delta * LEARNING_RATE)))
+        cursor.execute('UPDATE Dynamic_Modifiers SET pitching_modifier = ?, last_updated = ? WHERE team_name = ?', (new_pitch_mod, current_time, name))
+        print(f"  [Dynamic Update] {name} Pitching: {pitch_mod:.3f} -> {new_pitch_mod:.3f} (Delta: {error_delta:+.2f})")
 
 def run_post_match_analysis():
-    print("Executing Factual Post-Mortem: Pulling daily outcomes...")
-    
-    dates_to_check = [
-        (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),
-        datetime.now().strftime('%Y-%m-%d')
-    ]
+    print("Executing Factual Post-Mortem (Full Game & F5 Linescores)...")
+    dates_to_check = [(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'), datetime.now().strftime('%Y-%m-%d')]
     
     conn = sqlite3.connect('mlb_engine.db')
     cursor = conn.cursor()
     
     cursor.executescript('''
     CREATE TABLE IF NOT EXISTS Post_Match_Analysis (
-        game_pk INTEGER PRIMARY KEY,
-        actual_winner TEXT,
-        home_score INTEGER,
-        away_score INTEGER,
-        model_correct INTEGER,
-        processed_at TEXT
+        game_pk INTEGER PRIMARY KEY, actual_winner TEXT, home_score INTEGER, away_score INTEGER, 
+        home_f5_score INTEGER, away_f5_score INTEGER, model_correct INTEGER, processed_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS Pitcher_Modifiers (
+        pitcher_name TEXT PRIMARY KEY, k_modifier REAL DEFAULT 1.0, f5_run_modifier REAL DEFAULT 1.0, last_updated TEXT
     );
     ''')
     
     for date_str in dates_to_check:
-        url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}"
-        try:
-            response = requests.get(url, timeout=10).json()
-        except Exception as e:
-            print(f"Could not retrieve schedule for {date_str}: {e}")
-            continue
+        url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&hydrate=linescore,probablePitcher"
+        try: response = requests.get(url, timeout=10).json()
+        except Exception as e: continue
 
         for date_data in response.get('dates', []):
             for game in date_data.get('games', []):
                 game_pk = game['gamePk']
-                status = game['status']['abstractGameState']
+                if game['status']['abstractGameState'] != 'Final': continue
                 
-                if status == 'Final':
-                    cursor.execute("SELECT game_pk FROM Post_Match_Analysis WHERE game_pk = ?", (game_pk,))
-                    if cursor.fetchone():
-                        continue
+                cursor.execute("SELECT game_pk FROM Post_Match_Analysis WHERE game_pk = ?", (game_pk,))
+                if cursor.fetchone(): continue
 
-                    teams = game.get('teams', {})
-                    home_team = teams['home']['team']['name']
-                    away_team = teams['away']['team']['name']
-                    home_score = teams['home'].get('score', 0)
-                    away_score = teams['away'].get('score', 0)
-                    
-                    actual_winner = home_team if home_score > away_score else away_team
-                    
-                    try:
-                        cursor.execute('''
-                            SELECT home_prob, away_prob, predicted_home_runs, predicted_away_runs 
-                            FROM Model_Forecasts 
-                            WHERE game_pk = ?
-                        ''', (game_pk,))
-                        forecast = cursor.fetchone()
-                    except sqlite3.OperationalError:
-                        forecast = None
-                    
-                    if forecast:
-                        home_prob, away_prob, pred_home_runs, pred_away_runs = forecast
-                        predicted_winner = home_team if home_prob > away_prob else away_team
-                        model_correct = 1 if predicted_winner == actual_winner else 0
-                        
-                        cursor.execute('''
-                        INSERT OR REPLACE INTO Post_Match_Analysis (game_pk, actual_winner, home_score, away_score, model_correct, processed_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        ''', (game_pk, actual_winner, home_score, away_score, model_correct, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-                        
-                        print(f"Post-Mortem Game {game_pk}: Winner: {actual_winner} ({home_score}-{away_score}) | Model Correct: {bool(model_correct)}")
-                        
-                        if pred_home_runs is not None and pred_away_runs is not None:
-                            update_dynamic_weights(cursor, home_team, pred_home_runs, home_score, is_offense=True)
-                            update_dynamic_weights(cursor, away_team, pred_home_runs, home_score, is_offense=False)
-                            
-                            update_dynamic_weights(cursor, away_team, pred_away_runs, away_score, is_offense=True)
-                            update_dynamic_weights(cursor, home_team, pred_away_runs, away_score, is_offense=False)
+                teams = game.get('teams', {})
+                home_team, away_team = teams['home']['team']['name'], teams['away']['team']['name']
+                home_score, away_score = teams['home'].get('score', 0), teams['away'].get('score', 0)
+                home_p = teams['home'].get('probablePitcher', {}).get('fullName', 'Unknown')
+                away_p = teams['away'].get('probablePitcher', {}).get('fullName', 'Unknown')
+                
+                actual_winner = home_team if home_score > away_score else away_team
+                
+                # F5 Linescore Extraction
+                linescore = game.get('linescore', {}).get('innings', [])
+                h_f5, a_f5 = 0, 0
+                for inning in linescore[:5]:
+                    h_f5 += inning.get('home', {}).get('runs', 0)
+                    a_f5 += inning.get('away', {}).get('runs', 0)
+                
+                # Full Game Forecast
+                try:
+                    cursor.execute('SELECT home_prob, away_prob, predicted_home_runs, predicted_away_runs FROM Model_Forecasts WHERE game_pk = ?', (game_pk,))
+                    fg_fc = cursor.fetchone()
+                except sqlite3.OperationalError: fg_fc = None
+                
+                # F5 Forecast
+                try:
+                    cursor.execute('SELECT f5_exp_home_runs, f5_exp_away_runs FROM F5_Forecasts WHERE game_pk = ?', (game_pk,))
+                    f5_fc = cursor.fetchone()
+                except sqlite3.OperationalError: f5_fc = None
+                
+                model_correct = 0
+                if fg_fc:
+                    predicted_winner = home_team if fg_fc[0] > fg_fc[1] else away_team
+                    model_correct = 1 if predicted_winner == actual_winner else 0
+                    update_dynamic_weights(cursor, home_team, fg_fc[2], home_score, is_offense=True)
+                    update_dynamic_weights(cursor, away_team, fg_fc[2], home_score, is_offense=False)
+                    update_dynamic_weights(cursor, away_team, fg_fc[3], away_score, is_offense=True)
+                    update_dynamic_weights(cursor, home_team, fg_fc[3], away_score, is_offense=False)
+                
+                if f5_fc:
+                    # Update starting pitcher specific parameters based on F5 results
+                    update_dynamic_weights(cursor, home_p, f5_fc[0], away_f5, is_pitcher=True)
+                    update_dynamic_weights(cursor, away_p, f5_fc[1], home_f5, is_pitcher=True)
+
+                cursor.execute('''
+                    INSERT OR REPLACE INTO Post_Match_Analysis (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (game_pk, actual_winner, home_score, away_score, h_f5, a_f5, model_correct, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
     conn.commit()
     conn.close()
-    print("Post-match analysis completed simulation-free.")
+    print("Post-match analysis completed.")
 
 if __name__ == "__main__":
     run_post_match_analysis()
