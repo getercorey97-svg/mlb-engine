@@ -14,8 +14,12 @@ def calculate_pearson_r(x, y):
 
 def run_correlation_engine():
     print("Initializing Micro & Macro Feature Importance Engine...")
-    conn = sqlite3.connect('mlb_engine.db')
+    conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
+    
+    # Enable WAL mode and set busy timeout to prevent locking conflicts
+    cursor.execute("PRAGMA journal_mode=WAL;")
+    cursor.execute("PRAGMA busy_timeout=10000;")
     
     cursor.executescript('''
     CREATE TABLE IF NOT EXISTS Feature_Correlations (
@@ -27,6 +31,8 @@ def run_correlation_engine():
         try: cursor.execute(f"ALTER TABLE Daily_Lineups ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     
+    conn.commit()
+
     query = '''
     SELECT p.game_pk, p.home_score, p.away_score, m.home_prob, m.away_prob, m.predicted_edge, m.predicted_home_runs, m.predicted_away_runs, 
            COALESCE(dl.air_density, 1.225) AS air_density, COALESCE(dl.uv_modifier, 1.0) AS uv_modifier, COALESCE(u.run_modifier, 1.0) AS umpire_modifier
@@ -37,10 +43,18 @@ def run_correlation_engine():
     WHERE m.predicted_home_runs IS NOT NULL AND m.predicted_away_runs IS NOT NULL
     '''
     
-    try: df = pd.read_sql_query(query, conn)
-    except Exception as e: return print(f"Error querying dataset for correlation engine: {e}")
+    try: 
+        df = pd.read_sql_query(query, conn)
+    except Exception as e:
+        conn.close()
+        print(f"Error querying dataset for correlation engine: {e}")
+        return
 
-    if len(df) < 5: return print(f"Post-mortem sample size ({len(df)} games) is too small. Minimum required: 5.")
+    if len(df) < 5:
+        # Crucial Fix: Explicitly commit and close before returning to release write lock
+        conn.close()
+        print(f"Post-mortem sample size ({len(df)} games) is too small. Minimum required: 5.")
+        return
 
     df['total_actual_runs'] = df['home_score'] + df['away_score']
     df['total_pred_runs'] = df['predicted_home_runs'] + df['predicted_away_runs']
