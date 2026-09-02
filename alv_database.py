@@ -4,16 +4,23 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from datetime import datetime
 
-# Centralized coordinates for Air Density
+# Centralized coordinates for Air Density (All 30 MLB Stadiums)
 STADIUMS = {
-    "Atlanta Braves": (33.8907, -84.4677),
-    "Colorado Rockies": (39.7559, -104.9942),
-    "San Diego Padres": (32.7076, -117.1570),
-    "Chicago Cubs": (41.9484, -87.6553),
-    "New York Yankees": (40.8296, -73.9262),
-    "Houston Astros": (29.7569, -95.3555),
-    "Cincinnati Reds": (39.0974, -84.5071),
-    "Chicago White Sox": (41.8299, -87.6338),
+    "Arizona Diamondbacks": (33.4453, -112.0667), "Atlanta Braves": (33.8907, -84.4677),
+    "Baltimore Orioles": (39.2838, -76.6217), "Boston Red Sox": (42.3467, -71.0972),
+    "Chicago Cubs": (41.9484, -87.6553), "Chicago White Sox": (41.8300, -87.6338),
+    "Cincinnati Reds": (39.0979, -84.5082), "Cleveland Guardians": (41.4962, -81.6852),
+    "Colorado Rockies": (39.7559, -104.9942), "Detroit Tigers": (42.3390, -83.0485),
+    "Houston Astros": (29.7573, -95.3555), "Kansas City Royals": (39.0517, -94.4803),
+    "Los Angeles Angels": (33.8003, -117.8827), "Los Angeles Dodgers": (34.0739, -118.2400),
+    "Miami Marlins": (25.7781, -80.2197), "Milwaukee Brewers": (43.0280, -87.9712),
+    "Minnesota Twins": (44.9817, -93.2778), "New York Mets": (40.7571, -73.8458),
+    "New York Yankees": (40.8296, -73.9262), "Oakland Athletics": (37.7516, -122.2005),
+    "Philadelphia Phillies": (39.9061, -75.1665), "Pittsburgh Pirates": (40.4469, -80.0057),
+    "San Diego Padres": (32.7076, -117.1570), "San Francisco Giants": (37.7786, -122.3893),
+    "Seattle Mariners": (47.5914, -122.3325), "St. Louis Cardinals": (38.6226, -90.1928),
+    "Tampa Bay Rays": (27.7682, -82.6534), "Texas Rangers": (32.7473, -97.0845),
+    "Toronto Blue Jays": (43.6414, -79.3894), "Washington Nationals": (38.8730, -77.0074),
     "Default": (39.8283, -98.5795)
 }
 
@@ -62,16 +69,8 @@ def execute_unified_alv():
     cursor.executescript('''
     DROP TABLE IF EXISTS Daily_Lineups;
     CREATE TABLE Daily_Lineups (
-        game_pk INTEGER PRIMARY KEY,
-        game_date TEXT,
-        away_team TEXT,
-        home_team TEXT,
-        away_pitcher TEXT,
-        home_pitcher TEXT,
-        lineup_status TEXT,
-        air_density REAL,
-        uv_modifier REAL,
-        status TEXT
+        game_pk INTEGER PRIMARY KEY, game_date TEXT, away_team TEXT, home_team TEXT,
+        away_pitcher TEXT, home_pitcher TEXT, lineup_status TEXT, air_density REAL, uv_modifier REAL, status TEXT
     );
     ''')
     
@@ -104,7 +103,6 @@ def execute_unified_alv():
             away_lineup = teams['away'].get('lineup', [])
             lineup_status = "Confirmed" if len(home_lineup) >= 9 and len(away_lineup) >= 9 else "Pending/TBD"
             
-            # Fetch Corrected Air Density and UV
             air_density, uv_modifier = get_dynamic_atmosphere(home, session)
             
             cursor.execute('''
