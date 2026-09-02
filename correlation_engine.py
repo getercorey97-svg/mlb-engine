@@ -38,6 +38,13 @@ def run_correlation_engine():
         last_analyzed TEXT
     );
     ''')
+
+    # THE FIX: Bulletproof schema migration to catch new SOTA variables on yesterday's table
+    for col in ["uv_modifier REAL DEFAULT 1.0", "air_density REAL DEFAULT 1.225"]:
+        try:
+            cursor.execute(f"ALTER TABLE Daily_Lineups ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass # Column already exists, safe to proceed
     
     # Pulls core predictions alongside the newly seeded ALV thermodynamic and umpire variables
     query = '''
