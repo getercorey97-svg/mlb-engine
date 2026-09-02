@@ -20,8 +20,11 @@ def execute_biological_pipeline():
     today_str = today.strftime('%Y-%m-%d')
     yesterday_str = yesterday.strftime('%Y-%m-%d')
     
-    conn = sqlite3.connect('mlb_engine.db')
+    # Bulletproof connection with timeout and WAL mode to prevent locking conflicts
+    conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL;")
+    cursor.execute("PRAGMA busy_timeout=10000;")
     
     cursor.executescript('''
     CREATE TABLE IF NOT EXISTS Biological_Modifiers (
@@ -30,6 +33,7 @@ def execute_biological_pipeline():
     );
     ''')
     cursor.execute("DELETE FROM Biological_Modifiers")
+    conn.commit()
     
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={yesterday_str}&endDate={today_str}"
     
@@ -37,6 +41,7 @@ def execute_biological_pipeline():
         response = requests.get(url, timeout=15).json()
     except Exception as e:
         print(f"API Error fetching itineraries: {e}")
+        conn.close()
         return
 
     team_locations = {}
