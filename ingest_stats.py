@@ -5,8 +5,11 @@ from datetime import datetime
 def ingest_mlb_data():
     print("Initializing Factual Data Ingestion (Replacing Synthetic Modulo Math)...")
     
-    conn = sqlite3.connect('mlb_engine.db')
+    # Bulletproof connection with timeout and WAL mode to prevent locking conflicts
+    conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL;")
+    cursor.execute("PRAGMA busy_timeout=10000;")
     
     cursor.executescript('''
         CREATE TABLE IF NOT EXISTS Pitcher_Stats (
@@ -21,6 +24,7 @@ def ingest_mlb_data():
             team_name TEXT PRIMARY KEY, team_era REAL, updated_at TEXT
         );
     ''')
+    conn.commit()
 
     season = "2026"
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -47,6 +51,7 @@ def ingest_mlb_data():
                         
                 cursor.execute('INSERT OR REPLACE INTO Team_Offense (team_name, ops, updated_at) VALUES (?, ?, ?)', (team_name, factual_ops, current_time))
                 cursor.execute('INSERT OR REPLACE INTO Team_Bullpen (team_name, team_era, updated_at) VALUES (?, ?, ?)', (team_name, factual_era, current_time))
+                conn.commit()
             except Exception as e:
                 print(f"Error mapping {team_name}: {e}")
     except Exception as e:
@@ -75,9 +80,11 @@ def ingest_mlb_data():
                                 factual_era = float(stats_data[0]['splits'][0]['stat'].get('era', 4.20))
                                 
                             cursor.execute('INSERT OR REPLACE INTO Pitcher_Stats (last_name, est_era, updated_at) VALUES (?, ?, ?)', (last_name, factual_era, current_time))
+                            conn.commit()
                             print(f"Mapped Factual SP -> {last_name}: ERA {factual_era:.2f}")
                         except Exception:
                             cursor.execute('INSERT OR REPLACE INTO Pitcher_Stats (last_name, est_era, updated_at) VALUES (?, ?, ?)', (last_name, factual_era, current_time))
+                            conn.commit()
     except Exception as e:
         print(f"API Error fetching probable pitchers: {e}")
 
