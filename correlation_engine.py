@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime
 
 def calculate_pearson_r(x, y):
-    """Calculates Pearson correlation coefficient safely without external dependencies."""
+    """Calculates Pearson correlation coefficient safely."""
     x = np.array(x, dtype=float)
     y = np.array(y, dtype=float)
     
@@ -24,10 +24,8 @@ def calculate_pearson_r(x, y):
 def run_correlation_engine():
     print("Initializing Micro & Macro Feature Importance Engine...")
     
-    conn = sqlite3.connect('mlb_engine.db', timeout=30)
+    conn = sqlite3.connect('mlb_engine.db')
     cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL;")
-    cursor.execute("PRAGMA busy_timeout=10000;")
     
     # Create persistent correlation metrics table
     cursor.executescript('''
@@ -41,15 +39,13 @@ def run_correlation_engine():
     );
     ''')
 
-    # Failsafe schema migration to catch SOTA environmental variables
+    # Schema migration failsafe to catch SOTA environmental variables dynamically
     for col in ["uv_modifier REAL DEFAULT 1.0", "air_density REAL DEFAULT 1.225"]:
         try:
             cursor.execute(f"ALTER TABLE Daily_Lineups ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass # Column already exists, safe to proceed
     
-    conn.commit()
-
     # Pulls core predictions alongside thermodynamic and umpire variables
     query = '''
     SELECT 
