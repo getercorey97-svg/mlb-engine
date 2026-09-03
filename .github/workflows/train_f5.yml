@@ -1,0 +1,36 @@
+name: Train F5 Pitchers Momentum
+
+on:
+  workflow_dispatch: # Allows manual one-time trigger from the Actions tab
+
+jobs:
+  train-f5:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Execute F5 Pitcher Historical Sweep
+        run: python train_f5_pitchers.py
+
+      - name: Commit and Push Calibrated Database
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Calibrate F5 pitcher momentum modifiers from 2026 history [skip ci]" || echo "No changes to commit"
+          git pull --rebase origin main --autostash
+          git push
