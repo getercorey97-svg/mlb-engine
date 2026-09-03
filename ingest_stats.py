@@ -3,9 +3,8 @@ import requests
 from datetime import datetime
 
 def ingest_mlb_data():
-    print("Initializing Factual Data Ingestion (Replacing Synthetic Modulo Math)...")
+    print("Initializing Factual Data Ingestion & F5 Starter Seeding...")
     
-    # Bulletproof connection with timeout and WAL mode to prevent locking conflicts
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
@@ -90,7 +89,7 @@ def ingest_mlb_data():
 
     conn.commit()
     conn.close()
-    print("Ingestion complete. 100% Factual Baseline Metrics mapped.")
+    print("Ingestion complete. 100% Factual Baseline Metrics & F5 Seeded.")
 
 if __name__ == "__main__":
     ingest_mlb_data()
