@@ -5,24 +5,18 @@ from datetime import datetime, timedelta
 from engine import run_ultimate_monte_carlo
 from engine_f5_props import run_f5_and_props_engine
 
-def run_backtest_engine(days_back=14):
-    print(f"Initializing Dual-Engine Backtesting Framework (Past {days_back} days)...")
+def run_backtest_engine():
+    current_year = datetime.now().year
+    print(f"Initializing Dual-Engine Backtesting Framework (Full {current_year} Season)...")
     print("Strict Adherence to Factual Post-Mortem Mandate: Zero synthetic data permitted.")
     
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=days_back)
+    # Dynamically sets the start date to roughly Opening Day of the current year
+    start_date = datetime(current_year, 3, 20)
     
     start_str = start_date.strftime('%Y-%m-%d')
     end_str = end_date.strftime('%Y-%m-%d')
     
-    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={start_str}&endDate={end_str}&hydrate=probablePitcher"
-    
-    try:
-        response = requests.get(url, timeout=15).json()
-    except Exception as e:
-        print(f"API Error fetching historical schedule: {e}")
-        return
-        
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
@@ -57,7 +51,7 @@ def run_backtest_engine(days_back=14):
         except sqlite3.OperationalError:
             pass
 
-    # THE FIX: Clear tracking tables ONCE at the start so historical data accumulates
+    # Clear tracking tables ONCE at the start so historical data accumulates accurately
     cursor.execute("DELETE FROM Model_Forecasts")
     cursor.execute("DELETE FROM Post_Match_Analysis")
     cursor.execute("DELETE FROM F5_Forecasts")
@@ -69,6 +63,13 @@ def run_backtest_engine(days_back=14):
     squared_error_sum = 0.0
     units_won = 0.0
     
+    # F5 Tracking Metrics
+    f5_wins = 0
+    f5_losses = 0
+    f5_pushes = 0
+    f5_units = 0.0
+    f5_total_games = 0
+    
     print("-" * 60)
     
     current_date = start_date
@@ -76,7 +77,8 @@ def run_backtest_engine(days_back=14):
         date_str = current_date.strftime('%Y-%m-%d')
         current_date += timedelta(days=1)
         
-        day_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&hydrate=probablePitcher"
+        # Hydrate probablePitcher and linescore for F5 actuals
+        day_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&hydrate=probablePitcher,linescore"
         try:
             day_res = requests.get(day_url, timeout=10).json()
         except Exception:
@@ -102,6 +104,13 @@ def run_backtest_engine(days_back=14):
                 home_pitcher = game['teams']['home'].get('probablePitcher', {}).get('fullName', 'Unknown Pitcher')
                 away_pitcher = game['teams']['away'].get('probablePitcher', {}).get('fullName', 'Unknown Pitcher')
                 
+                # F5 Linescore Extraction
+                linescore = game.get('linescore', {}).get('innings', [])
+                h_f5, a_f5 = 0, 0
+                for inning in linescore[:5]:
+                    h_f5 += inning.get('home', {}).get('runs', 0)
+                    a_f5 += inning.get('away', {}).get('runs', 0)
+                
                 cursor.execute('''
                     INSERT OR REPLACE INTO Daily_Lineups (game_pk, game_date, away_team, home_team, away_pitcher, home_pitcher, lineup_status, air_density, uv_modifier, status)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -123,7 +132,9 @@ def run_backtest_engine(days_back=14):
                     'home_team': home_team,
                     'away_team': away_team,
                     'home_score': home_score,
-                    'away_score': away_score
+                    'away_score': away_score,
+                    'h_f5': h_f5,
+                    'a_f5': a_f5
                 })
                 day_games_count += 1
         
@@ -144,44 +155,71 @@ def run_backtest_engine(days_back=14):
         
         for g in games_data:
             game_pk = g['game_pk']
+            home_team = g['home_team']
+            away_team = g['away_team']
             home_score = g['home_score']
             away_score = g['away_score']
+            h_f5 = g['h_f5']
+            a_f5 = g['a_f5']
             
+            # --- FULL GAME EVALUATION ---
             actual_winner = home_team if home_score > away_score else away_team
             actual_home_win = 1 if actual_winner == home_team else 0
             
             cursor.execute("SELECT home_prob, away_prob, predicted_home_runs, predicted_away_runs FROM Model_Forecasts WHERE game_pk = ?", (game_pk,))
             forecast = cursor.fetchone()
             
-            if not forecast or forecast[0] is None:
-                continue
+            is_correct = 0
+            if forecast and forecast[0] is not None:
+                home_prob, away_prob, pred_home_runs, pred_away_runs = forecast
+                pred_home_runs = pred_home_runs if pred_home_runs is not None else 4.0
+                pred_away_runs = pred_away_runs if pred_away_runs is not None else 4.0
                 
-            home_prob, away_prob, pred_home_runs, pred_away_runs = forecast
-            pred_home_runs = pred_home_runs if pred_home_runs is not None else 4.0
-            pred_away_runs = pred_away_runs if pred_away_runs is not None else 4.0
+                predicted_winner = home_team if home_prob > away_prob else away_team
+                is_correct = 1 if predicted_winner == actual_winner else 0
+                
+                total_games += 1
+                correct_predictions += is_correct
+                brier_score_sum += (home_prob - actual_home_win) ** 2
+                
+                total_actual_runs = home_score + away_score
+                total_pred_runs = pred_home_runs + pred_away_runs
+                squared_error_sum += (total_actual_runs - total_pred_runs) ** 2
+                
+                if is_correct:
+                    units_won += 0.909
+                else:
+                    units_won -= 1.000
+
+            # --- F5 EVALUATION ---
+            cursor.execute("SELECT f5_home_prob, f5_away_prob FROM F5_Forecasts WHERE game_pk = ?", (game_pk,))
+            f5_fc = cursor.fetchone()
             
-            predicted_winner = home_team if home_prob > away_prob else away_team
-            is_correct = 1 if predicted_winner == actual_winner else 0
+            if f5_fc and f5_fc[0] is not None:
+                f5_h_prob, f5_a_prob = f5_fc
+                
+                f5_pick = home_team if f5_h_prob > f5_a_prob else away_team
+                
+                if h_f5 > a_f5: f5_actual = home_team
+                elif a_f5 > h_f5: f5_actual = away_team
+                else: f5_actual = "Tie"
+                
+                f5_total_games += 1
+                if f5_actual == "Tie":
+                    f5_pushes += 1
+                elif f5_pick == f5_actual:
+                    f5_wins += 1
+                    f5_units += 0.909
+                else:
+                    f5_losses += 1
+                    f5_units -= 1.000
             
             # Log the successful simulation directly into the final post-mortem table
             cursor.execute('''
                 INSERT OR REPLACE INTO Post_Match_Analysis 
                 (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (game_pk, actual_winner, home_score, away_score, 0, 0, is_correct, 'BACKTEST'))
-            
-            total_games += 1
-            correct_predictions += is_correct
-            brier_score_sum += (home_prob - actual_home_win) ** 2
-            
-            total_actual_runs = home_score + away_score
-            total_pred_runs = pred_home_runs + pred_away_runs
-            squared_error_sum += (total_actual_runs - total_pred_runs) ** 2
-            
-            if is_correct:
-                units_won += 0.909
-            else:
-                units_won -= 1.000
+            ''', (game_pk, actual_winner, home_score, away_score, h_f5, a_f5, is_correct, 'BACKTEST'))
 
     conn.commit()
     conn.close()
@@ -194,14 +232,22 @@ def run_backtest_engine(days_back=14):
     brier_score = brier_score_sum / total_games
     rmse = np.sqrt(squared_error_sum / total_games)
     
+    f5_win_rate = f5_wins / (f5_wins + f5_losses) if (f5_wins + f5_losses) > 0 else 0
+    
     print(f"Engine-Linked Backtest Analytical Output: {start_str} to {end_str}")
     print(f"Total Matchups Verified & Logged: {total_games}")
+    print("-" * 60)
+    print(f"--- FULL-GAME ENGINE (9 Innings) ---")
     print(f"Baseline Accuracy:        {win_rate:.2%}")
     print(f"Brier Score (0 = Exact):  {brier_score:.4f}")
     print(f"RMSE (Run Variance):      {rmse:.2f} runs")
     print(f"Simulated ROI Projection: {units_won:+.2f} Units (Flat 1u @ -110)")
     print("-" * 60)
+    print(f"--- FIRST 5 INNINGS ENGINE (F5) ---")
+    print(f"F5 Record:                {f5_wins}W - {f5_losses}L - {f5_pushes}P")
+    print(f"F5 Win Rate (w/o pushes): {f5_win_rate:.2%}")
+    print(f"F5 ROI Projection:        {f5_units:+.2f} Units (Flat 1u @ -110)")
+    print("-" * 60)
 
 if __name__ == "__main__":
-    # You can change days_back=14 to whatever sample size you want to test!
-    run_backtest_engine(days_back=14)
+    run_backtest_engine()
