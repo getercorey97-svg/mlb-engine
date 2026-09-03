@@ -20,7 +20,7 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests
+          pip install pandas numpy requests scikit-learn lightgbm pybaseball
 
       - name: Run Backtest (Database Hydration)
         run: python backtest_engine.py
