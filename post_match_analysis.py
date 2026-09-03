@@ -18,8 +18,8 @@ def update_dynamic_weights(cursor, name, predicted_runs, actual_runs, is_offense
         new_mod = max(0.53, min(1.47, mod + (error_delta * adaptive_lr)))
         
         cursor.execute('''
-            INSERT OR REPLACE INTO Pitcher_Modifiers (pitcher_name, f5_run_modifier, last_updated) 
-            VALUES (?, ?, ?)
+            INSERT OR REPLACE INTO Pitcher_Modifiers (pitcher_name, k_modifier, f5_run_modifier, last_updated) 
+            VALUES (?, 1.0, ?, ?)
         ''', (name, new_mod, current_time))
         print(f"  [Micro-Evolution] {name} F5 SP Modifier: {mod:.3f} -> {new_mod:.3f} (LR: {adaptive_lr:.3f})")
         return
@@ -84,7 +84,7 @@ def run_post_match_analysis():
                 
                 actual_winner = home_team if home_score > away_score else away_team
                 
-                # F5 Linescore Extraction (Using consistent variable names h_f5 and a_f5)
+                # F5 Linescore Extraction
                 linescore = game.get('linescore', {}).get('innings', [])
                 h_f5, a_f5 = 0, 0
                 for inning in linescore[:5]:
@@ -111,7 +111,6 @@ def run_post_match_analysis():
                     update_dynamic_weights(cursor, home_team, fg_fc[3], away_score, is_offense=False)
                 
                 if f5_fc:
-                    # Corrected to use defined variables h_f5 and a_f5
                     update_dynamic_weights(cursor, home_p, f5_fc[0], a_f5, is_pitcher=True)
                     update_dynamic_weights(cursor, away_p, f5_fc[1], h_f5, is_pitcher=True)
 
@@ -122,7 +121,7 @@ def run_post_match_analysis():
 
     conn.commit()
     conn.close()
-    print("Post-match analysis completed.")
+    print("Post-match analysis & F5 micro-evolution completed.")
 
 if __name__ == "__main__":
     run_post_match_analysis()
