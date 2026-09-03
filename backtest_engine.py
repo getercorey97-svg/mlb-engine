@@ -87,7 +87,7 @@ def update_dynamic_weights(cursor, name, predicted_runs, actual_runs, is_offense
 
 def run_backtest_engine():
     current_year = datetime.now().year
-    print(f"Initializing Dual-Engine Backtesting Framework (Full {current_year} Season)...")
+    print(f"Initializing SOTA Dual-Engine Backtesting Framework (Full {current_year} Season)...")
     print("Strict Adherence to SOTA Mechanics: ALV Atmosphere, Umpires & Adaptive Evolution Active.")
     
     end_date = datetime.now()
@@ -140,7 +140,7 @@ def run_backtest_engine():
     cursor.execute("DELETE FROM Post_Match_Analysis")
     cursor.execute("DELETE FROM F5_Forecasts")
     
-    # Initialize Teams and Pitchers at baseline 1.0 before the historical sweep starts
+    # Initialize Teams and Pitchers at baseline 1.0 to flush out poisoned exhibition data
     cursor.execute("DELETE FROM Pitcher_Modifiers")
     cursor.execute("DELETE FROM Dynamic_Modifiers")
     conn.commit()
@@ -164,10 +164,10 @@ def run_backtest_engine():
         date_str = current_date.strftime('%Y-%m-%d')
         current_date += timedelta(days=1)
         
-        # Hydrate officials (umpires), probablePitcher, and linescore
-        day_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&hydrate=probablePitcher,linescore,officials"
+        # CRITICAL FIX: Explicitly appending &gameType=R to prevent Spring Training/Exhibition poisoning
+        day_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&gameType=R&hydrate=probablePitcher,linescore,officials"
         try:
-            day_res = requests.get(day_url, timeout=10).json()
+            day_res = requests.get(day_url, timeout=15).json()
         except Exception:
             continue
             
@@ -304,11 +304,11 @@ def run_backtest_engine():
                 elif f5_pick == f5_actual: f5_wins += 1; f5_units += 0.909
                 else: f5_losses += 1; f5_units -= 1.000
                 
-                # ACTIVE LEARNING: Evolve Pitcher F5 Modifiers!
+                # ACTIVE LEARNING: Evolve Pitcher F5 Modifiers
                 update_dynamic_weights(cursor, home_pitcher, f5_a_runs, a_f5, is_pitcher=True)
                 update_dynamic_weights(cursor, away_pitcher, f5_h_runs, h_f5, is_pitcher=True)
                 
-            # ACTIVE LEARNING: Evolve Team Modifiers!
+            # ACTIVE LEARNING: Evolve Team Modifiers
             update_dynamic_weights(cursor, home_team, pred_home_runs, home_score, is_offense=True)
             update_dynamic_weights(cursor, away_team, pred_home_runs, home_score, is_offense=False)
             update_dynamic_weights(cursor, away_team, pred_away_runs, away_score, is_offense=True)
