@@ -9,23 +9,27 @@ from alv_database import execute_unified_alv
 from umpire_variance import execute_umpire_variance_pipeline
 from statcast_metrics import execute_statcast_pipeline
 from engine import run_ultimate_monte_carlo
+from engine_f5_props import run_f5_and_props_engine
 from export_and_odds import export_forecasts_and_check_odds
 
 def ensure_forecasts_table():
-    conn = sqlite3.connect('mlb_engine.db')
+    conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
-    cursor.execute('''
+    cursor.execute("PRAGMA journal_mode=WAL;")
+    cursor.execute("PRAGMA busy_timeout=10000;")
+    
+    cursor.executescript('''
         CREATE TABLE IF NOT EXISTS Model_Forecasts (
-            game_pk INTEGER PRIMARY KEY,
-            home_team TEXT,
-            away_team TEXT,
-            home_prob REAL,
-            away_prob REAL,
-            predicted_edge REAL,
-            predicted_home_runs REAL,
-            predicted_away_runs REAL,
-            timestamp TEXT
-        )
+            game_pk INTEGER PRIMARY KEY, home_team TEXT, away_team TEXT, 
+            home_prob REAL, away_prob REAL, predicted_edge REAL, 
+            predicted_home_runs REAL, predicted_away_runs REAL, timestamp TEXT
+        );
+        CREATE TABLE IF NOT EXISTS F5_Forecasts (
+            game_pk INTEGER PRIMARY KEY, away_team TEXT, home_team TEXT, 
+            away_starter TEXT, home_starter TEXT, f5_away_prob REAL, 
+            f5_home_prob REAL, f5_tie_prob REAL, f5_exp_away_runs REAL, 
+            f5_exp_home_runs REAL, f5_total_runs REAL
+        );
     ''')
     for col in ["predicted_edge REAL", "predicted_home_runs REAL", "predicted_away_runs REAL"]:
         try:
@@ -36,14 +40,14 @@ def ensure_forecasts_table():
     conn.close()
 
 def ensure_dynamic_modifiers_table():
-    conn = sqlite3.connect('mlb_engine.db')
+    conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL;")
+    cursor.execute("PRAGMA busy_timeout=10000;")
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS Dynamic_Modifiers (
-            team_name TEXT PRIMARY KEY,
-            offensive_modifier REAL DEFAULT 1.0,
-            pitching_modifier REAL DEFAULT 1.0,
-            last_updated TEXT
+            team_name TEXT PRIMARY KEY, offensive_modifier REAL DEFAULT 1.0, 
+            pitching_modifier REAL DEFAULT 1.0, last_updated TEXT
         )
     ''')
     cursor.execute("SELECT COUNT(*) FROM Dynamic_Modifiers")
@@ -70,13 +74,11 @@ def ensure_dynamic_modifiers_table():
 def main():
     print(f"[{datetime.now()}] Starting GitHub Actions MLB Engine Pipeline...")
     
-    # Step 0: Ensure database tables & ALV environmental columns exist first
     print("Initializing ALV Database & Schema Lock...")
     execute_unified_alv()
     ensure_forecasts_table()
     ensure_dynamic_modifiers_table()
 
-    # Phase 1: Post-Match Analysis & Correlation Engine
     print("Executing Phase 1: Post-Match Analysis & Correlation Engine...")
     try:
         run_post_match_analysis()
@@ -84,19 +86,20 @@ def main():
     except Exception as e:
         print(f"Post-match evolution error: {e}")
 
-    # Phase 2: Ingest Base MLB Data
-    print("Executing Phase 2: Ingesting Base MLB Data...")
+    print("Executing Phase 2: Ingesting Base MLB Data & F5 Seeding...")
     ingest_mlb_data()
     
-    # Phase 3: Applying Advanced Environmental Context
     print("Executing Phase 3: Applying Advanced Environmental Context...")
-    execute_biological_pipeline()
-    execute_umpire_variance_pipeline()
-    execute_statcast_pipeline()
+    try: execute_biological_pipeline() 
+    except: pass
+    try: execute_umpire_variance_pipeline()
+    except: pass
+    try: execute_statcast_pipeline()
+    except: pass
     
-    # Phase 4: Simulation and Export
-    print("Executing Phase 4: Simulation and Export...")
+    print("Executing Phase 4: Dual-Engine Simulation and Export...")
     run_ultimate_monte_carlo()
+    run_f5_and_props_engine()
     
     try:
         export_forecasts_and_check_odds()
