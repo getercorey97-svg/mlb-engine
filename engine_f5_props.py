@@ -92,7 +92,12 @@ def run_f5_and_props_engine():
 
         p_a, p_h, p_t = float(np.sum(sim_a > sim_h)/iters), float(np.sum(sim_h > sim_a)/iters), float(np.sum(sim_a == sim_h)/iters)
 
-        cursor.execute('''INSERT OR REPLACE INTO F5_Forecasts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (pk, away, home, away_sp, home_sp, p_a, p_h, p_t, lam_a, lam_h, lam_a+lam_h))
+        # EXPLICIT COLUMN MAPPING TO FIX THE SQLITE CRASH
+        cursor.execute('''
+            INSERT OR REPLACE INTO F5_Forecasts 
+            (game_pk, away_team, home_team, away_starter, home_starter, f5_away_prob, f5_home_prob, f5_tie_prob, f5_exp_away_runs, f5_exp_home_runs, f5_total_runs)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (pk, away, home, away_sp, home_sp, p_a, p_h, p_t, lam_a, lam_h, lam_a+lam_h))
 
         # Pitcher Props (SOTA Binomial incorporating Umpire Expansion bias)
         for sp, tm, xera in [(away_sp, away, a_xera), (home_sp, home, h_xera)]:
@@ -106,7 +111,12 @@ def run_f5_and_props_engine():
             adj_k = min(0.38, max(0.12, base_k * (2.0 - ump) * (uv or 1.0) * k_mod))
             k_sims = np.random.binomial(int(round(proj_bf)), adj_k, 10000)
 
-            cursor.execute('''INSERT OR REPLACE INTO Pitcher_Props VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', (pk, sp, tm, round(proj_outs, 1), float(np.mean(k_sims)), float(np.mean(k_sims>=5)), float(np.mean(k_sims>=6)), float(np.mean(k_sims>=7))))
+            # EXPLICIT COLUMN MAPPING
+            cursor.execute('''
+                INSERT OR REPLACE INTO Pitcher_Props 
+                (game_pk, pitcher_name, team_name, projected_outs, projected_strikeouts, over_4_5_k_prob, over_5_5_k_prob, over_6_5_k_prob)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (pk, sp, tm, round(proj_outs, 1), float(np.mean(k_sims)), float(np.mean(k_sims>=5)), float(np.mean(k_sims>=6)), float(np.mean(k_sims>=7))))
         
         print(f"[F5 / Props] {away} ({p_a:.1%}) @ {home} ({p_h:.1%}) | Tie: {p_t:.1%}")
 
