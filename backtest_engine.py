@@ -174,6 +174,16 @@ def run_backtest_engine():
         );
     ''')
 
+    # Safely add the new Volatility Sigma column to the existing F5 table to prevent crashes
+    try:
+        cursor.execute('ALTER TABLE F5_Forecasts ADD COLUMN f5_volatility_sigma REAL DEFAULT 0.0;')
+    except sqlite3.OperationalError:
+        pass # Column already exists, safe to proceed
+
+    for col in ["predicted_edge REAL", "predicted_home_runs REAL", "predicted_away_runs REAL"]:
+        try: cursor.execute(f"ALTER TABLE Model_Forecasts ADD COLUMN {col}")
+        except sqlite3.OperationalError: pass
+
     cursor.execute("DELETE FROM Model_Forecasts")
     cursor.execute("DELETE FROM Post_Match_Analysis")
     cursor.execute("DELETE FROM F5_Forecasts")
