@@ -61,7 +61,6 @@ def run_live_monitor():
 
     if not verified_games:
         print("No games currently meet the strict ALV criteria.")
-        # Sends a test notification so you know GitHub successfully communicated with your phone
         send_ntfy_alert("GitHub Pipeline Connected", "The live monitor executed perfectly on GitHub, but no games are currently live meeting the ALV criteria.", priority="default", tags="white_check_mark")
         conn.close()
         return
@@ -82,6 +81,11 @@ def run_live_monitor():
 
         linescore = live_data.get("liveData", {}).get("linescore", {})
         current_inning = linescore.get("currentInning", 1)
+        
+        # Halt all evaluations once the 9th inning begins
+        if current_inning >= 9:
+            continue
+            
         is_top = linescore.get("isTopInning", True)
         half_str = "Top" if is_top else "Bot"
         home_score = linescore.get("teams", {}).get("home", {}).get("runs", 0)
@@ -89,7 +93,7 @@ def run_live_monitor():
         total_live_runs = home_score + away_score
         projected_total = (exp_h_runs or 4.0) + (exp_a_runs or 4.0)
 
-        # Trigger Scenario: High-Run Shootout Validation
+        # Trigger Scenario A: High-Run Shootout Validation
         if total_live_runs >= 3 and current_inning <= 3 and projected_total >= 10.5:
             bet_key = f"{game_pk}_OVER_EXPANSION"
             cursor.execute("SELECT 1 FROM Live_Alerts_Sent WHERE bet_key = ?", (bet_key,))
@@ -105,6 +109,32 @@ def run_live_monitor():
                 cursor.execute("INSERT INTO Live_Alerts_Sent VALUES (?, ?, ?, ?)",
                                (game_pk, bet_key, "LIVE OVER", datetime.now().isoformat()))
                 conn.commit()
+
+        # Trigger Scenario B: Pre-Game Model Dominance / Buy-Low Window
+        favored_team = home if home_prob > 0.58 else (away if away_prob > 0.58 else None)
+        favored_prob = max(home_prob, away_prob)
+
+        # Extended scanning logic: Evaluates all the way through the 8th inning
+        if favored_team and 2 <= current_inning <= 8:
+            trailing_or_tied = (favored_team == home and home_score <= away_score) or \
+                               (favored_team == away and away_score <= home_score)
+            run_deficit = abs(home_score - away_score)
+
+            if trailing_or_tied and run_deficit <= 2:
+                bet_key = f"{game_pk}_FAV_VALUE_{favored_team}_{current_inning}"
+                cursor.execute("SELECT 1 FROM Live_Alerts_Sent WHERE bet_key = ?", (bet_key,))
+                if not cursor.fetchone():
+                    title = f"LIVE BET ALERT: {favored_team} Live Moneyline"
+                    body = (
+                        f"Game Status: {away} {away_score} @ {home} {home_score} ({half_str} {current_inning})\n"
+                        f"Engine Pre-Game Probability: {favored_prob:.1%}\n"
+                        f"Umpire: {hp_ump} | Deficit: {run_deficit} run(s)\n"
+                        f"ACTIONABLE BET: {favored_team} Live Moneyline (Regression Buy-Low)"
+                    )
+                    send_ntfy_alert(title, body)
+                    cursor.execute("INSERT INTO Live_Alerts_Sent VALUES (?, ?, ?, ?)",
+                                   (game_pk, bet_key, f"{favored_team} Live ML", datetime.now().isoformat()))
+                    conn.commit()
 
     conn.close()
     print("Live monitor execution complete.")
