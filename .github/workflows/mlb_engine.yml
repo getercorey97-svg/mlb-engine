@@ -1,14 +1,25 @@
-name: MLB Engine Pipeline
+name: MLB Engine & Live Monitor Pipeline
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 15 * * *' # Runs daily at 3:00 PM UTC (11:00 AM EDT)
+    # 11:30 AM EDT (15:30 UTC) - Morning Post-Mortem & Early Slate Ingestion
+    - cron: '30 15 * * *'
+    # 1:30 PM EDT (17:30 UTC) - Early Afternoon Live Monitoring
+    - cron: '30 17 * * *'
+    # 4:30 PM EDT (20:30 UTC) - Late Afternoon Games & Evening ALV Hydration
+    - cron: '30 20 * * *'
+    # 6:45 PM EDT (22:45 UTC) - Prime Slate Lock & Pre-Game Ingestion
+    - cron: '45 22 * * *'
+    # 8:30 PM EDT (00:30 UTC) - Prime Slate Mid-Game Live Edge Detection
+    - cron: '30 0 * * *'
+    # 10:30 PM EDT (02:30 UTC) - West Coast Live Monitoring & Late Inning Relief
+    - cron: '30 2 * * *'
 
 jobs:
   run-engine:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' # Forces GitHub to ONLY execute on the main branch, stopping multi-branch duplicates
+    if: github.ref == 'refs/heads/main' # Prevents duplicate schedule runs on secondary branches[span_3](start_span)[span_3](end_span)
     permissions:
       contents: write
     steps:
@@ -28,11 +39,16 @@ jobs:
       - name: Run Full Pipeline (Ingestion + Monte Carlo)
         run: python run_pipeline.py
 
+      - name: Run Live Monitor & Send Alerts via ntfy
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python live_monitor.py
+
       - name: Commit and Push Updated Database
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Auto-update database with fresh ingestion and simulations [skip ci]" || echo "No changes to commit"
+          git commit -m "Auto-update database with live alerts and ingestion [skip ci]" || echo "No changes to commit"
           git pull --rebase --autostash
           git push
