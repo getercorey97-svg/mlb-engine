@@ -133,7 +133,7 @@ def apply_3way_isotonic_calibration(cursor, f5_h_prob, f5_a_prob, f5_tie_prob):
 def run_backtest_engine():
     current_year = datetime.now().year
     print(f"Initializing SOTA Dual-Engine Backtesting Framework (Full {current_year} Season)...")
-    print("Strict Adherence to SOTA Mechanics: ALV Atmosphere, Umpires, TTOP & Isotonic F5 Calibration Active.")
+    print("Strict Adherence to SOTA Mechanics: ALV Atmosphere, Umpires, TTOP & Isotonic Calibration Active.")
     
     end_date = datetime.now()
     start_date = datetime(current_year, 3, 20)
@@ -174,14 +174,18 @@ def run_backtest_engine():
         );
     ''')
 
-    # Safely add the new Volatility Sigma column to the existing F5 table to prevent crashes
+    # Schema migration failsafes
     try:
         cursor.execute('ALTER TABLE F5_Forecasts ADD COLUMN f5_volatility_sigma REAL DEFAULT 0.0;')
     except sqlite3.OperationalError:
-        pass # Column already exists, safe to proceed
+        pass
 
     for col in ["predicted_edge REAL", "predicted_home_runs REAL", "predicted_away_runs REAL"]:
         try: cursor.execute(f"ALTER TABLE Model_Forecasts ADD COLUMN {col}")
+        except sqlite3.OperationalError: pass
+
+    for col in ["lineup_status TEXT", "air_density REAL", "uv_modifier REAL", "status TEXT"]:
+        try: cursor.execute(f"ALTER TABLE Daily_Lineups ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
 
     cursor.execute("DELETE FROM Model_Forecasts")
@@ -192,8 +196,11 @@ def run_backtest_engine():
     conn.commit()
 
     total_games, correct_predictions = 0, 0
+    brier_score_sum, squared_error_sum = 0.0, 0.0
+    full_units = 0.0
+
     f5_wins, f5_losses, f5_pushes = 0, 0, 0
-    f5_units, units_won = 0.0, 0.0
+    f5_units = 0.0
     
     current_date = start_date
     while current_date <= end_date:
@@ -275,7 +282,7 @@ def run_backtest_engine():
             run_ultimate_monte_carlo()
             run_f5_and_props_engine()
         except Exception as e:
-            pass
+            print(f"Simulation Note ({date_str}): {e}")
         
         cursor = conn.cursor()
         for g in games_data:
@@ -285,30 +292,39 @@ def run_backtest_engine():
             home_pitcher, away_pitcher = g['home_pitcher'], g['away_pitcher']
             
             actual_winner = home_team if home_score > away_score else away_team
+            actual_home_win = 1 if actual_winner == home_team else 0
             
             cursor.execute("SELECT home_prob, away_prob, predicted_home_runs, predicted_away_runs FROM Model_Forecasts WHERE game_pk = ?", (game_pk,))
             forecast = cursor.fetchone()
             is_correct = 0
             
+            pred_h_runs = forecast[2] if forecast and forecast[2] is not None else 4.0
+            pred_a_runs = forecast[3] if forecast and forecast[3] is not None else 4.0
+
             if forecast and forecast[0] is not None:
-                home_prob, away_prob, pred_home_runs, pred_away_runs = forecast
+                home_prob, away_prob = forecast[0], forecast[1]
                 predicted_winner = home_team if home_prob > away_prob else away_team
                 is_correct = 1 if predicted_winner == actual_winner else 0
+                
                 total_games += 1
                 correct_predictions += is_correct
-                if is_correct: units_won += 0.909
-                else: units_won -= 1.000
+                if is_correct: full_units += 0.909
+                else: full_units -= 1.000
+                
+                # Brier score & RMSE accumulation
+                brier_score_sum += (home_prob - actual_home_win) ** 2
+                squared_error_sum += ((home_score + away_score) - (pred_h_runs + pred_a_runs)) ** 2
 
             cursor.execute("SELECT f5_home_prob, f5_away_prob, f5_tie_prob, f5_exp_home_runs, f5_exp_away_runs FROM F5_Forecasts WHERE game_pk = ?", (game_pk,))
             f5_fc = cursor.fetchone()
             
             if f5_fc and f5_fc[0] is not None:
-                raw_h_prob, raw_a_prob, raw_t_prob, f5_h_runs, f5_a_runs = f5_fc
+                raw_h_prob, raw_a_prob, raw_t_prob = f5_fc[0], f5_fc[1], f5_fc[2]
+                f5_h_runs = f5_fc[3] if f5_fc[3] is not None else 2.2
+                f5_a_runs = f5_fc[4] if f5_fc[4] is not None else 2.2
                 
                 # Apply 3-Way Isotonic Calibration
                 f5_h_prob, f5_a_prob, f5_t_prob = apply_3way_isotonic_calibration(cursor, raw_h_prob, raw_a_prob, raw_t_prob)
-                
-                # Write calibrated probabilities back
                 cursor.execute('UPDATE F5_Forecasts SET f5_home_prob=?, f5_away_prob=?, f5_tie_prob=? WHERE game_pk=?', (f5_h_prob, f5_a_prob, f5_t_prob, game_pk))
                 
                 f5_pick = home_team if f5_h_prob > f5_a_prob else away_team
@@ -320,12 +336,16 @@ def run_backtest_engine():
                 elif f5_pick == f5_actual: f5_wins += 1; f5_units += 0.909
                 else: f5_losses += 1; f5_units -= 1.000
                 
-                # TTOP & 1st Inning Spike Evolution 
+                # TTOP Starter Penalty Evolution
                 update_dynamic_weights(cursor, home_pitcher, f5_a_runs * 1.15, a_f5, is_pitcher=True)
                 update_dynamic_weights(cursor, away_pitcher, f5_h_runs * 1.15, h_f5, is_pitcher=True)
                 
-            update_dynamic_weights(cursor, home_team, forecast[2] if forecast else 4.0, home_score, is_offense=True)
-            update_dynamic_weights(cursor, away_team, forecast[3] if forecast else 4.0, away_score, is_offense=True)
+            # Full Game Evolution: Update Offense AND Pitching for both clubs
+            update_dynamic_weights(cursor, home_team, pred_h_runs, home_score, is_offense=True)
+            update_dynamic_weights(cursor, away_team, pred_h_runs, home_score, is_offense=False)
+            
+            update_dynamic_weights(cursor, away_team, pred_a_runs, away_score, is_offense=True)
+            update_dynamic_weights(cursor, home_team, pred_a_runs, away_score, is_offense=False)
             
             cursor.execute('''
                 INSERT OR REPLACE INTO Post_Match_Analysis 
@@ -340,15 +360,27 @@ def run_backtest_engine():
         print("No finalized historical games processed successfully.")
         return
         
+    full_win_rate = correct_predictions / total_games
+    brier_score = brier_score_sum / total_games
+    rmse = np.sqrt(squared_error_sum / total_games)
     f5_win_rate = f5_wins / (f5_wins + f5_losses) if (f5_wins + f5_losses) > 0 else 0
-    print(f"\nSOTA Engine-Linked Backtest Output: 2026 Season")
+
+    print(f"\n============================================================")
+    print(f"SOTA ENGINE DUAL BACKTEST REPORT: 2026 SEASON")
     print(f"Total Matchups Verified & Logged: {total_games}")
+    print(f"============================================================")
+    print(f"--- FULL-GAME ENGINE (9 INNINGS) ---")
+    print(f"Full-Game Record:         {correct_predictions}W - {total_games - correct_predictions}L")
+    print(f"Full-Game Win Rate:       {full_win_rate:.2%}")
+    print(f"Brier Score (0 = Exact):  {brier_score:.4f}")
+    print(f"RMSE (Run Variance):      {rmse:.2f} runs")
+    print(f"Full-Game ROI Projection: {full_units:+.2f} Units (Flat 1u @ -110)")
     print("-" * 60)
     print(f"--- FIRST 5 INNINGS ENGINE (F5) WITH TTOP & ISOTONIC CALIBRATION ---")
     print(f"F5 Record:                {f5_wins}W - {f5_losses}L - {f5_pushes}P")
     print(f"F5 Win Rate (w/o pushes): {f5_win_rate:.2%}")
     print(f"F5 ROI Projection:        {f5_units:+.2f} Units (Flat 1u @ -110)")
-    print("-" * 60)
+    print(f"============================================================\n")
 
 if __name__ == "__main__":
     run_backtest_engine()
