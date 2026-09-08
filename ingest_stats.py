@@ -6,8 +6,9 @@ def ingest_mlb_data():
     print("Initializing Factual Data Ingestion: Base Runs (BsR) Upgrade...")
     print("Enforcing Absolute Live Verification (ALV) for MLB Schedule...")
     
-    conn = sqlite3.connect('mlb_engine.db')
+    conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL;")
     
     cursor.executescript('''
         CREATE TABLE IF NOT EXISTS Pitcher_Stats (
@@ -28,7 +29,7 @@ def ingest_mlb_data():
         );
     ''')
 
-    # Safe Schema Migrations
+    # Safe Schema Migrations & Failsafes
     for col in ["bsr_per_game REAL", "updated_at TEXT"]:
         try:
             cursor.execute(f"ALTER TABLE Team_Offense ADD COLUMN {col}")
