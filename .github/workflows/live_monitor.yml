@@ -1,0 +1,38 @@
+name: MLB Live Game Monitor
+
+on:
+  workflow_dispatch:
+
+jobs:
+  live-monitor:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run Live Monitor & Send Alerts
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python live_monitor.py
+
+      - name: Commit and Push Updated Ledger
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Update live alert ledger and hydrated ALV data [skip ci]" || echo "No changes to commit"
+          git pull --rebase --autostash
+          git push
