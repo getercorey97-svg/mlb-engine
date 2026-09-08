@@ -1,6 +1,5 @@
 import os
 import sys
-import time
 import math
 import sqlite3
 import hashlib
@@ -179,15 +178,12 @@ def recalculate_forecast_with_umpire(conn, game_pk, home_team, away_team, ump_mo
     ''', (game_pk,))
     row = cursor.fetchone()
 
-    # If game wasn't populated pre-game, initialize safe league baseline runs
     base_home_runs = row[0] if (row and row[0] is not None) else 4.25
     base_away_runs = row[1] if (row and row[1] is not None) else 4.10
 
-    # Adjust expected runs by the newly identified umpire modifier
     updated_h_runs = round(base_home_runs * ump_mod, 3)
     updated_a_runs = round(base_away_runs * ump_mod, 3)
 
-    # Recalculate Pythagorean win expectancy (1.83 Exponent)
     denom = (updated_h_runs ** 1.83) + (updated_a_runs ** 1.83) + 0.0001
     updated_h_prob = round((updated_h_runs ** 1.83) / denom, 4)
     updated_a_prob = round(1.0 - updated_h_prob, 4)
@@ -237,7 +233,6 @@ def hydrate_missing_alv_data(conn, game_pk, home_team, away_team, live_feed):
             conn.commit()
             print(f"[ALV Lock] Hydrated Home Plate Umpire: {hp_umpire} (Modifier: {ump_mod:.3f}) for Game {game_pk}")
 
-            # Recalculate baseline model forecasts immediately
             recalculate_forecast_with_umpire(conn, game_pk, home_team, away_team, ump_mod)
 
     # 2. Stadium Weather Verification
@@ -296,7 +291,7 @@ def send_ntfy_alert(title, message, priority=3, tags="baseball,chart_with_upward
         print(f"[ntfy Error] Failed transmission: {e}")
 
 def run_live_cycle():
-    """Polls the active slate, executes hydration, recalculates, and issues alerts."""
+    """Polls the active slate, executes hydration, recalculates, and issues alerts once."""
     today = datetime.now().strftime('%Y-%m-%d')
     sched_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today}"
 
@@ -314,7 +309,7 @@ def run_live_cycle():
             game_pk = game['gamePk']
             abstract_state = game['status']['abstractGameState']
 
-            if abstract_state not in ["Live", "Final"]:
+            if abstract_state not in ["Live", "Final", "In Progress"]:
                 continue
 
             feed_url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
@@ -373,9 +368,13 @@ def run_live_cycle():
             live_h_prob = (synth_h_runs ** 1.83) / denom
             live_a_prob = 1.0 - live_h_prob
 
-            # 5. Extract Pitcher Props
-            cursor.execute("SELECT pitcher_name, over_5_5_k_prob FROM Pitcher_Props WHERE game_pk = ?", (game_pk,))
-            props = cursor.fetchall()
+            # 5. Extract Pitcher Props (Safe Fallback if missing)
+            try:
+                cursor.execute("SELECT pitcher_name, over_5_5_k_prob FROM Pitcher_Props WHERE game_pk = ?", (game_pk,))
+                props = cursor.fetchall()
+            except sqlite3.OperationalError:
+                props = []
+                
             prop_lines = []
             for p_name, k_prob in props:
                 if k_prob >= 0.58:
@@ -449,13 +448,12 @@ def run_live_cycle():
 if __name__ == "__main__":
     init_live_schema()
     print("==========================================================")
-    print("  Absolute Live Verification (ALV) Continuous Monitor")
+    print("  Absolute Live Verification (ALV) Single-Run Monitor")
     print(f"  Dispatch Target: https://ntfy.sh/{NTFY_TOPIC}")
     print("==========================================================")
 
-    while True:
-        try:
-            run_live_cycle()
-        except Exception as err:
-            print(f"[Loop Exception Caught]: {err}")
-        time.sleep(15)
+    try:
+        run_live_cycle()
+        print("Live cycle evaluation complete. Exiting cleanly.")
+    except Exception as err:
+        print(f"[Execution Exception Caught]: {err}")
