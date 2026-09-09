@@ -89,13 +89,15 @@ def main():
     print("Executing Phase 2: Ingesting Base MLB Data & F5 Seeding...")
     ingest_mlb_data()
     
+    # REMOVED EXCEPTION SUPPRESSION. This forces biological data to lock in.
     print("Executing Phase 3: Applying Advanced Environmental Context...")
-    try: execute_biological_pipeline() 
-    except: pass
-    try: execute_umpire_variance_pipeline()
-    except: pass
-    try: execute_statcast_pipeline()
-    except: pass
+    execute_biological_pipeline()
+    execute_umpire_variance_pipeline()
+    
+    try: 
+        execute_statcast_pipeline()
+    except Exception as e: 
+        print(f"Statcast execution bypassed: {e}")
     
     print("Executing Phase 4: Dual-Engine Simulation and Export...")
     run_ultimate_monte_carlo()
