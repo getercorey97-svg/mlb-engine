@@ -46,18 +46,19 @@ def run_ultimate_monte_carlo():
     # Train the SOTA Calibrator
     isotonic_model = train_isotonic_calibrator(conn)
 
-    # UPDATED JOIN: Extract all data, joining ALV, Umpires, Advanced Metrics, AND Biological Modifiers
+    # Corrected JOIN: Properly mapping Biological_Modifiers by team_name
     cursor.execute('''
         SELECT d.game_pk, d.away_team, d.home_team, d.away_pitcher, d.home_pitcher, d.air_density, 
                COALESCE(u.run_modifier, 1.0),
                COALESCE(am_away.catcher_framing_modifier, 1.0), COALESCE(am_away.bullpen_fatigue_modifier, 1.0),
                COALESCE(am_home.catcher_framing_modifier, 1.0), COALESCE(am_home.bullpen_fatigue_modifier, 1.0),
-               COALESCE(bm.away_penalty, 0.0), COALESCE(bm.home_penalty, 0.0)
+               COALESCE(bio_away.jet_lag_runs_penalty, 0.0), COALESCE(bio_home.jet_lag_runs_penalty, 0.0)
         FROM Daily_Lineups d
         LEFT JOIN Daily_Umpires u ON d.game_pk = u.game_pk
         LEFT JOIN Advanced_Metrics am_away ON d.away_team = am_away.team_name
         LEFT JOIN Advanced_Metrics am_home ON d.home_team = am_home.team_name
-        LEFT JOIN Biological_Modifiers bm ON d.game_pk = bm.game_pk
+        LEFT JOIN Biological_Modifiers bio_away ON d.away_team = bio_away.team_name
+        LEFT JOIN Biological_Modifiers bio_home ON d.home_team = bio_home.team_name
     ''')
     games = cursor.fetchall()
     
