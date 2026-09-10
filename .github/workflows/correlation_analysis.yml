@@ -1,7 +1,7 @@
 name: MLB Correlation & Discovery Sweep
 
 on:
-  workflow_dispatch: # Allows manual trigger from the GitHub Actions tab
+  workflow_dispatch: # Maintains your strict manual trigger requirement
 
 jobs:
   run-correlation:
@@ -28,12 +28,12 @@ jobs:
       - name: Execute Full-Matrix Correlation Sweep
         run: python correlation_engine.py
 
-      - name: Commit and Push Updated Database
+      - name: Commit and Push Updated Database & Mutations
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Stage the database and any automatically mutated code files
+          # Stage the database and any autonomously mutated code files
           git add -A
           
           # Commit the correlation logs and anomaly flags
