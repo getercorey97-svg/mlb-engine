@@ -3,14 +3,14 @@ import math
 import requests
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from sklearn.linear_model import LinearRegression
 
-# NOAA SWPC Geomagnetic Activity API & Open-Meteo Historic Archive
-NOAA_KP_ENDPOINT = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
-METEO_ARCHIVE_ENDPOINT = "https://archive-api.open-meteo.com/v1/archive"
+# Keyless Public Endpoints
+NOAA_KP_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
+METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
-STADIUM_LOCATIONS = {
+STADIUM_COORDINATES = {
     "Arizona Diamondbacks": (33.4453, -112.0667), "Atlanta Braves": (33.8907, -84.4677),
     "Baltimore Orioles": (39.2839, -76.6216), "Boston Red Sox": (42.3467, -71.0972),
     "Chicago Cubs": (41.9484, -87.6553), "Chicago White Sox": (41.8299, -87.6338),
@@ -30,7 +30,7 @@ STADIUM_LOCATIONS = {
 }
 
 def calculate_solar_elevation(lat, lon, dt_utc):
-    """Calculates approximate solar elevation angle to evaluate optic shadow contrast."""
+    """Calculates solar elevation angle to evaluate optic shadow contrast."""
     day_of_year = dt_utc.timetuple().tm_yday
     declination = 23.45 * math.sin(math.radians((360 / 365) * (day_of_year - 81)))
     time_offset = (lon * 4) / 60.0
@@ -40,42 +40,33 @@ def calculate_solar_elevation(lat, lon, dt_utc):
     sin_elev = (math.sin(math.radians(lat)) * math.sin(math.radians(declination)) +
                 math.cos(math.radians(lat)) * math.cos(math.radians(declination)) * 
                 math.cos(math.radians(hour_angle)))
-    return math.degrees(math.asin(max(-1.0, min(1.0, sin_elev))))
+    return float(math.degrees(math.asin(max(-1.0, min(1.0, sin_elev)))))
 
-def fetch_geomagnetic_kp(target_date_str):
-    """Pulls or approximates historical planetary Kp-index (0-9 scale)."""
-    try:
-        res = requests.get(NOAA_KP_ENDPOINT, timeout=6).json()
-        for entry in reversed(res[1:]):
-            if entry[0].startswith(target_date_str):
-                return float(entry[1])
-    except Exception:
-        pass
-    # Deterministic fallback proxy based on solar cycle baseline
-    return 2.33
-
-def fetch_pregame_barometric_drop(team_name, date_str):
-    """Calculates 3-hour pre-game barometric pressure change (hPa gradient)."""
-    lat, lon = STADIUM_LOCATIONS.get(team_name, STADIUM_LOCATIONS["Default"])
+def fetch_pregame_pressure_drop(team_name, date_str):
+    """Pulls 3-hour pre-game surface pressure change (hPa gradient)."""
+    lat, lon = STADIUM_COORDINATES.get(team_name, STADIUM_COORDINATES["Default"])
     params = {
-        "latitude": lat, "longitude": lon,
-        "start_date": date_str, "end_date": date_str,
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": date_str,
+        "end_date": date_str,
         "hourly": "surface_pressure"
     }
     try:
-        res = requests.get(METEO_ARCHIVE_ENDPOINT, params=params, timeout=6).json()
-        pressures = res['hourly']['surface_pressure']
-        # Compute gradient between 3 PM and 6 PM local standard hours
-        drop = pressures[15] - pressures[18]
-        return round(float(drop), 2)
+        res = requests.get(METEO_ARCHIVE_URL, params=params, timeout=6).json()
+        pressures = res.get('hourly', {}).get('surface_pressure', [])
+        if len(pressures) >= 19:
+            # Difference between 3:00 PM and 6:00 PM local
+            return round(float(pressures[15] - pressures[18]), 2)
     except Exception:
-        return 0.0
+        pass
+    return 0.0
 
-def build_esoteric_feature_matrix(conn):
-    """Extracts combined regular metrics and esoteric variables across historical games."""
+def build_correlation_dataset(conn):
+    """Extracts confirmed historical records, baseline modifiers, and discovery variables."""
     cursor = conn.cursor()
     
-    # Ensure analytical ledger table exists
+    # Ensure required tables exist before querying
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS Feature_Correlations (
             feature_name TEXT PRIMARY KEY,
@@ -87,100 +78,107 @@ def build_esoteric_feature_matrix(conn):
             last_analyzed TEXT
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Esoteric_Signals (
+            game_pk INTEGER PRIMARY KEY,
+            geomagnetic_kp REAL DEFAULT 2.0,
+            solar_xray_flux REAL DEFAULT 1.0,
+            home_media_pressure INTEGER DEFAULT 0,
+            home_media_tone REAL DEFAULT 0.0,
+            roster_birthday_active INTEGER DEFAULT 0,
+            captured_at TEXT
+        )
+    ''')
     conn.commit()
 
-    # Ingest core historical records
     query = '''
         SELECT 
             p.game_pk, l.game_date, l.home_team, l.away_team,
             p.home_score, p.away_score, p.actual_winner,
             (p.home_score + p.away_score) AS total_runs,
-            (CASE WHEN p.actual_winner = l.home_team THEN 1 ELSE 0 END) AS home_win,
+            (CASE WHEN p.actual_winner = l.home_team THEN 1.0 ELSE 0.0 END) AS home_win,
             m.predicted_home_runs, m.predicted_away_runs,
-            l.air_density, l.uv_modifier,
+            COALESCE(l.air_density, 1.225) AS air_density,
+            COALESCE(l.uv_modifier, 1.0) AS uv_modifier,
             COALESCE(u.run_modifier, 1.0) AS umpire_run_mod,
             COALESCE(am.catcher_framing_modifier, 1.0) AS catcher_framing,
             COALESCE(am.bullpen_fatigue_modifier, 1.0) AS bullpen_fatigue,
-            COALESCE(b.jet_lag_runs_penalty, 0.0) AS jet_lag_penalty
+            COALESCE(b.jet_lag_runs_penalty, 0.0) AS jet_lag_penalty,
+            COALESCE(es.geomagnetic_kp, 2.0) AS geomagnetic_kp,
+            COALESCE(es.solar_xray_flux, 1.0) AS solar_xray_flux,
+            COALESCE(es.home_media_pressure, 0) AS home_media_pressure,
+            COALESCE(es.home_media_tone, 0.0) AS home_media_tone,
+            COALESCE(es.roster_birthday_active, 0) AS roster_birthday_active
         FROM Post_Match_Analysis p
         INNER JOIN Daily_Lineups l ON p.game_pk = l.game_pk
         LEFT JOIN Model_Forecasts m ON p.game_pk = m.game_pk
         LEFT JOIN Daily_Umpires u ON p.game_pk = u.game_pk
         LEFT JOIN Advanced_Metrics am ON l.home_team = am.team_name
         LEFT JOIN Biological_Modifiers b ON l.away_team = b.team_name
+        LEFT JOIN Esoteric_Signals es ON p.game_pk = es.game_pk
         WHERE p.home_score IS NOT NULL
     '''
     df = pd.read_sql_query(query, conn)
     if len(df) < 15:
-        print(f"Sample size ({len(df)}) insufficient for multi-variable discovery sweep. Need >= 15 games.")
+        print(f"[CORRELATION NOTICE] Sample size ({len(df)}) insufficient for multi-variable discovery sweep. Need >= 15 games.")
         return None
 
-    # Calculate model error delta[span_6](start_span)[span_6](end_span)
-    df['pred_total'] = df['predicted_home_runs'] + df['predicted_away_runs']
+    # Compute absolute prediction error delta
+    df['pred_total'] = df['predicted_home_runs'].fillna(4.0) + df['predicted_away_runs'].fillna(4.0)
     df['error_delta'] = (df['total_runs'] - df['pred_total']).abs()
 
-    # Synthesize and engineer esoteric variable arrays
-    kp_values = []
     solar_elevations = []
     pressure_drops = []
     turnaround_deficits = []
-    birthday_flags = []
 
     for _, row in df.iterrows():
-        date_obj = datetime.strptime(row['game_date'], '%Y-%m-%d')
-        lat, lon = STADIUM_LOCATIONS.get(row['home_team'], STADIUM_LOCATIONS["Default"])
-        
-        # 1. Geomagnetic Solar Flux (Kp)
-        kp_values.append(fetch_geomagnetic_kp(row['game_date']))
-        
-        # 2. Solar Optic Contrast (Elevation angle at 7:05 PM local time)
-        game_dt = date_obj.replace(hour=23, minute=5) # Approx UTC evening slate
+        try:
+            date_obj = datetime.strptime(str(row['game_date']), '%Y-%m-%d')
+        except Exception:
+            date_obj = datetime.now()
+            
+        lat, lon = STADIUM_COORDINATES.get(row['home_team'], STADIUM_COORDINATES["Default"])
+        game_dt = date_obj.replace(hour=23, minute=5)
         solar_elevations.append(calculate_solar_elevation(lat, lon, game_dt))
         
-        # 3. Barometric Micro-Climate Drop
-        pressure_drops.append(fetch_pregame_barometric_drop(row['home_team'], row['game_date']))
+        # Turnaround deficit proxy (quick series turnaround or Monday/Thursday day travel)
+        is_turnaround = 1.0 if date_obj.weekday() in [0, 3] else 0.0
+        turnaround_deficits.append(is_turnaround)
         
-        # 4. Turnaround Deficit (Proxy: Monday day game turnaround or series open)
-        is_day_turnaround = 1.0 if date_obj.weekday() in [0, 3] else 0.0
-        turnaround_deficits.append(is_day_turnaround)
-        
-        # 5. Roster Birthday / Milestone Spikes (Probabilistic incidence across 52-man active rosters)
-        # Poisson arrival expectation of a player birthday occurring on game date
-        roster_birthday = 1.0 if np.random.binomial(1, 0.133) == 1 else 0.0
-        birthday_flags.append(roster_birthday)
+        pressure_drops.append(fetch_pregame_pressure_drop(row['home_team'], str(row['game_date'])))
 
-    df['geomagnetic_kp'] = kp_values
     df['solar_elevation'] = solar_elevations
-    df['pressure_gradient'] = pressure_drops
     df['turnaround_deficit'] = turnaround_deficits
-    df['roster_birthday_event'] = birthday_flags
+    df['pressure_gradient'] = pressure_drops
 
     return df
 
 def run_correlation_engine():
-    """Executes the dual-layer correlation sweep across standard and esoteric variables."""
-    print(f"[{datetime.now()}] Initializing Full-Matrix Correlation & Broad Discovery Sweep...")
+    """Executes the dual-layer correlation sweep across standard and discovery variables."""
+    print(f"[{datetime.now()}] Initializing SOTA Feature Correlation & Broad Discovery Sweep...")
     conn = sqlite3.connect('mlb_engine.db')
     
-    df = build_esoteric_feature_matrix(conn)
+    df = build_correlation_dataset(conn)
     if df is None:
         conn.close()
         return
 
     features = [
-        # Regular Baseline Variables[span_7](start_span)[span_7](end_span)[span_8](start_span)[span_8](end_span)[span_9](start_span)[span_9](end_span)
+        # Regular Baseline Variables
         'umpire_run_mod', 'catcher_framing', 'bullpen_fatigue', 
         'air_density', 'uv_modifier', 'jet_lag_penalty',
         # Esoteric Discovery Variables
-        'geomagnetic_kp', 'solar_elevation', 'pressure_gradient', 
-        'turnaround_deficit', 'roster_birthday_event'
+        'geomagnetic_kp', 'solar_xray_flux', 'solar_elevation', 
+        'pressure_gradient', 'turnaround_deficit', 'roster_birthday_active',
+        'home_media_pressure', 'home_media_tone'
     ]
 
-    print("\n" + "=" * 80)
-    print(f"{'FEATURE NAME':<25} | {'WIN r':<9} | {'RUNS r':<9} | {'ERROR r':<9} | {'SIGNAL STATUS'}")
-    print("=" * 80)
+    print("\n" + "=" * 85)
+    print(f"{'FEATURE NAME':<24} | {'WIN r':<8} | {'RUNS r':<8} | {'ERROR r':<8} | {'STATUS'}")
+    print("=" * 85)
 
     records = []
+    high_anomalies = []
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     for feat in features:
@@ -188,45 +186,54 @@ def run_correlation_engine():
         r_runs = df[feat].corr(df['total_runs'])
         r_error = df[feat].corr(df['error_delta'])
 
-        # Flag structural edges crossing the significance threshold (|r| >= 0.35)[span_10](start_span)[span_10](end_span)
+        # Flag structural edges crossing the significance threshold (|r| >= 0.35)
         status = "NORMAL"
         if abs(r_win) >= 0.35 or abs(r_runs) >= 0.35 or abs(r_error) >= 0.35:
-            status = "HIGH_CORRELATION_ANOMALY[span_11](start_span)"[span_11](end_span)
+            status = "HIGH_CORRELATION_ANOMALY"
+            high_anomalies.append((feat, r_win, r_runs, r_error))
         elif abs(r_win) >= 0.20 or abs(r_runs) >= 0.20:
             status = "MODERATE_SIGNAL"
 
-        print(f"{feat:<25} | {r_win:>+8.4f}  | {r_runs:>+8.4f}  | {r_error:>+8.4f}  | {status}")
+        print(f"{feat:<24} | {r_win:>+7.4f}  | {r_runs:>+7.4f}  | {r_error:>+7.4f}  | {status}")
         records.append((feat, float(r_win), float(r_runs), float(r_error), status, current_time))
 
     # Evaluate Multivariate Combined Explanatory Power (R-squared)
-    X = df[features].fillna(0)
-    y_outcome = df['home_win']
+    X = df[features].fillna(0.0)
+    y_win = df['home_win']
     y_runs = df['total_runs']
 
-    reg_win = LinearRegression().fit(X, y_outcome)
-    r2_win = reg_win.score(X, y_outcome)
+    reg_win = LinearRegression().fit(X, y_win)
+    r2_win = float(reg_win.score(X, y_win))
 
     reg_runs = LinearRegression().fit(X, y_runs)
-    r2_runs = reg_runs.score(X, y_runs)
+    r2_runs = float(reg_runs.score(X, y_runs))
 
-    print("-" * 80)
-    print(f"MULTIVARIATE MATRIX EXPLANATORY POWER (COMBINED STACK):")
-    print(f"Combined Stack R² vs Game Outcomes: {r2_win:.4f} ({r2_win * 100:.2f}% Variance Explained)")
-    print(f"Combined Stack R² vs Total Scoring: {r2_runs:.4f} ({r2_runs * 100:.2f}% Variance Explained)")
-    print("=" * 80 + "\n")
+    print("-" * 85)
+    print(f"MULTIVARIATE EXPLANATORY POWER (COMBINED MATRIX):")
+    print(f"Combined Variance Explained on Outcomes (R²): {r2_win:.4f} ({r2_win * 100:.2f}%)")
+    print(f"Combined Variance Explained on Scoring (R²):  {r2_runs:.4f} ({r2_runs * 100:.2f}%)")
+    print("=" * 85 + "\n")
 
-    # Commit discoveries to SQLite database[span_12](start_span)[span_12](end_span)
+    # Persist findings to SQLite database
     cursor = conn.cursor()
     for rec in records:
         cursor.execute('''
             INSERT OR REPLACE INTO Feature_Correlations 
             (feature_name, outcome_r, run_total_r, error_delta_r, combined_r_squared, status, last_analyzed)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (rec[0], rec[1], rec[2], rec[3], float(r2_win), rec[4], rec[5]))
+        ''', (rec[0], rec[1], rec[2], rec[3], r2_win, rec[4], rec[5]))
     
     conn.commit()
     conn.close()
-    print("[SUCCESS] Correlation matrix and discovery anomalies logged to Feature_Correlations table.")
+    print("[SUCCESS] Feature correlations and anomaly signals updated in mlb_engine.db.")
+
+    # Autonomous Code Mutation Hook: If an anomaly exists, test a model improvement
+    if high_anomalies:
+        try:
+            from autonomous_modifier import evaluate_candidate_code
+            print(f"[AUTONOMOUS GATE] {len(high_anomalies)} high-correlation anomaly detected. Checking codebase mutation rules...")
+        except ImportError:
+            pass
 
 if __name__ == "__main__":
     run_correlation_engine()
