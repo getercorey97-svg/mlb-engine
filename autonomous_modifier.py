@@ -3,7 +3,7 @@ import shutil
 import sqlite3
 import numpy as np
 from datetime import datetime
-from backtest_engine import run_historical_backtest[span_7](start_span)[span_7](end_span)
+from backtest_engine import run_historical_backtest
 
 EVOLUTION_LEDGER_TABLE = '''
     CREATE TABLE IF NOT EXISTS Code_Evolution_Ledger (
@@ -73,8 +73,8 @@ def evaluate_candidate_code(target_file, candidate_code, patch_description):
     
     mutation_successful = False
     try:
-        # Run historical validation across the last 30 days[span_8](start_span)[span_8](end_span)
-        run_historical_backtest("2026-08-01", "2026-09-01")[span_9](start_span)[span_9](end_span)
+        # Run historical validation across the last 30 days
+        run_historical_backtest("2026-08-01", "2026-09-01")
         
         # 3. Measure candidate performance
         cursor.execute('''
@@ -83,7 +83,7 @@ def evaluate_candidate_code(target_file, candidate_code, patch_description):
                               (home_prob <= 0.5 AND actual_away_runs > actual_home_runs) THEN 1 ELSE 0 END)
             FROM Backtest_Results
             WHERE home_prob IS NOT NULL
-        ''')[span_10](start_span)[span_10](end_span)
+        ''')
         eval_rows = cursor.fetchall()
         
         candidate_brier = np.mean([(r[0] - r[1]) ** 2 for r in eval_rows])
