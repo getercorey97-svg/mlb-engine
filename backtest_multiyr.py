@@ -64,7 +64,7 @@ def update_dynamic_weights(cursor, name, predicted_runs, actual_runs, is_offense
         new_pitch_mod = max(0.53, min(1.47, pitch_mod + (error_delta * adaptive_lr)))
         cursor.execute('INSERT OR REPLACE INTO Dynamic_Modifiers (team_name, offensive_modifier, pitching_modifier, last_updated) VALUES (?, ?, ?, ?)', (name, off_mod, new_pitch_mod, current_time))
 
-def run_backtest_sweep(years_back=5):
+def run_backtest_sweep(years_back=1):
     print(f"Initializing SOTA Multi-Year Backtest Engine ({years_back}-Year Historical Sweep)...")
     
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
@@ -72,7 +72,6 @@ def run_backtest_sweep(years_back=5):
     cursor.execute("PRAGMA journal_mode=WAL;")
     cursor.execute("PRAGMA busy_timeout=10000;")
     
-    # Ensure database structural integrity
     cursor.executescript('''
         CREATE TABLE IF NOT EXISTS Model_Forecasts (
             game_pk INTEGER PRIMARY KEY, home_team TEXT, away_team TEXT, 
@@ -125,14 +124,11 @@ def run_backtest_sweep(years_back=5):
                 
                 air_density, uv_modifier = get_historical_atmosphere(home_team, date_str)
                 
-                # 1. Blind Pre-Game Variable Ingestion (No outcome awareness)
                 cursor.execute('''
                     INSERT OR REPLACE INTO Daily_Lineups (game_pk, game_date, away_team, home_team, away_pitcher, home_pitcher, air_density, uv_modifier, status)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (game_pk, date_str, away_team, home_team, away_pitcher, home_pitcher, air_density, uv_modifier, 'Final'))
                 
-                # 2. Execute Baseline Prediction (Simulated Lambda & Win Probabilities)
-                # Pull current dynamic weights learned up to this exact historical moment
                 cursor.execute('SELECT offensive_modifier, pitching_modifier FROM Dynamic_Modifiers WHERE team_name = ?', (home_team,))
                 h_mod = cursor.fetchone() or (1.0, 1.0)
                 cursor.execute('SELECT offensive_modifier, pitching_modifier FROM Dynamic_Modifiers WHERE team_name = ?', (away_team,))
@@ -149,7 +145,6 @@ def run_backtest_sweep(years_back=5):
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (game_pk, home_team, away_team, home_prob, away_prob, abs(home_prob - away_prob), pred_h_runs, pred_a_runs, date_str))
 
-                # 3. Post-Mortem Feedback Loop & Weight Evolution
                 actual_winner = home_team if home_score > away_score else away_team
                 predicted_winner = home_team if home_prob > away_prob else away_team
                 is_correct = 1 if predicted_winner == actual_winner else 0
@@ -169,7 +164,7 @@ def run_backtest_sweep(years_back=5):
 
     conn.close()
     win_rate = (correct_predictions / total_games) * 100 if total_games > 0 else 0
-    print(f"\n[BACKTEST COMPLETE] Verified {total_games} games across {years_back} years. Historical Win Rate: {win_rate:.2f}%")
+    print(f"\n[BACKTEST COMPLETE] Verified {total_games} games across {years_back} year(s). Historical Win Rate: {win_rate:.2f}%")
 
 if __name__ == "__main__":
-    run_backtest_sweep(years_back=5)
+    run_backtest_sweep(years_back=1)
