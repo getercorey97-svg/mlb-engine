@@ -1,10 +1,10 @@
 name: MLB Correlation & Discovery Sweep
 
 on:
-  workflow_dispatch: # Maintains your strict manual trigger requirement
+  workflow_dispatch:
 
 jobs:
-  run-correlation:
+  run-correlation-sweep:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -22,6 +22,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy requests scikit-learn lightgbm pybaseball
 
+      - name: Execute Historical Backtest (Seed Database)
+        run: python backtest_engine.py
+
       - name: Execute Open-Source Discovery Ingestion
         run: python open_source_discovery.py
 
@@ -33,11 +36,11 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Stage the database and any autonomously mutated code files
+          # Stage the populated database and any autonomously mutated code files
           git add -A
           
-          # Commit the correlation logs and anomaly flags
-          git commit -m "Auto-update database with discovery sweep & correlation matrix [skip ci]" || echo "No changes to commit"
+          # Commit the historical backtest, correlation logs, and anomaly flags
+          git commit -m "Auto-update database with backtest, discovery sweep & correlation matrix [skip ci]" || echo "No changes to commit"
           
           # Pull with autostash to prevent overwrite conflicts, then push
           git pull --rebase --autostash
