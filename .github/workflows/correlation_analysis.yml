@@ -22,8 +22,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy requests scikit-learn lightgbm pybaseball
 
-      - name: Execute Historical Backtest (Seed Database)
-        run: python backtest_engine.py
+      - name: Execute 1-Year Historical Backtest (Seed Database)
+        run: python backtest_multiyr.py
 
       - name: Execute Open-Source Discovery Ingestion
         run: python open_source_discovery.py
@@ -40,7 +40,7 @@ jobs:
           git add -A
           
           # Commit the historical backtest, correlation logs, and anomaly flags
-          git commit -m "Auto-update database with backtest, discovery sweep & correlation matrix [skip ci]" || echo "No changes to commit"
+          git commit -m "Auto-update database: 1-Year backtest & correlation sweep [skip ci]" || echo "No changes to commit"
           
           # Pull with autostash to prevent overwrite conflicts, then push
           git pull --rebase --autostash
