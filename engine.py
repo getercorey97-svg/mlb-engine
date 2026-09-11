@@ -1,36 +1,148 @@
 import sqlite3
 import numpy as np
+from datetime import datetime
+from sklearn.isotonic import IsotonicRegression
 
 def run_ultimate_monte_carlo():
-    conn = sqlite3.connect('mlb_engine.db')
-    cursor = conn.cursor()
-    
-    # Pre-fetch all metrics to RAM to prevent database locking/lag
-    ops_map = {r[0]: r[1] for r in conn.execute("SELECT team_name, ops FROM Team_Offense").fetchall()}
-    pitcher_map = {r[0]: r[1] for r in conn.execute("SELECT last_name, est_era FROM Pitcher_Stats").fetchall()}
+    print("=" * 65)
+    print(f"[{datetime.now()}] Running Ultimate Dual-Engine Monte Carlo (BsR 1.8 + NegBinomial)")
+    print("=" * 65)
 
-    cursor.execute('SELECT game_pk, away_team, home_team, away_pitcher, home_pitcher FROM Daily_Lineups WHERE status != "Final"')
+    conn = sqlite3.connect('mlb_engine.db', timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=10000;")
+    cursor = conn.cursor()
+
+    # Ensure table schema has all forecast metrics
+    cursor.executescript('''
+    CREATE TABLE IF NOT EXISTS Model_Forecasts (
+        game_pk INTEGER PRIMARY KEY,
+        home_team TEXT,
+        away_team TEXT,
+        home_prob REAL,
+        away_prob REAL,
+        predicted_edge REAL,
+        predicted_home_runs REAL,
+        predicted_away_runs REAL,
+        timestamp TEXT
+    );
+    ''')
+
+    # Preload metrics into memory for lock-free execution
+    team_bsr = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(bsr_per_game, 4.50) FROM Team_Offense").fetchall()}
+    team_ops = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(ops, 0.720) FROM Team_Offense").fetchall()}
+    pitcher_era = {r[0]: r[1] for r in cursor.execute("SELECT last_name, COALESCE(est_era, 4.20) FROM Pitcher_Stats").fetchall()}
+    park_mods = {r[0]: r[1] for r in cursor.execute("SELECT home_team, COALESCE(run_factor, 1.00) FROM Park_Factors").fetchall()}
+    bullpen_fatigue = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(fatigue_multiplier, 1.00) FROM Bullpen_Fatigue").fetchall()}
+    circadian_drag = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(jet_lag_runs_penalty, 0.00) FROM Biological_Modifiers").fetchall()}
+
+    # Extract scheduled matchups
+    cursor.execute('''
+        SELECT game_pk, away_team, home_team, away_pitcher, home_pitcher, 
+               COALESCE(air_density, 1.225), COALESCE(uv_modifier, 1.00)
+        FROM Daily_Lineups 
+        WHERE status != "Final"
+    ''')
     games = cursor.fetchall()
 
-    for pk, away, home, away_p, home_p in games:
-        a_ops = ops_map.get(away, 0.720)
-        h_ops = ops_map.get(home, 0.720)
-        h_sp_era = pitcher_map.get(home_p.split(' ')[-1] if home_p else "", 4.20)
-        a_sp_era = pitcher_map.get(away_p.split(' ')[-1] if away_p else "", 4.20)
-        
-        # 50,000 Iterations Vectorized in NumPy (Lightning Fast)
-        it = 50000
-        away_runs = np.random.poisson((h_sp_era * (a_ops/0.72) * 0.55), it)
-        home_runs = np.random.poisson((a_sp_era * (h_ops/0.72) * 0.55), it)
-        
-        h_prob = np.mean(home_runs > away_runs)
-        a_prob = 1.0 - h_prob
-        
-        cursor.execute('UPDATE Model_Forecasts SET away_prob=?, home_prob=?, timestamp=DATETIME("now") WHERE game_pk=?', (a_prob, h_prob, pk))
-        print(f"Engine Resolve: {away} @ {home} | Home Prob: {h_prob:.1%}")
+    if not games:
+        print("No active games found to simulate.")
+        conn.close()
+        return
+
+    # Train Isotonic Calibrator on completed historical games
+    cursor.execute('''
+        SELECT m.home_prob, (CASE WHEN p.home_score > p.away_score THEN 1.0 ELSE 0.0 END)
+        FROM Post_Match_Analysis p
+        INNER JOIN Model_Forecasts m ON p.game_pk = m.game_pk
+        WHERE m.home_prob IS NOT NULL AND p.home_score IS NOT NULL
+        ORDER BY p.game_pk DESC LIMIT 400
+    ''')
+    hist_data = cursor.fetchall()
+
+    calibrator = None
+    if len(hist_data) >= 50:
+        raw_p = np.array([r[0] for r in hist_data])
+        actual_w = np.array([r[1] for r in hist_data])
+        calibrator = IsotonicRegression(out_of_bounds='clip')
+        calibrator.fit(raw_p, actual_w)
+        print(f"[CALIBRATOR] Isotonic Regression active (trained on {len(hist_data)} empirical linescores)")
+
+    it = 50000        # 50k Permutations Vectorized
+    dispersion = 1.35  # Overdispersion factor
+
+    for pk, away, home, away_p, home_p, rho, uv in games:
+        a_sp_last = away_p.split(' ')[-1] if away_p and away_p != "TBD" else ""
+        h_sp_last = home_p.split(' ')[-1] if home_p and home_p != "TBD" else ""
+
+        a_sp_era = pitcher_era.get(a_sp_last, 4.20)
+        h_sp_era = pitcher_era.get(h_sp_last, 4.20)
+
+        # Offense Base Runs
+        a_base_runs = team_bsr.get(away, (team_ops.get(away, 0.720) / 0.720) * 4.50)
+        h_base_runs = team_bsr.get(home, (team_ops.get(home, 0.720) / 0.720) * 4.50)
+
+        # Environmental & Drag Modifiers
+        park_mult = park_mods.get(home, 1.00)
+        air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
+        uv_mult = uv or 1.00
+
+        # Bullpen & Circadian Modifiers
+        a_pen_fatigue = bullpen_fatigue.get(away, 1.00)
+        h_pen_fatigue = bullpen_fatigue.get(home, 1.00)
+        a_circadian_penalty = circadian_drag.get(away, 0.00)
+
+        # Expected Run Formulas
+        exp_away_runs = max(0.2, (
+            (a_base_runs * 0.55 * (h_sp_era / 4.20)) +
+            (a_base_runs * 0.45 * h_pen_fatigue)
+        ) * park_mult * air_drag_mult * uv_mult - a_circadian_penalty)
+
+        exp_home_runs = max(0.2, (
+            (h_base_runs * 0.55 * (a_sp_era / 4.20)) +
+            (h_base_runs * 0.45 * a_pen_fatigue)
+        ) * park_mult * air_drag_mult * uv_mult)
+
+        # Negative Binomial Parameterization
+        va = max(exp_away_runs + 0.01, exp_away_runs * dispersion)
+        vh = max(exp_home_runs + 0.01, exp_home_runs * dispersion)
+
+        pa = max(0.01, min(0.99, exp_away_runs / va))
+        ph = max(0.01, min(0.99, exp_home_runs / vh))
+
+        na = max(0.1, (exp_away_runs ** 2) / (va - exp_away_runs))
+        nh = max(0.1, (exp_home_runs ** 2) / (vh - exp_home_runs))
+
+        # Vectorized Monte Carlo Simulation
+        away_sim = np.clip(np.random.negative_binomial(na, pa, it), 0, 22)
+        home_sim = np.clip(np.random.negative_binomial(nh, ph, it), 0, 22)
+
+        raw_home_prob = float(np.mean(home_sim > away_sim))
+
+        # Calibrate output
+        if calibrator:
+            final_home_prob = float(calibrator.predict([raw_home_prob])[0])
+            final_home_prob = max(0.05, min(0.95, final_home_prob))
+        else:
+            final_home_prob = raw_home_prob
+
+        final_away_prob = round(1.0 - final_home_prob, 4)
+        final_home_prob = round(final_home_prob, 4)
+        edge = round(abs(final_home_prob - final_away_prob), 4)
+
+        now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        cursor.execute('''
+        INSERT OR REPLACE INTO Model_Forecasts 
+        (game_pk, home_team, away_team, home_prob, away_prob, predicted_edge, predicted_home_runs, predicted_away_runs, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (pk, home, away, final_home_prob, final_away_prob, edge, round(exp_home_runs, 2), round(exp_away_runs, 2), now_ts))
+
+        print(f"Game {pk}: {away} ({exp_away_runs:.2f}) @ {home} ({exp_home_runs:.2f}) | H: {final_home_prob:.1%} | A: {final_away_prob:.1%} | Edge: {edge:.1%}")
 
     conn.commit()
     conn.close()
+    print("[SUCCESS] Monte Carlo execution completed. Model_Forecasts populated.")
 
 if __name__ == "__main__":
     run_ultimate_monte_carlo()
