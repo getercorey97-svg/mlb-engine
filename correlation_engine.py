@@ -6,7 +6,7 @@ from datetime import datetime
 CORRELATION_SIGNIFICANCE_THRESHOLD = 0.25
 
 def ensure_correlation_schemas(cursor):
-    """Guarantees all join tables exist before sweeping matrix."""
+    """Guarantees table schema aligns with all expected correlation metrics."""
     cursor.executescript('''
     CREATE TABLE IF NOT EXISTS Post_Match_Analysis (
         game_pk INTEGER PRIMARY KEY,
@@ -55,7 +55,12 @@ def ensure_correlation_schemas(cursor):
         roster_birthday_active INTEGER DEFAULT 0,
         captured_at TEXT
     );
-    CREATE TABLE IF NOT EXISTS Feature_Correlations (
+    ''')
+
+    # Recreate Feature_Correlations with the exact target columns
+    cursor.execute("DROP TABLE IF EXISTS Feature_Correlations;")
+    cursor.execute('''
+    CREATE TABLE Feature_Correlations (
         feature_name TEXT PRIMARY KEY,
         corr_with_total_runs REAL,
         corr_with_model_error REAL,
