@@ -4,22 +4,25 @@ import sqlite3
 import requests
 from datetime import datetime
 
-NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "mlb-alv-alerts-8899")
+# Falls back directly to your verified topic if secret is unset or empty
+NTFY_TOPIC = os.getenv("NTFY_TOPIC") or "mlb-alv-alerts-8899"
 
 def send_mobile_alert(title, message, priority="default"):
     """Dispatches zero-cost instant push alerts via ntfy."""
     try:
-        requests.post(
-            f"https://ntfy.sh/{NTFY_TOPIC}",
+        url = f"https://ntfy.sh/{NTFY_TOPIC}"
+        headers = {
+            "Title": title,
+            "Priority": priority,
+            "Tags": "robot,baseball"
+        }
+        res = requests.post(
+            url,
             data=message.encode('utf-8'),
-            headers={
-                "Title": title,
-                "Priority": priority,
-                "Tags": "robot,warning"
-            },
+            headers=headers,
             timeout=10
         )
-        print("[WATCHDOG ALERT] Dispatched notification to mobile phone.")
+        print(f"[WATCHDOG ALERT] Dispatched notification to ntfy.sh/{NTFY_TOPIC} (Status: {res.status_code})")
     except Exception as e:
         print(f"Failed to dispatch mobile notification: {e}")
 
@@ -27,12 +30,12 @@ def run_health_checks():
     print(f"[{datetime.now()}] Running Autonomous Watchdog Health Audit...")
     db_file = "mlb_engine.db"
 
-    # Verify database file existence
+    # 1. Verify database file existence
     if not os.path.exists(db_file):
         send_mobile_alert("🚨 Engine Alert: Database Missing", "mlb_engine.db was not found after execution!", priority="urgent")
         sys.exit(1)
 
-    # Verify SQLite schema and page integrity
+    # 2. Verify SQLite schema and page integrity
     try:
         conn = sqlite3.connect(db_file, timeout=15)
         cursor = conn.cursor()
@@ -56,7 +59,7 @@ def run_health_checks():
         send_mobile_alert("🚨 Watchdog Crash", f"Database check threw an exception: {e}", priority="high")
         sys.exit(1)
 
-    # Clean transient SQLite WAL lock files before Git push
+    # 3. Clean transient SQLite WAL lock files before Git push
     for lock in ["mlb_engine.db-wal", "mlb_engine.db-shm"]:
         if os.path.exists(lock):
             try:
