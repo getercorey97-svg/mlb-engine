@@ -4,7 +4,7 @@ from datetime import datetime
 from sklearn.isotonic import IsotonicRegression
 
 def ensure_engine_schemas(cursor):
-    """Guarantees all reference tables exist with valid defaults."""
+    """Guarantees all reference tables exist with auto-migration for Daily_Umpires."""
     cursor.executescript('''
     CREATE TABLE IF NOT EXISTS Model_Forecasts (
         game_pk INTEGER PRIMARY KEY,
@@ -71,6 +71,11 @@ def ensure_engine_schemas(cursor):
     );
     ''')
 
+    cursor.execute("PRAGMA table_info(Daily_Umpires);")
+    cols = [c[1] for c in cursor.fetchall()]
+    if 'umpire_locked' not in cols:
+        cursor.execute("ALTER TABLE Daily_Umpires ADD COLUMN umpire_locked INTEGER DEFAULT 0;")
+
 def run_ultimate_monte_carlo():
     print("=" * 65)
     print(f"[{datetime.now()}] Running Deterministic Dual-Engine Monte Carlo (BsR 1.8 + NegBinomial)")
@@ -91,9 +96,13 @@ def run_ultimate_monte_carlo():
     park_mods = {r[0]: r[1] for r in cursor.execute("SELECT home_team, COALESCE(run_factor, 1.00) FROM Park_Factors").fetchall()}
     bullpen_fatigue = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(fatigue_multiplier, 1.00) FROM Bullpen_Fatigue").fetchall()}
     circadian_drag = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(jet_lag_runs_penalty, 0.00) FROM Biological_Modifiers").fetchall()}
-    umpire_mods = {r[0]: (r[1], r[2]) for r in cursor.execute("SELECT game_pk, COALESCE(run_modifier, 1.00), COALESCE(umpire_locked, 0) FROM Daily_Umpires").fetchall()}
+    
+    # Safe umpire loading with fallback
+    try:
+        umpire_mods = {r[0]: (r[1], r[2]) for r in cursor.execute("SELECT game_pk, COALESCE(run_modifier, 1.00), COALESCE(umpire_locked, 0) FROM Daily_Umpires").fetchall()}
+    except Exception:
+        umpire_mods = {}
 
-    # Extract scheduled ALV matchups
     cursor.execute('''
         SELECT game_pk, away_team, home_team, away_pitcher, home_pitcher, 
                COALESCE(air_density, 1.225), COALESCE(uv_modifier, 1.00)
@@ -107,7 +116,7 @@ def run_ultimate_monte_carlo():
         conn.close()
         return
 
-    # Train Isotonic Calibrator on completed historical games
+    # Train Isotonic Calibrator
     cursor.execute('''
         SELECT m.home_prob, (CASE WHEN p.home_score > p.away_score THEN 1.0 ELSE 0.0 END)
         FROM Post_Match_Analysis p
@@ -129,12 +138,11 @@ def run_ultimate_monte_carlo():
             print(f"[CALIBRATOR] Warning during training: {e}. Using raw probability.")
             calibrator = None
 
-    it = 50000        # 50k Permutations
-    dispersion = 1.35  # Overdispersion factor
+    it = 50000
+    dispersion = 1.35
 
     for pk, away, home, away_p, home_p, rho, uv in games:
-        # Deterministic Anchor: Seed generator using game_pk
-        # Ensures that multiple runs do not drift randomly unless input variables change
+        # Deterministic seed anchor: seed=game_pk
         rng = np.random.default_rng(seed=int(pk))
 
         a_sp_last = away_p.split(' ')[-1] if away_p and away_p != "TBD" else ""
@@ -143,11 +151,9 @@ def run_ultimate_monte_carlo():
         a_sp_era = pitcher_era.get(a_sp_last, 4.20)
         h_sp_era = pitcher_era.get(h_sp_last, 4.20)
 
-        # Offense Base Runs (BsR)
         a_base_runs = team_bsr.get(away, (team_ops.get(away, 0.720) / 0.720) * 4.50)
         h_base_runs = team_bsr.get(home, (team_ops.get(home, 0.720) / 0.720) * 4.50)
 
-        # Environmental, Aerodynamic & Umpire Zone Modifiers
         park_mult = park_mods.get(home, 1.00)
         air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
         uv_mult = uv or 1.00
@@ -155,12 +161,10 @@ def run_ultimate_monte_carlo():
         ump_mod, ump_locked = umpire_mods.get(pk, (1.00, 0))
         ump_badge = "🔒 LOCKED" if ump_locked == 1 else "⏳ TBD"
 
-        # Bullpen and Circadian Liabilities
         a_pen_fatigue = bullpen_fatigue.get(away, 1.00)
         h_pen_fatigue = bullpen_fatigue.get(home, 1.00)
         a_circadian_penalty = circadian_drag.get(away, 0.00)
 
-        # Expected Run Formulas with Umpire Recalibration
         exp_away_runs = max(0.2, (
             (a_base_runs * 0.55 * (h_sp_era / 4.20)) +
             (a_base_runs * 0.45 * h_pen_fatigue)
@@ -171,7 +175,6 @@ def run_ultimate_monte_carlo():
             (h_base_runs * 0.45 * a_pen_fatigue)
         ) * park_mult * air_drag_mult * uv_mult * ump_mod)
 
-        # Negative Binomial Parameterization
         va = max(exp_away_runs + 0.01, exp_away_runs * dispersion)
         vh = max(exp_home_runs + 0.01, exp_home_runs * dispersion)
 
@@ -181,13 +184,11 @@ def run_ultimate_monte_carlo():
         na = max(0.1, (exp_away_runs ** 2) / (va - exp_away_runs))
         nh = max(0.1, (exp_home_runs ** 2) / (vh - exp_home_runs))
 
-        # Vectorized 50,000 Permutations via Deterministic RNG
         away_sim = np.clip(rng.negative_binomial(na, pa, it), 0, 22)
         home_sim = np.clip(rng.negative_binomial(nh, ph, it), 0, 22)
 
         raw_home_prob = float(np.mean(home_sim > away_sim))
 
-        # Apply Isotonic Calibration
         if calibrator:
             try:
                 final_home_prob = float(calibrator.predict([raw_home_prob])[0])
