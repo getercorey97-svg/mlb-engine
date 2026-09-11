@@ -92,26 +92,32 @@ def export_forecasts_and_check_odds():
 
     content = "\n".join(lines)
 
-    # GUARANTEED WRITE: Prevents any missing pathspec in Git
-    with open("PREDICTIONS_TODAY.md", "w") as f:
+    # GUARANTEED WRITE
+    with open("PREDICTIONS_TODAY.md", "w", encoding="utf-8") as f:
         f.write(content)
 
     summary_path = os.environ.get('GITHUB_STEP_SUMMARY')
     if summary_path:
-        with open(summary_path, "a") as f:
+        with open(summary_path, "a", encoding="utf-8") as f:
             f.write("\n" + content + "\n")
 
-    # Push to mobile via ntfy
+    # Clean ASCII Title in HTTP Headers prevents latin-1 codec failure
     if tier_1_picks:
         slip_msg = "🎯 **TODAY'S VALUE BETS**\n\n" + "\n".join(tier_1_picks)
+        headers = {
+            "Title": "MLB Actionable Betting Slips",
+            "Priority": "4",
+            "Markdown": "yes",
+            "Tags": "ticket,baseball"
+        }
         try:
-            requests.post(
+            res = requests.post(
                 f"https://ntfy.sh/{NTFY_TOPIC}",
                 data=slip_msg.encode('utf-8'),
-                headers={"Title": "⚾ MLB Actionable Betting Slips", "Priority": "4", "Markdown": "yes", "Tags": "ticket,baseball"},
+                headers=headers,
                 timeout=10
             )
-            print(f"[ntfy] Value picks dispatched to ntfy.sh/{NTFY_TOPIC}")
+            print(f"[ntfy] Value picks dispatched to ntfy.sh/{NTFY_TOPIC} (Status: {res.status_code})")
         except Exception as e:
             print(f"ntfy error: {e}")
 
