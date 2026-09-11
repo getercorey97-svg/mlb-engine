@@ -26,10 +26,13 @@ def export_forecasts_and_check_odds():
         COALESCE(d.away_pitcher, 'TBD') as away_sp,
         COALESCE(d.home_pitcher, 'TBD') as home_sp,
         COALESCE(f.f5_away_prob, 0.0), COALESCE(f.f5_home_prob, 0.0),
-        COALESCE(f.f5_exp_away_runs, 0.0), COALESCE(f.f5_exp_home_runs, 0.0)
+        COALESCE(f.f5_exp_away_runs, 0.0), COALESCE(f.f5_exp_home_runs, 0.0),
+        COALESCE(u.home_plate_umpire, 'Unknown / TBD') as hp_umpire,
+        COALESCE(u.umpire_locked, 0) as ump_locked
     FROM Model_Forecasts m
     LEFT JOIN Daily_Lineups d ON m.game_pk = d.game_pk
     LEFT JOIN F5_Forecasts f ON m.game_pk = f.game_pk
+    LEFT JOIN Daily_Umpires u ON m.game_pk = u.game_pk
     ORDER BY m.predicted_edge DESC
     '''
 
@@ -54,11 +57,11 @@ def export_forecasts_and_check_odds():
         lines.append("### ℹ️ No active MLB games are currently scheduled or pending simulation for today's slate.\n")
     else:
         lines.append("## 🎟️ Primary Value Bets (Full Game Moneyline)")
-        lines.append("| Matchup | Best Pick | Fair Odds | Edge | Projected Score | Pitchers |")
-        lines.append("| :--- | :---: | :---: | :---: | :---: | :--- |")
+        lines.append("| Matchup | Best Pick | Fair Odds | Edge | Projected Score | Pitchers | Umpire State |")
+        lines.append("| :--- | :---: | :---: | :---: | :---: | :--- | :---: |")
 
         for g in games:
-            pk, away, home, a_prob, h_prob, edge, a_runs, h_runs, a_sp, h_sp, f5_a, f5_h, f5_a_runs, f5_h_runs = g
+            pk, away, home, a_prob, h_prob, edge, a_runs, h_runs, a_sp, h_sp, f5_a, f5_h, f5_a_runs, f5_h_runs, hp_u, u_lock = g
             
             if h_prob >= a_prob:
                 pick_team = home
@@ -70,18 +73,19 @@ def export_forecasts_and_check_odds():
             fair_odds = prob_to_american(pick_prob)
             odds_str = f"{fair_odds:+d}"
             edge_badge = f"🔥 **+{edge:.1%}**" if edge >= 0.05 else f"+{edge:.1%}"
+            ump_badge = f"🔒 {hp_u}" if u_lock == 1 else "⏳ Awaiting HP Umpire"
 
-            lines.append(f"| {away} @ {home} | **{pick_team}** | `{odds_str}` | {edge_badge} | {a_runs:.1f} - {h_runs:.1f} | {a_sp} vs {h_sp} |")
+            lines.append(f"| {away} @ {home} | **{pick_team}** | `{odds_str}` | {edge_badge} | {a_runs:.1f} - {h_runs:.1f} | {a_sp} vs {h_sp} | {ump_badge} |")
 
             if edge >= 0.045:
-                tier_1_picks.append(f"• **{pick_team} ML** ({odds_str}) | Edge: +{edge:.1%}")
+                tier_1_picks.append(f"• **{pick_team} ML** ({odds_str}) | Edge: +{edge:.1%} | Ump: {hp_u}")
 
         lines.append("\n## ⏱️ First 5 Innings (F5 Isolations)")
         lines.append("| Matchup | F5 Favorite | F5 Odds | Projected F5 Total |")
         lines.append("| :--- | :---: | :---: | :---: |")
 
         for g in games:
-            _, away, home, _, _, _, _, _, _, _, f5_a, f5_h, f5_a_r, f5_h_r = g
+            _, away, home, _, _, _, _, _, _, _, f5_a, f5_h, f5_a_r, f5_h_r, _, _ = g
             if f5_a == 0.0 and f5_h == 0.0:
                 continue
             fav = home if f5_h > f5_a else away
@@ -103,7 +107,7 @@ def export_forecasts_and_check_odds():
 
     # Clean ASCII Title in HTTP Headers prevents latin-1 codec failure
     if tier_1_picks:
-        slip_msg = "🎯 **TODAY'S VALUE BETS**\n\n" + "\n".join(tier_1_picks)
+        slip_msg = "🎯 **TODAY'S ACTIONABLE VALUE BETS**\n\n" + "\n".join(tier_1_picks)
         headers = {
             "Title": "MLB Actionable Betting Slips",
             "Priority": "4",
