@@ -2,7 +2,7 @@ name: MLB Engine & Live Monitor Pipeline
 
 on:
   schedule:
-    # Multiple slates: 15:00, 18:00, 21:00, 00:00, 03:00 UTC
+    # Runs across MLB slate windows: 15:00, 18:00, 21:00, 00:00, 03:00 UTC
     - cron: '0 15,18,21,0,3 * * *'
   workflow_dispatch:
 
@@ -20,16 +20,16 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pandas numpy scikit-learn
+          pip install -r requirements.txt
 
       - name: Purge Bytecode Cache Before Run
         run: |
           find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          find . -name "*.pyc" -delete 2>/dev/null || true
           git rm -r --cached __pycache__ 2>/dev/null || true
 
       - name: Run Unified Orchestration Pipeline
@@ -45,7 +45,12 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          find . -name "*.pyc" -delete 2>/dev/null || true
           git add PREDICTIONS_TODAY.md mlb_engine.db
-          git commit -m "Auto-update forecasts and clean database [skip ci]" || echo "No changes to commit"
-          git pull --rebase --autostash
-          git push
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "Auto-update forecasts and clean database [skip ci]"
+            git pull --rebase --autostash
+            git push origin main
+          else
+            echo "No changes to commit."
+          fi
