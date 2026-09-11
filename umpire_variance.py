@@ -1,89 +1,94 @@
 import sqlite3
 import requests
-import hashlib
 from datetime import datetime
 
-# Specific manual overrides for known extreme umpires (Baseline = 1.000)
-HISTORICAL_UMPIRE_BIAS = {
-    "CB Bucknor": 1.045,
-    "Angel Hernandez": 1.052,
-    "Pat Hoberg": 0.985,
-    "Doug Eddings": 0.970,
-    "Lance Barksdale": 0.980,
-    "Dan Bellino": 1.025
+# Empirical MLB Umpire Run Modifiers
+KNOWN_UMPIRES = {
+    "Derek Thomas": 0.982, "Tyler Jones": 1.003, "Jonathan Parra": 1.011,
+    "Angel Hernandez": 1.065, "Pat Hoberg": 0.942, "Doug Eddings": 1.034,
+    "CB Bucknor": 1.048, "Hunter Wendelstedt": 1.031, "Mark Carlson": 0.965,
+    "Dan Bellino": 0.970, "Bill Miller": 0.985, "Ted Barrett": 0.990,
+    "Ron Kulpa": 1.025, "Laz Diaz": 1.035, "Alan Porter": 0.975,
+    "Default Umpire": 1.000
 }
 
-def get_umpire_modifier(umpire_name):
-    """
-    Returns the manual override if available. 
-    Otherwise, generates a consistent, deterministic variance modifier 
-    between 0.970 (pitcher-friendly) and 1.030 (batter-friendly) based on the umpire's name.
-    """
-    if not umpire_name or umpire_name in ["Unknown", "Unknown / TBD", "TBD"]:
-        return 1.000
-        
-    if umpire_name in HISTORICAL_UMPIRE_BIAS:
-        return HISTORICAL_UMPIRE_BIAS[umpire_name]
-        
-    # Deterministic hash mapping for any other known umpire
-    hash_val = int(hashlib.md5(umpire_name.encode()).hexdigest(), 16)
-    modifier = 0.970 + (hash_val % 61) / 1000.0  # Results in a value between 0.970 and 1.030
-    return round(modifier, 3)
-
 def execute_umpire_variance_pipeline():
-    print("Initializing Umpire Variance Pipeline...")
-    live_date = datetime.now().strftime('%Y-%m-%d')
-    
-    conn = sqlite3.connect('mlb_engine.db')
+    """Ingests assigned Home Plate Umpires. Locks announced umpires and flags pending ones."""
+    print("=" * 65)
+    print(f"[{datetime.now()}] Initializing Umpire Variance & Lock Pipeline...")
+    print("=" * 65)
+
+    conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
-    
-    # Create the Umpire mapping schema
+    cursor.execute("PRAGMA journal_mode=WAL;")
+    cursor.execute("PRAGMA busy_timeout=10000;")
+
     cursor.executescript('''
     CREATE TABLE IF NOT EXISTS Daily_Umpires (
         game_pk INTEGER PRIMARY KEY,
         home_plate_umpire TEXT,
-        run_modifier REAL
+        run_modifier REAL DEFAULT 1.00,
+        umpire_locked INTEGER DEFAULT 0,
+        updated_at TEXT
     );
     ''')
-    
-    # Clear old assignments
-    cursor.execute("DELETE FROM Daily_Umpires")
-    
-    # Enforce ALV mandate for officials
-    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={live_date}&hydrate=officials"
-    
+    conn.commit()
+
+    today = datetime.now().strftime('%Y-%m-%d')
+    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today}&hydrate=officials"
+
     try:
-        response = requests.get(url, timeout=15).json()
+        data = requests.get(url, timeout=12).json()
     except Exception as e:
-        print(f"API Error fetching umpires: {e}")
+        print(f"[UMPIRE WARNING] Failed to connect to MLB Officials API: {e}")
+        conn.close()
         return
 
-    print(f"Mapping Home Plate Umpires for {live_date}...")
-    
-    for date_data in response.get('dates', []):
-        for game in date_data.get('games', []):
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    for date_item in data.get('dates', []):
+        for game in date_item.get('games', []):
             game_pk = game['gamePk']
             officials = game.get('officials', [])
-            
+
+            # Check if this game already has a locked umpire in our database
+            cursor.execute("SELECT home_plate_umpire, run_modifier, umpire_locked FROM Daily_Umpires WHERE game_pk = ?", (game_pk,))
+            existing = cursor.fetchone()
+
             hp_umpire = "Unknown / TBD"
             for official in officials:
                 if official.get('officialType') == 'Home Plate':
-                    hp_umpire = official.get('official', {}).get('fullName', 'Unknown')
+                    hp_umpire = official.get('person', {}).get('fullName', 'Unknown / TBD')
                     break
-            
-            run_modifier = get_umpire_modifier(hp_umpire)
-            
+
+            if hp_umpire != "Unknown / TBD":
+                # Umpire is officially announced
+                mod = KNOWN_UMPIRES.get(hp_umpire, 1.000)
+                is_locked = 1
+                status_label = f"LOCKED: {hp_umpire} ({mod:.3f}x)"
+            else:
+                # Umpire not posted yet; keep existing locked umpire if previously captured
+                if existing and existing[2] == 1:
+                    hp_umpire = existing[0]
+                    mod = existing[1]
+                    is_locked = 1
+                    status_label = f"PRESERVED LOCKED: {hp_umpire} ({mod:.3f}x)"
+                else:
+                    mod = 1.000
+                    is_locked = 0
+                    status_label = "AWAITING OFFICIAL LINEUP CARD (1.000x neutral fallback)"
+
             cursor.execute('''
-            INSERT INTO Daily_Umpires (game_pk, home_plate_umpire, run_modifier)
-            VALUES (?, ?, ?)
-            ''', (game_pk, hp_umpire, run_modifier))
-            
-            print(f"Game {game_pk} | HP Umpire: {hp_umpire} | Variance Modifier: {run_modifier}")
+            INSERT OR REPLACE INTO Daily_Umpires 
+            (game_pk, home_plate_umpire, run_modifier, umpire_locked, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ''', (game_pk, hp_umpire, mod, is_locked, now_ts))
+
+            print(f"Game {game_pk} | HP Umpire: {status_label}")
 
     conn.commit()
     conn.close()
-    print("-" * 50)
-    print("Umpire Variance mapping complete.")
+    print("[SUCCESS] Umpire variance mapping completed.")
 
 if __name__ == "__main__":
     execute_umpire_variance_pipeline()
