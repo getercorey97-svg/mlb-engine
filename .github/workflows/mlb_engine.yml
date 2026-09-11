@@ -2,7 +2,7 @@ name: MLB Engine & Live Monitor Pipeline
 
 on:
   schedule:
-    # Runs across MLB slate windows: 15:00, 18:00, 21:00, 00:00, 03:00 UTC
+    # Multiple slates: 15:00, 18:00, 21:00, 00:00, 03:00 UTC
     - cron: '0 15,18,21,0,3 * * *'
   workflow_dispatch:
 
@@ -46,7 +46,8 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
           find . -name "*.pyc" -delete 2>/dev/null || true
-          git add PREDICTIONS_TODAY.md mlb_engine.db
+          [ -f PREDICTIONS_TODAY.md ] && git add PREDICTIONS_TODAY.md
+          [ -f mlb_engine.db ] && git add mlb_engine.db
           if ! git diff-index --quiet HEAD; then
             git commit -m "Auto-update forecasts and clean database [skip ci]"
             git pull --rebase --autostash
