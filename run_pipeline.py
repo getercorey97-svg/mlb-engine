@@ -2,7 +2,6 @@ import os
 import sqlite3
 from datetime import datetime
 
-# Complete 30 MLB Park Factors Pre-Seed Baseline
 DEFAULT_PARK_FACTORS = {
     "Colorado Rockies": 1.38, "Boston Red Sox": 1.09, "Cincinnati Reds": 1.08,
     "Kansas City Royals": 1.05, "Texas Rangers": 1.04, "Arizona Diamondbacks": 1.04,
@@ -17,7 +16,7 @@ DEFAULT_PARK_FACTORS = {
 }
 
 def initialize_database_schemas():
-    """Guarantees every single table and empirical baseline exists before execution."""
+    """Guarantees every single table and column exists with zero schema mismatch."""
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
@@ -69,7 +68,9 @@ def initialize_database_schemas():
         CREATE TABLE IF NOT EXISTS Daily_Umpires (
             game_pk INTEGER PRIMARY KEY,
             home_plate_umpire TEXT,
-            run_modifier REAL DEFAULT 1.00
+            run_modifier REAL DEFAULT 1.00,
+            umpire_locked INTEGER DEFAULT 0,
+            updated_at TEXT
         );
         CREATE TABLE IF NOT EXISTS Esoteric_Signals (
             game_pk INTEGER PRIMARY KEY,
@@ -100,6 +101,15 @@ def initialize_database_schemas():
         );
     ''')
     
+    # Schema Migration Guard: Auto-add umpire_locked column if missing
+    cursor.execute("PRAGMA table_info(Daily_Umpires);")
+    cols = [c[1] for c in cursor.fetchall()]
+    if 'umpire_locked' not in cols:
+        cursor.execute("ALTER TABLE Daily_Umpires ADD COLUMN umpire_locked INTEGER DEFAULT 0;")
+        print("[MIGRATION] Added missing umpire_locked column to Daily_Umpires.")
+    if 'updated_at' not in cols:
+        cursor.execute("ALTER TABLE Daily_Umpires ADD COLUMN updated_at TEXT;")
+
     # Pre-seed Park Factors if empty
     cursor.execute("SELECT COUNT(*) FROM Park_Factors")
     if cursor.fetchone()[0] == 0:
