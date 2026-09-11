@@ -8,12 +8,8 @@ from sklearn.isotonic import IsotonicRegression
 from engine import run_ultimate_monte_carlo
 from engine_f5_props import run_f5_and_props_engine
 
+# Suppress sklearn warnings
 warnings.filterwarnings("ignore", category=UserWarning)
-
-HISTORICAL_UMPIRE_BIAS = {
-    "CB Bucknor": 1.045, "Angel Hernandez": 1.052, "Pat Hoberg": 0.985,
-    "Doug Eddings": 0.970, "Lance Barksdale": 0.980, "Dan Bellino": 1.025, "Default": 1.000
-}
 
 STADIUMS = {
     "Arizona Diamondbacks": (33.4453, -112.0667), "Atlanta Braves": (33.8907, -84.4677),
@@ -45,21 +41,20 @@ def get_historical_atmosphere(team_name, date_str):
     except: return 1.225, 1.00
 
 def run_backtest_engine():
-    current_year = datetime.now().year
-    print(f"Initializing Optimized Incremental Backtest...")
+    print(f"Initializing Incremental Backtest...")
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
 
-    # Incremental Check: Load existing processed game PKs
+    # 1. Load existing games to skip them
     try:
         cursor.execute("SELECT game_pk FROM Post_Match_Analysis")
         processed_pks = {row[0] for row in cursor.fetchall()}
     except: processed_pks = set()
 
-    current_date = datetime(current_year, 3, 20)
+    current_date = datetime.now() - timedelta(days=220)
     end_date = datetime.now()
-
+    
     while current_date <= end_date:
         ds = current_date.strftime('%Y-%m-%d')
         current_date += timedelta(days=1)
@@ -73,8 +68,7 @@ def run_backtest_engine():
                     if pk in processed_pks or game['status']['abstractGameState'] != 'Final':
                         continue
                     
-                    home_team = game['teams']['home']['team']['name']
-                    away_team = game['teams']['away']['team']['name']
+                    home_team, away_team = game['teams']['home']['team']['name'], game['teams']['away']['team']['name']
                     rho, uv = get_historical_atmosphere(home_team, ds)
                     
                     cursor.execute('''INSERT OR REPLACE INTO Daily_Lineups (game_pk, game_date, away_team, home_team, air_density, uv_modifier, status)
@@ -82,7 +76,7 @@ def run_backtest_engine():
             conn.commit()
         except: continue
         
-    print("Historical Data Synced. Running Engine Sims...")
+    print("Incremental Sync Complete. Triggering Engine Simulation...")
     run_ultimate_monte_carlo()
     run_f5_and_props_engine()
     conn.close()
