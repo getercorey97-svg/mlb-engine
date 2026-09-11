@@ -5,6 +5,66 @@ from datetime import datetime
 
 CORRELATION_SIGNIFICANCE_THRESHOLD = 0.25
 
+def ensure_correlation_schemas(cursor):
+    """Guarantees all join tables exist before sweeping matrix."""
+    cursor.executescript('''
+    CREATE TABLE IF NOT EXISTS Post_Match_Analysis (
+        game_pk INTEGER PRIMARY KEY,
+        actual_winner TEXT,
+        home_score INTEGER,
+        away_score INTEGER,
+        home_f5_score INTEGER,
+        away_f5_score INTEGER,
+        model_correct INTEGER,
+        processed_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS Model_Forecasts (
+        game_pk INTEGER PRIMARY KEY,
+        home_team TEXT,
+        away_team TEXT,
+        home_prob REAL,
+        away_prob REAL,
+        predicted_edge REAL,
+        predicted_home_runs REAL,
+        predicted_away_runs REAL,
+        timestamp TEXT
+    );
+    CREATE TABLE IF NOT EXISTS Daily_Lineups (
+        game_pk INTEGER PRIMARY KEY,
+        game_date TEXT,
+        away_team TEXT,
+        home_team TEXT,
+        away_pitcher TEXT,
+        home_pitcher TEXT,
+        lineup_status TEXT,
+        air_density REAL,
+        uv_modifier REAL,
+        status TEXT
+    );
+    CREATE TABLE IF NOT EXISTS Daily_Umpires (
+        game_pk INTEGER PRIMARY KEY,
+        home_plate_umpire TEXT,
+        run_modifier REAL
+    );
+    CREATE TABLE IF NOT EXISTS Esoteric_Signals (
+        game_pk INTEGER PRIMARY KEY,
+        geomagnetic_kp REAL DEFAULT 2.0,
+        solar_xray_flux REAL DEFAULT 1.0,
+        home_media_pressure INTEGER DEFAULT 0,
+        home_media_tone REAL DEFAULT 0.0,
+        roster_birthday_active INTEGER DEFAULT 0,
+        captured_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS Feature_Correlations (
+        feature_name TEXT PRIMARY KEY,
+        corr_with_total_runs REAL,
+        corr_with_model_error REAL,
+        sample_size INTEGER,
+        anomaly_flagged INTEGER,
+        last_updated TEXT
+    );
+    ''')
+
 def run_correlation_engine():
     print("=" * 65)
     print(f"[{datetime.now()}] Initializing High-Speed Matrix Sweeper...")
@@ -13,8 +73,11 @@ def run_correlation_engine():
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA busy_timeout=10000;")
+    cursor = conn.cursor()
 
-    # Lock-free SQL join
+    ensure_correlation_schemas(cursor)
+    conn.commit()
+
     query = '''
     SELECT 
         p.game_pk,
@@ -41,7 +104,12 @@ def run_correlation_engine():
     WHERE p.home_score IS NOT NULL AND m.home_prob IS NOT NULL
     '''
 
-    df = pd.read_sql_query(query, conn)
+    try:
+        df = pd.read_sql_query(query, conn)
+    except Exception as e:
+        print(f"[CORRELATION ERROR] Failed to query join dataset: {e}")
+        conn.close()
+        return
 
     if len(df) < 25:
         print(f"[BYPASS] Insufficient sample size for correlation analysis (N = {len(df)} < 25).")
@@ -57,18 +125,6 @@ def run_correlation_engine():
         'air_density', 'uv_modifier', 'umpire_modifier', 
         'geomagnetic_kp', 'media_pressure', 'media_tone'
     ]
-
-    cursor = conn.cursor()
-    cursor.executescript('''
-    CREATE TABLE IF NOT EXISTS Feature_Correlations (
-        feature_name TEXT PRIMARY KEY,
-        corr_with_total_runs REAL,
-        corr_with_model_error REAL,
-        sample_size INTEGER,
-        anomaly_flagged INTEGER,
-        last_updated TEXT
-    );
-    ''')
 
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
