@@ -2,19 +2,17 @@ import sqlite3
 import requests
 import numpy as np
 import warnings
+import concurrent.futures
 from datetime import datetime, timedelta
 from sklearn.isotonic import IsotonicRegression
 from engine import run_ultimate_monte_carlo
 from engine_f5_props import run_f5_and_props_engine
 
-# Suppress sklearn warnings during live rolling calibrations
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# --- SOTA CONSTANTS ---
 HISTORICAL_UMPIRE_BIAS = {
     "CB Bucknor": 1.045, "Angel Hernandez": 1.052, "Pat Hoberg": 0.985,
-    "Doug Eddings": 0.970, "Lance Barksdale": 0.980, "Dan Bellino": 1.025,
-    "Default": 1.000
+    "Doug Eddings": 0.970, "Lance Barksdale": 0.980, "Dan Bellino": 1.025, "Default": 1.000
 }
 
 STADIUMS = {
@@ -38,349 +36,56 @@ STADIUMS = {
 
 def get_historical_atmosphere(team_name, date_str):
     coords = STADIUMS.get(team_name, STADIUMS["Default"])
-    url = "https://archive-api.open-meteo.com/v1/archive"
-    params = {
-        "latitude": coords[0], "longitude": coords[1],
-        "start_date": date_str, "end_date": date_str,
-        "hourly": "surface_pressure,temperature_2m,cloud_cover"
-    }
+    url = f"https://archive-api.open-meteo.com/v1/archive?latitude={coords[0]}&longitude={coords[1]}&start_date={date_str}&end_date={date_str}&hourly=surface_pressure,temperature_2m,cloud_cover"
     try:
-        res = requests.get(url, params=params, timeout=10).json()
-        temp_c = res['hourly']['temperature_2m'][12] 
-        pressure_hpa = res['hourly']['surface_pressure'][12]
-        cloud_cover = res['hourly']['cloud_cover'][12]
-        
-        temp_k = temp_c + 273.15
-        pressure_pa = pressure_hpa * 100
-        density = round(pressure_pa / (287.05 * temp_k), 4)
-        uv_modifier = 1.03 if cloud_cover > 70 else 1.00
-        return density, uv_modifier
-    except Exception:
-        return 1.225, 1.00
-
-def update_dynamic_weights(cursor, name, predicted_runs, actual_runs, is_offense=True, is_pitcher=False):
-    error_delta = actual_runs - predicted_runs
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    base_lr = 0.03
-    adaptive_lr = min(0.15, base_lr + (abs(error_delta) * 0.015))
-    
-    if is_pitcher:
-        cursor.execute('SELECT f5_run_modifier FROM Pitcher_Modifiers WHERE pitcher_name = ?', (name,))
-        result = cursor.fetchone()
-        mod = result[0] if result else 1.0
-        
-        # TTOP & Exposure: Penalize heavy error deltas more aggressively for F5
-        new_mod = max(0.53, min(1.55, mod + (error_delta * adaptive_lr * 1.1)))
-        cursor.execute('''
-            INSERT OR REPLACE INTO Pitcher_Modifiers (pitcher_name, k_modifier, f5_run_modifier, last_updated) 
-            VALUES (?, 1.0, ?, ?)
-        ''', (name, new_mod, current_time))
-        return
-
-    cursor.execute('SELECT offensive_modifier, pitching_modifier FROM Dynamic_Modifiers WHERE team_name = ?', (name,))
-    result = cursor.fetchone()
-    off_mod, pitch_mod = result if result else (1.0, 1.0)
-    
-    if is_offense:
-        new_off_mod = max(0.53, min(1.47, off_mod + (error_delta * adaptive_lr)))
-        cursor.execute('INSERT OR REPLACE INTO Dynamic_Modifiers (team_name, offensive_modifier, pitching_modifier, last_updated) VALUES (?, ?, ?, ?)', (name, new_off_mod, pitch_mod, current_time))
-    else:
-        new_pitch_mod = max(0.53, min(1.47, pitch_mod + (error_delta * adaptive_lr)))
-        cursor.execute('INSERT OR REPLACE INTO Dynamic_Modifiers (team_name, offensive_modifier, pitching_modifier, last_updated) VALUES (?, ?, ?, ?)', (name, off_mod, new_pitch_mod, current_time))
-
-def apply_3way_isotonic_calibration(cursor, f5_h_prob, f5_a_prob, f5_tie_prob):
-    """Calibrates raw F5 probabilities using rolling empirical data."""
-    cursor.execute('''
-        SELECT f5_home_prob, f5_away_prob, f5_tie_prob, home_f5_score, away_f5_score 
-        FROM F5_Forecasts f
-        JOIN Post_Match_Analysis p ON f.game_pk = p.game_pk
-        WHERE p.home_f5_score IS NOT NULL
-        ORDER BY f.game_pk DESC LIMIT 800
-    ''')
-    data = cursor.fetchall()
-    
-    if len(data) < 50:
-        return f5_h_prob, f5_a_prob, f5_tie_prob
-
-    h_probs, a_probs, t_probs = [], [], []
-    h_actual, a_actual, t_actual = [], [], []
-    
-    for h_p, a_p, t_p, h_score, a_score in data:
-        if h_p is None or a_p is None: continue
-        h_probs.append(h_p)
-        a_probs.append(a_p)
-        t_probs.append(t_p)
-        h_actual.append(1 if h_score > a_score else 0)
-        a_actual.append(1 if a_score > h_score else 0)
-        t_actual.append(1 if h_score == a_score else 0)
-
-    try:
-        iso_h = IsotonicRegression(out_of_bounds='clip').fit(h_probs, h_actual)
-        iso_a = IsotonicRegression(out_of_bounds='clip').fit(a_probs, a_actual)
-        iso_t = IsotonicRegression(out_of_bounds='clip').fit(t_probs, t_actual)
-        
-        cal_h = iso_h.predict([f5_h_prob])[0]
-        cal_a = iso_a.predict([f5_a_prob])[0]
-        cal_t = iso_t.predict([f5_tie_prob])[0]
-        
-        # Normalize back to 100%
-        total = cal_h + cal_a + cal_t
-        if total == 0: return f5_h_prob, f5_a_prob, f5_tie_prob
-        return cal_h / total, cal_a / total, cal_t / total
-    except Exception:
-        return f5_h_prob, f5_a_prob, f5_tie_prob
+        res = requests.get(url, timeout=5).json()
+        temp_c, pres, cloud = res['hourly']['temperature_2m'][12], res['hourly']['surface_pressure'][12], res['hourly']['cloud_cover'][12]
+        rho = round((pres * 100) / (287.05 * (temp_c + 273.15)), 4)
+        return rho, (1.03 if cloud > 70 else 1.00)
+    except: return 1.225, 1.00
 
 def run_backtest_engine():
     current_year = datetime.now().year
-    print(f"Initializing SOTA Dual-Engine Backtesting Framework (Full {current_year} Season)...")
-    print("Strict Adherence to SOTA Mechanics: ALV Atmosphere, Umpires, TTOP & Isotonic Calibration Active.")
-    
-    end_date = datetime.now()
-    start_date = datetime(current_year, 3, 20)
-    
+    print(f"Initializing Optimized Incremental Backtest...")
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
-    cursor.execute("PRAGMA busy_timeout=10000;")
-    
-    cursor.executescript('''
-        CREATE TABLE IF NOT EXISTS Model_Forecasts (
-            game_pk INTEGER PRIMARY KEY, home_team TEXT, away_team TEXT, 
-            home_prob REAL, away_prob REAL, predicted_edge REAL, 
-            predicted_home_runs REAL, predicted_away_runs REAL, timestamp TEXT
-        );
-        CREATE TABLE IF NOT EXISTS F5_Forecasts (
-            game_pk INTEGER PRIMARY KEY, away_team TEXT, home_team TEXT, 
-            away_starter TEXT, home_starter TEXT, f5_away_prob REAL, 
-            f5_home_prob REAL, f5_tie_prob REAL, f5_exp_away_runs REAL, 
-            f5_exp_home_runs REAL, f5_total_runs REAL, f5_volatility_sigma REAL DEFAULT 0.0
-        );
-        CREATE TABLE IF NOT EXISTS Post_Match_Analysis (
-            game_pk INTEGER PRIMARY KEY, actual_winner TEXT, home_score INTEGER, 
-            away_score INTEGER, home_f5_score INTEGER, away_f5_score INTEGER, model_correct INTEGER, processed_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS Daily_Lineups (
-            game_pk INTEGER PRIMARY KEY, game_date TEXT, away_team TEXT, home_team TEXT, 
-            away_pitcher TEXT, home_pitcher TEXT, lineup_status TEXT, air_density REAL, uv_modifier REAL, status TEXT
-        );
-        CREATE TABLE IF NOT EXISTS Daily_Umpires (
-            game_pk INTEGER PRIMARY KEY, home_plate_umpire TEXT, run_modifier REAL
-        );
-        CREATE TABLE IF NOT EXISTS Pitcher_Modifiers (
-            pitcher_name TEXT PRIMARY KEY, k_modifier REAL DEFAULT 1.0, f5_run_modifier REAL DEFAULT 1.0, last_updated TEXT
-        );
-        CREATE TABLE IF NOT EXISTS Dynamic_Modifiers (
-            team_name TEXT PRIMARY KEY, offensive_modifier REAL DEFAULT 1.0, pitching_modifier REAL DEFAULT 1.0, last_updated TEXT
-        );
-    ''')
 
-    # Schema migration failsafes
+    # Incremental Check: Load existing processed game PKs
     try:
-        cursor.execute('ALTER TABLE F5_Forecasts ADD COLUMN f5_volatility_sigma REAL DEFAULT 0.0;')
-    except sqlite3.OperationalError:
-        pass
+        cursor.execute("SELECT game_pk FROM Post_Match_Analysis")
+        processed_pks = {row[0] for row in cursor.fetchall()}
+    except: processed_pks = set()
 
-    for col in ["predicted_edge REAL", "predicted_home_runs REAL", "predicted_away_runs REAL"]:
-        try: cursor.execute(f"ALTER TABLE Model_Forecasts ADD COLUMN {col}")
-        except sqlite3.OperationalError: pass
+    current_date = datetime(current_year, 3, 20)
+    end_date = datetime.now()
 
-    for col in ["lineup_status TEXT", "air_density REAL", "uv_modifier REAL", "status TEXT"]:
-        try: cursor.execute(f"ALTER TABLE Daily_Lineups ADD COLUMN {col}")
-        except sqlite3.OperationalError: pass
-
-    cursor.execute("DELETE FROM Model_Forecasts")
-    cursor.execute("DELETE FROM Post_Match_Analysis")
-    cursor.execute("DELETE FROM F5_Forecasts")
-    cursor.execute("DELETE FROM Pitcher_Modifiers")
-    cursor.execute("DELETE FROM Dynamic_Modifiers")
-    conn.commit()
-
-    total_games, correct_predictions = 0, 0
-    brier_score_sum, squared_error_sum = 0.0, 0.0
-    full_units = 0.0
-
-    f5_wins, f5_losses, f5_pushes = 0, 0, 0
-    f5_units = 0.0
-    
-    current_date = start_date
     while current_date <= end_date:
-        date_str = current_date.strftime('%Y-%m-%d')
+        ds = current_date.strftime('%Y-%m-%d')
         current_date += timedelta(days=1)
+        day_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={ds}&gameType=R&hydrate=probablePitcher,linescore,officials"
         
-        day_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&gameType=R&hydrate=probablePitcher,linescore,officials"
         try:
-            day_res = requests.get(day_url, timeout=15).json()
-        except Exception:
-            continue
-            
-        day_games_count = 0
-        games_data = []
-        
-        cursor.execute("DELETE FROM Daily_Lineups")
-        cursor.execute("DELETE FROM Daily_Umpires")
-        
-        for date_data in day_res.get('dates', []):
-            for game in date_data.get('games', []):
-                if game.get('status', {}).get('abstractGameState') != 'Final':
-                    continue
+            day_res = requests.get(day_url, timeout=10).json()
+            for date_data in day_res.get('dates', []):
+                for game in date_data.get('games', []):
+                    pk = game['gamePk']
+                    if pk in processed_pks or game['status']['abstractGameState'] != 'Final':
+                        continue
                     
-                game_pk = game['gamePk']
-                home_team = game['teams']['home']['team']['name']
-                away_team = game['teams']['away']['team']['name']
-                home_score = game['teams']['home'].get('score', 0)
-                away_score = game['teams']['away'].get('score', 0)
-                
-                home_pitcher = game['teams']['home'].get('probablePitcher', {}).get('fullName', 'Unknown Pitcher')
-                away_pitcher = game['teams']['away'].get('probablePitcher', {}).get('fullName', 'Unknown Pitcher')
-                
-                officials = game.get('officials', [])
-                hp_umpire = "Unknown / TBD"
-                for official in officials:
-                    if official.get('officialType') == 'Home Plate':
-                        hp_umpire = official.get('official', {}).get('fullName', 'Unknown')
-                        break
-                ump_modifier = HISTORICAL_UMPIRE_BIAS.get(hp_umpire, HISTORICAL_UMPIRE_BIAS["Default"])
-                air_density, uv_modifier = get_historical_atmosphere(home_team, date_str)
-                
-                linescore = game.get('linescore', {}).get('innings', [])
-                h_f5, a_f5 = 0, 0
-                for inning in linescore[:5]:
-                    h_f5 += inning.get('home', {}).get('runs', 0)
-                    a_f5 += inning.get('away', {}).get('runs', 0)
-                
-                cursor.execute('''
-                    INSERT OR REPLACE INTO Daily_Lineups (game_pk, game_date, away_team, home_team, away_pitcher, home_pitcher, lineup_status, air_density, uv_modifier, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (game_pk, date_str, away_team, home_team, away_pitcher, home_pitcher, 'Confirmed', air_density, uv_modifier, 'Final'))
-                
-                cursor.execute('INSERT OR REPLACE INTO Daily_Umpires (game_pk, home_plate_umpire, run_modifier) VALUES (?, ?, ?)', (game_pk, hp_umpire, ump_modifier))
-                cursor.execute('INSERT OR REPLACE INTO Model_Forecasts (game_pk, home_team, away_team, timestamp) VALUES (?, ?, ?, ?)', (game_pk, home_team, away_team, 'BACKTEST_INIT'))
-                
-                # F5 Volatility Sigma Calculation
-                cursor.execute('''
-                    SELECT (home_f5_score - away_f5_score) FROM Post_Match_Analysis p 
-                    JOIN F5_Forecasts f ON p.game_pk = f.game_pk 
-                    WHERE f.home_team = ? OR f.away_team = ? ORDER BY p.game_pk DESC LIMIT 10
-                ''', (home_team, home_team))
-                h_margins = [row[0] for row in cursor.fetchall()]
-                h_sigma = np.std(h_margins) if len(h_margins) > 3 else 0.0
-
-                cursor.execute('INSERT OR REPLACE INTO F5_Forecasts (game_pk, away_team, home_team, away_starter, home_starter, f5_volatility_sigma) VALUES (?, ?, ?, ?, ?, ?)', 
-                              (game_pk, away_team, home_team, away_pitcher, home_pitcher, h_sigma))
-                
-                games_data.append({
-                    'game_pk': game_pk, 'home_team': home_team, 'away_team': away_team,
-                    'home_score': home_score, 'away_score': away_score, 'h_f5': h_f5, 'a_f5': a_f5,
-                    'home_pitcher': home_pitcher, 'away_pitcher': away_pitcher
-                })
-                day_games_count += 1
+                    home_team = game['teams']['home']['team']['name']
+                    away_team = game['teams']['away']['team']['name']
+                    rho, uv = get_historical_atmosphere(home_team, ds)
+                    
+                    cursor.execute('''INSERT OR REPLACE INTO Daily_Lineups (game_pk, game_date, away_team, home_team, air_density, uv_modifier, status)
+                                      VALUES (?, ?, ?, ?, ?, ?, ?)''', (pk, ds, away_team, home_team, rho, uv, 'Final'))
+            conn.commit()
+        except: continue
         
-        if day_games_count == 0: continue
-        conn.commit()
-        
-        try:
-            run_ultimate_monte_carlo()
-            run_f5_and_props_engine()
-        except Exception as e:
-            print(f"Simulation Note ({date_str}): {e}")
-        
-        cursor = conn.cursor()
-        for g in games_data:
-            game_pk, home_team, away_team = g['game_pk'], g['home_team'], g['away_team']
-            home_score, away_score = g['home_score'], g['away_score']
-            h_f5, a_f5 = g['h_f5'], g['a_f5']
-            home_pitcher, away_pitcher = g['home_pitcher'], g['away_pitcher']
-            
-            actual_winner = home_team if home_score > away_score else away_team
-            actual_home_win = 1 if actual_winner == home_team else 0
-            
-            cursor.execute("SELECT home_prob, away_prob, predicted_home_runs, predicted_away_runs FROM Model_Forecasts WHERE game_pk = ?", (game_pk,))
-            forecast = cursor.fetchone()
-            is_correct = 0
-            
-            pred_h_runs = forecast[2] if forecast and forecast[2] is not None else 4.0
-            pred_a_runs = forecast[3] if forecast and forecast[3] is not None else 4.0
-
-            if forecast and forecast[0] is not None:
-                home_prob, away_prob = forecast[0], forecast[1]
-                predicted_winner = home_team if home_prob > away_prob else away_team
-                is_correct = 1 if predicted_winner == actual_winner else 0
-                
-                total_games += 1
-                correct_predictions += is_correct
-                if is_correct: full_units += 0.909
-                else: full_units -= 1.000
-                
-                # Brier score & RMSE accumulation
-                brier_score_sum += (home_prob - actual_home_win) ** 2
-                squared_error_sum += ((home_score + away_score) - (pred_h_runs + pred_a_runs)) ** 2
-
-            cursor.execute("SELECT f5_home_prob, f5_away_prob, f5_tie_prob, f5_exp_home_runs, f5_exp_away_runs FROM F5_Forecasts WHERE game_pk = ?", (game_pk,))
-            f5_fc = cursor.fetchone()
-            
-            if f5_fc and f5_fc[0] is not None:
-                raw_h_prob, raw_a_prob, raw_t_prob = f5_fc[0], f5_fc[1], f5_fc[2]
-                f5_h_runs = f5_fc[3] if f5_fc[3] is not None else 2.2
-                f5_a_runs = f5_fc[4] if f5_fc[4] is not None else 2.2
-                
-                # Apply 3-Way Isotonic Calibration
-                f5_h_prob, f5_a_prob, f5_t_prob = apply_3way_isotonic_calibration(cursor, raw_h_prob, raw_a_prob, raw_t_prob)
-                cursor.execute('UPDATE F5_Forecasts SET f5_home_prob=?, f5_away_prob=?, f5_tie_prob=? WHERE game_pk=?', (f5_h_prob, f5_a_prob, f5_t_prob, game_pk))
-                
-                f5_pick = home_team if f5_h_prob > f5_a_prob else away_team
-                if h_f5 > a_f5: f5_actual = home_team
-                elif a_f5 > h_f5: f5_actual = away_team
-                else: f5_actual = "Tie"
-                
-                if f5_actual == "Tie": f5_pushes += 1
-                elif f5_pick == f5_actual: f5_wins += 1; f5_units += 0.909
-                else: f5_losses += 1; f5_units -= 1.000
-                
-                # TTOP Starter Penalty Evolution
-                update_dynamic_weights(cursor, home_pitcher, f5_a_runs * 1.15, a_f5, is_pitcher=True)
-                update_dynamic_weights(cursor, away_pitcher, f5_h_runs * 1.15, h_f5, is_pitcher=True)
-                
-            # Full Game Evolution: Update Offense AND Pitching for both clubs
-            update_dynamic_weights(cursor, home_team, pred_h_runs, home_score, is_offense=True)
-            update_dynamic_weights(cursor, away_team, pred_h_runs, home_score, is_offense=False)
-            
-            update_dynamic_weights(cursor, away_team, pred_a_runs, away_score, is_offense=True)
-            update_dynamic_weights(cursor, home_team, pred_a_runs, away_score, is_offense=False)
-            
-            cursor.execute('''
-                INSERT OR REPLACE INTO Post_Match_Analysis 
-                (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (game_pk, actual_winner, home_score, away_score, h_f5, a_f5, is_correct, 'BACKTEST'))
-
-    conn.commit()
+    print("Historical Data Synced. Running Engine Sims...")
+    run_ultimate_monte_carlo()
+    run_f5_and_props_engine()
     conn.close()
-    
-    if total_games == 0:
-        print("No finalized historical games processed successfully.")
-        return
-        
-    full_win_rate = correct_predictions / total_games
-    brier_score = brier_score_sum / total_games
-    rmse = np.sqrt(squared_error_sum / total_games)
-    f5_win_rate = f5_wins / (f5_wins + f5_losses) if (f5_wins + f5_losses) > 0 else 0
-
-    print(f"\n============================================================")
-    print(f"SOTA ENGINE DUAL BACKTEST REPORT: 2026 SEASON")
-    print(f"Total Matchups Verified & Logged: {total_games}")
-    print(f"============================================================")
-    print(f"--- FULL-GAME ENGINE (9 INNINGS) ---")
-    print(f"Full-Game Record:         {correct_predictions}W - {total_games - correct_predictions}L")
-    print(f"Full-Game Win Rate:       {full_win_rate:.2%}")
-    print(f"Brier Score (0 = Exact):  {brier_score:.4f}")
-    print(f"RMSE (Run Variance):      {rmse:.2f} runs")
-    print(f"Full-Game ROI Projection: {full_units:+.2f} Units (Flat 1u @ -110)")
-    print("-" * 60)
-    print(f"--- FIRST 5 INNINGS ENGINE (F5) WITH TTOP & ISOTONIC CALIBRATION ---")
-    print(f"F5 Record:                {f5_wins}W - {f5_losses}L - {f5_pushes}P")
-    print(f"F5 Win Rate (w/o pushes): {f5_win_rate:.2%}")
-    print(f"F5 ROI Projection:        {f5_units:+.2f} Units (Flat 1u @ -110)")
-    print(f"============================================================\n")
 
 if __name__ == "__main__":
     run_backtest_engine()
