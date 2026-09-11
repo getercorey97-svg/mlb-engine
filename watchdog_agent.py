@@ -4,7 +4,6 @@ import sqlite3
 import requests
 from datetime import datetime
 
-# Falls back directly to your verified topic if secret is unset or empty
 NTFY_TOPIC = os.getenv("NTFY_TOPIC") or "mlb-alv-alerts-8899"
 
 def send_mobile_alert(title, message, priority="default"):
