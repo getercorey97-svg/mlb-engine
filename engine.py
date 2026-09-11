@@ -52,6 +52,13 @@ def ensure_engine_schemas(cursor):
         uv_modifier REAL DEFAULT 1.00,
         status TEXT
     );
+    CREATE TABLE IF NOT EXISTS Daily_Umpires (
+        game_pk INTEGER PRIMARY KEY,
+        home_plate_umpire TEXT,
+        run_modifier REAL DEFAULT 1.00,
+        umpire_locked INTEGER DEFAULT 0,
+        updated_at TEXT
+    );
     CREATE TABLE IF NOT EXISTS Post_Match_Analysis (
         game_pk INTEGER PRIMARY KEY,
         actual_winner TEXT,
@@ -66,7 +73,7 @@ def ensure_engine_schemas(cursor):
 
 def run_ultimate_monte_carlo():
     print("=" * 65)
-    print(f"[{datetime.now()}] Running Ultimate Dual-Engine Monte Carlo (BsR 1.8 + NegBinomial)")
+    print(f"[{datetime.now()}] Running Deterministic Dual-Engine Monte Carlo (BsR 1.8 + NegBinomial)")
     print("=" * 65)
 
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
@@ -84,6 +91,7 @@ def run_ultimate_monte_carlo():
     park_mods = {r[0]: r[1] for r in cursor.execute("SELECT home_team, COALESCE(run_factor, 1.00) FROM Park_Factors").fetchall()}
     bullpen_fatigue = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(fatigue_multiplier, 1.00) FROM Bullpen_Fatigue").fetchall()}
     circadian_drag = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(jet_lag_runs_penalty, 0.00) FROM Biological_Modifiers").fetchall()}
+    umpire_mods = {r[0]: (r[1], r[2]) for r in cursor.execute("SELECT game_pk, COALESCE(run_modifier, 1.00), COALESCE(umpire_locked, 0) FROM Daily_Umpires").fetchall()}
 
     # Extract scheduled ALV matchups
     cursor.execute('''
@@ -121,10 +129,14 @@ def run_ultimate_monte_carlo():
             print(f"[CALIBRATOR] Warning during training: {e}. Using raw probability.")
             calibrator = None
 
-    it = 50000        # 50,000 Permutations Vectorized
+    it = 50000        # 50k Permutations
     dispersion = 1.35  # Overdispersion factor
 
     for pk, away, home, away_p, home_p, rho, uv in games:
+        # Deterministic Anchor: Seed generator using game_pk
+        # Ensures that multiple runs do not drift randomly unless input variables change
+        rng = np.random.default_rng(seed=int(pk))
+
         a_sp_last = away_p.split(' ')[-1] if away_p and away_p != "TBD" else ""
         h_sp_last = home_p.split(' ')[-1] if home_p and home_p != "TBD" else ""
 
@@ -135,26 +147,29 @@ def run_ultimate_monte_carlo():
         a_base_runs = team_bsr.get(away, (team_ops.get(away, 0.720) / 0.720) * 4.50)
         h_base_runs = team_bsr.get(home, (team_ops.get(home, 0.720) / 0.720) * 4.50)
 
-        # Environmental & Drag Modifiers
+        # Environmental, Aerodynamic & Umpire Zone Modifiers
         park_mult = park_mods.get(home, 1.00)
         air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
         uv_mult = uv or 1.00
+        
+        ump_mod, ump_locked = umpire_mods.get(pk, (1.00, 0))
+        ump_badge = "🔒 LOCKED" if ump_locked == 1 else "⏳ TBD"
 
-        # Bullpen & Circadian Modifiers
+        # Bullpen and Circadian Liabilities
         a_pen_fatigue = bullpen_fatigue.get(away, 1.00)
         h_pen_fatigue = bullpen_fatigue.get(home, 1.00)
         a_circadian_penalty = circadian_drag.get(away, 0.00)
 
-        # Expected Run Equations (5/9 SP share, 4/9 Bullpen share + ALV Drag)
+        # Expected Run Formulas with Umpire Recalibration
         exp_away_runs = max(0.2, (
             (a_base_runs * 0.55 * (h_sp_era / 4.20)) +
             (a_base_runs * 0.45 * h_pen_fatigue)
-        ) * park_mult * air_drag_mult * uv_mult - a_circadian_penalty)
+        ) * park_mult * air_drag_mult * uv_mult * ump_mod - a_circadian_penalty)
 
         exp_home_runs = max(0.2, (
             (h_base_runs * 0.55 * (a_sp_era / 4.20)) +
             (h_base_runs * 0.45 * a_pen_fatigue)
-        ) * park_mult * air_drag_mult * uv_mult)
+        ) * park_mult * air_drag_mult * uv_mult * ump_mod)
 
         # Negative Binomial Parameterization
         va = max(exp_away_runs + 0.01, exp_away_runs * dispersion)
@@ -166,9 +181,9 @@ def run_ultimate_monte_carlo():
         na = max(0.1, (exp_away_runs ** 2) / (va - exp_away_runs))
         nh = max(0.1, (exp_home_runs ** 2) / (vh - exp_home_runs))
 
-        # Vectorized 50,000 Permutations
-        away_sim = np.clip(np.random.negative_binomial(na, pa, it), 0, 22)
-        home_sim = np.clip(np.random.negative_binomial(nh, ph, it), 0, 22)
+        # Vectorized 50,000 Permutations via Deterministic RNG
+        away_sim = np.clip(rng.negative_binomial(na, pa, it), 0, 22)
+        home_sim = np.clip(rng.negative_binomial(nh, ph, it), 0, 22)
 
         raw_home_prob = float(np.mean(home_sim > away_sim))
 
@@ -194,11 +209,11 @@ def run_ultimate_monte_carlo():
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (pk, home, away, final_home_prob, final_away_prob, edge, round(exp_home_runs, 2), round(exp_away_runs, 2), now_ts))
 
-        print(f"Game {pk}: {away} ({exp_away_runs:.2f} r) @ {home} ({exp_home_runs:.2f} r) | H: {final_home_prob:.1%} | A: {final_away_prob:.1%} | Edge: {edge:.1%}")
+        print(f"Game {pk}: {away} ({exp_away_runs:.2f} r) @ {home} ({exp_home_runs:.2f} r) | H: {final_home_prob:.1%} | A: {final_away_prob:.1%} | Edge: {edge:.1%} | Umpire: {ump_badge}")
 
     conn.commit()
     conn.close()
-    print("[SUCCESS] Monte Carlo 50,000 permutations finished. Model_Forecasts populated.")
+    print("[SUCCESS] Deterministic Monte Carlo simulation completed.")
 
 if __name__ == "__main__":
     run_ultimate_monte_carlo()
