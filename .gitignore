@@ -1,0 +1,17 @@
+# Python Bytecode and Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# SQLite Transient Lockfiles
+*.db-wal
+*.db-shm
+
+# Mutation Sandbox and Temporary Backups
+*.bak
+*.sandbox
+
+# System and OS Files
+.DS_Store
+Thumbs.db
