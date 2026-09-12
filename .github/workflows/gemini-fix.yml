@@ -1,14 +1,18 @@
-name: Gemini Repository Auto-Fix
+name: fix-all-code
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
-  fix-all-code:
+  scan-and-fix:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -18,69 +22,86 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Google GenAI SDK
-        run: pip install google-genai
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-genai
 
       - name: Scan and fix files with Gemini
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: "gemini-3.6-flash"
         run: |
           python - << 'EOF'
           import os
-          import re
+          import glob
           from google import genai
 
-          client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+          api_key = os.environ.get("GEMINI_API_KEY")
+          if not api_key:
+              raise ValueError("GEMINI_API_KEY environment variable is missing.")
 
-          TARGET_EXTENSIONS = {".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".json", ".sql", ".sh"}
-          IGNORED_DIRS = {".git", ".github", "node_modules", "venv", ".venv", "__pycache__", "dist", "build"}
+          client = genai.Client(api_key=api_key)
+          model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
-          def strip_markdown(text: str) -> str:
-              text = text.strip()
-              fence_match = re.match(r"^```[a-zA-Z0-9_-]*\n(.*)\n```$", text, re.DOTALL)
-              if fence_match:
-                  return fence_match.group(1)
-              return text
+          # Locate target Python files while ignoring virtual environments and hidden directories
+          files_to_process = [
+              f for f in glob.glob("**/*.py", recursive=True)
+              if not any(part.startswith(".") or part in ("venv", "env", "site-packages") for part in f.split(os.sep))
+          ]
 
-          for root, dirs, files in os.walk("."):
-              dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
+          print(f"Found {len(files_to_process)} Python files to inspect.")
 
-              for file in files:
-                  _, ext = os.path.splitext(file)
-                  if ext.lower() in TARGET_EXTENSIONS:
-                      file_path = os.path.join(root, file)
+          for filepath in files_to_process:
+              print(f"Processing {filepath}...")
+              try:
+                  with open(filepath, "r", encoding="utf-8") as f:
+                      original_code = f.read()
 
-                      with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                          code = f.read()
+                  prompt = (
+                      "You are an automated code remediation agent. Analyze the following Python file, "
+                      "fix any syntax bugs, deprecated API calls, and logic errors, and return ONLY the "
+                      "fully runnable, corrected code. Do not wrap the output in markdown code fence blocks "
+                      "(e.g., ```python), and do not add conversational remarks or notes.\n\n"
+                      f"{original_code}"
+                  )
 
-                      if not code.strip():
-                          continue
+                  response = client.models.generate_content(
+                      model=model_name,
+                      contents=prompt
+                  )
 
-                      prompt = (
-                          f"Fix any bugs, broken syntax, or logic errors in the following file ({file}).\n"
-                          "Requirements:\n"
-                          "- Output ONLY the functional, corrected code.\n"
-                          "- Do not include explanations or markdown code fences.\n\n"
-                          f"{code}"
-                      )
+                  fixed_code = response.text.strip()
 
-                      try:
-                          response = client.models.generate_content(
-                              model="gemini-2.5-flash",
-                              contents=prompt
-                          )
-                          if response.text:
-                              cleaned = strip_markdown(response.text)
-                              with open(file_path, "w", encoding="utf-8") as f:
-                                  f.write(cleaned)
-                              print(f"Processed: {file_path}")
-                      except Exception as e:
-                          print(f"Failed to process {file_path}: {e}")
+                  # Clean code fences if the model output includes them
+                  if fixed_code.startswith("```python"):
+                      fixed_code = fixed_code[len("```python"):].strip()
+                  elif fixed_code.startswith("```"):
+                      fixed_code = fixed_code[3:].strip()
+
+                  if fixed_code.endswith("```"):
+                      fixed_code = fixed_code[:-3].strip()
+
+                  if fixed_code and fixed_code != original_code.strip():
+                      with open(filepath, "w", encoding="utf-8") as f:
+                          f.write(fixed_code + "\n")
+                      print(f"Successfully remediated: {filepath}")
+                  else:
+                      print(f"No changes required for: {filepath}")
+
+              except Exception as e:
+                  print(f"Failed to process {filepath}: {e}")
+
           EOF
 
-      - name: Commit and push changes
+      - name: Commit and push fixes
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --staged --quiet || (git commit -m "fix: automated codebase repair via Gemini" && git push)
+          if git diff --staged --quiet; then
+            echo "No code changes detected."
+          else
+            git commit -m "Auto-remediate codebase via gemini-3.6-flash [skip ci]"
+            git push
+          fi
