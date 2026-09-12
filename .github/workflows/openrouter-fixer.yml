@@ -93,8 +93,9 @@ jobs:
           Return ONLY the valid, production-ready, fully corrected Python code. Do not wrap with conversational commentary. Use ```python and ``` code blocks.
           """
               try:
+                  # Updated to the currently active free Gemma 2 model on OpenRouter
                   response = client.chat.completions.create(
-                      model="meta-llama/llama-3.1-8b-instruct:free",
+                      model="google/gemma-2-9b-it:free",
                       messages=[
                           {"role": "system", "content": "You are a master Python developer. Return ONLY valid Python code inside ```python blocks."},
                           {"role": "user", "content": prompt}
