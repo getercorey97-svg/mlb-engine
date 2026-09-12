@@ -6,6 +6,8 @@ from scipy.stats import norm
 class SOTAParlayEngine:
     def __init__(self, db_path="mlb_engine.db"):
         self.games = []
+        seen_matchups = set()  # Tracks unique games to prevent the duplicate bug!
+        
         try:
             conn = sqlite3.connect(db_path)
             # Fetch active games from today's forecast dynamically
@@ -22,6 +24,12 @@ class SOTAParlayEngine:
             
             for row in rows:
                 (game_pk, home_team, away_team, home_prob, away_prob, predicted_edge) = row
+                
+                # Check for duplicate double-headers or API ghost games
+                matchup_key = f"{away_team}@{home_team}"
+                if matchup_key in seen_matchups:
+                    continue  # Skip if we already logged this game today
+                seen_matchups.add(matchup_key)
                 
                 if home_prob >= away_prob:
                     team = home_team
