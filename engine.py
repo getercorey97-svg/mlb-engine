@@ -1,6 +1,7 @@
 import sqlite3
 import numpy as np
 from datetime import datetime
+from pathlib import Path
 from sklearn.isotonic import IsotonicRegression
 
 def ensure_engine_schemas(cursor):
@@ -76,6 +77,73 @@ def ensure_engine_schemas(cursor):
     if 'umpire_locked' not in cols:
         cursor.execute("ALTER TABLE Daily_Umpires ADD COLUMN umpire_locked INTEGER DEFAULT 0;")
 
+def probability_to_american(prob: float) -> str:
+    """Converts a win probability into bounded American Odds to prevent overflow."""
+    prob = max(0.01, min(0.99, prob))
+    if prob >= 0.5:
+        odds = -(prob / (1.0 - prob)) * 100
+    else:
+        odds = ((1.0 - prob) / prob) * 100
+    
+    odds_int = int(round(odds))
+    # Hard bound extreme limits to prevent -100000 anomalies
+    odds_int = max(-10000, min(10000, odds_int))
+    return f"{odds_int:+d}"
+
+def update_readme(cursor):
+    """Generates a clean, deduplicated README.md for active games."""
+    today_date = datetime.now().strftime("%Y-%m-%d")
+    
+    # Query only active forecasts joined with lineups to avoid unbounded date accumulation
+    cursor.execute('''
+        SELECT m.game_pk, m.away_team, m.home_team, m.away_prob, m.home_prob, 
+               m.predicted_edge, m.predicted_away_runs, m.predicted_home_runs,
+               l.away_pitcher, l.home_pitcher, 
+               COALESCE(u.home_plate_umpire, 'Awaiting HP Umpire'), COALESCE(u.umpire_locked, 0)
+        FROM Model_Forecasts m
+        INNER JOIN Daily_Lineups l ON m.game_pk = l.game_pk
+        LEFT JOIN Daily_Umpires u ON m.game_pk = u.game_pk
+        WHERE l.status != 'Final'
+    ''')
+    active_games = cursor.fetchall()
+
+    lines = [
+        f"# MLB Game Predictions & Value Engine ({today_date})",
+        "",
+        "### 🎟️ Primary Value Bets (Full Game Moneyline)",
+        "",
+        "| Matchup | Best Pick | Fair Odds | Edge | Projected Score | Pitchers | Umpire State |",
+        "| :--- | :--- | :---: | :---: | :---: | :--- | :--- |",
+    ]
+
+    if not active_games:
+        lines.append("| No active games remaining today | - | - | - | - | - | - |")
+    else:
+        for row in active_games:
+            (pk, away, home, p_away, p_home, edge, r_away, r_home, p_away_name, p_home_name, ump, ump_locked) = row
+            
+            best_pick = home if p_home >= p_away else away
+            win_prob = max(p_home, p_away)
+            fair_odds = probability_to_american(win_prob)
+            
+            ump_display = f"`{ump}`" if ump_locked == 1 else f"⏳ {ump}"
+            edge_display = f"+{edge*100:.1f}%"
+            
+            lines.append(
+                f"| {away} @ {home} | **{best_pick}** | {fair_odds} | "
+                f"{edge_display} | {r_away:.1f} - {r_home:.1f} | {p_away_name} vs {p_home_name} | {ump_display} |"
+            )
+
+    lines.extend([
+        "",
+        "---",
+        "*(Note: Engine uses upsert mechanisms on `game_pk`. Row duplication is disabled.)*",
+        ""
+    ])
+
+    with open("README.md", "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
 def run_ultimate_monte_carlo():
     print("=" * 65)
     print(f"[{datetime.now()}] Running Deterministic Dual-Engine Monte Carlo (BsR 1.8 + NegBinomial)")
@@ -87,6 +155,18 @@ def run_ultimate_monte_carlo():
     cursor = conn.cursor()
 
     ensure_engine_schemas(cursor)
+    conn.commit()
+
+    # Factual Post-Mortem Mandate: Execute simulation-free analysis on completed games first.
+    cursor.execute('''
+        INSERT OR IGNORE INTO Post_Match_Analysis (game_pk, actual_winner, home_score, away_score, processed_at)
+        SELECT l.game_pk, 
+               CASE WHEN l.home_team_score > l.away_team_score THEN l.home_team ELSE l.away_team END,
+               l.home_team_score, l.away_team_score, datetime('now')
+        FROM Daily_Lineups l
+        WHERE l.status = 'Final' 
+        AND l.game_pk NOT IN (SELECT game_pk FROM Post_Match_Analysis)
+    ''')
     conn.commit()
 
     # Preload metrics into memory for lock-free fast execution
@@ -112,11 +192,12 @@ def run_ultimate_monte_carlo():
     games = cursor.fetchall()
 
     if not games:
-        print("No active games found in Daily_Lineups to simulate.")
+        print("No active games found in Daily_Lineups to simulate. Generating current README.")
+        update_readme(cursor)
         conn.close()
         return
 
-    # Train Isotonic Calibrator
+    # Train Isotonic Calibrator strictly on finalized historical data
     cursor.execute('''
         SELECT m.home_prob, (CASE WHEN p.home_score > p.away_score THEN 1.0 ELSE 0.0 END)
         FROM Post_Match_Analysis p
@@ -212,9 +293,12 @@ def run_ultimate_monte_carlo():
 
         print(f"Game {pk}: {away} ({exp_away_runs:.2f} r) @ {home} ({exp_home_runs:.2f} r) | H: {final_home_prob:.1%} | A: {final_away_prob:.1%} | Edge: {edge:.1%} | Umpire: {ump_badge}")
 
+    # Generate deduplicated markdown file
+    update_readme(cursor)
+
     conn.commit()
     conn.close()
-    print("[SUCCESS] Deterministic Monte Carlo simulation completed.")
+    print("[SUCCESS] Deterministic Monte Carlo simulation completed and README updated.")
 
 if __name__ == "__main__":
     run_ultimate_monte_carlo()
