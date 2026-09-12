@@ -90,8 +90,9 @@ jobs:
           Return ONLY the valid, production-ready, fully corrected Python code. Do not wrap with conversational commentary. Use ```python and ``` code blocks.
           """
 
+              # ---> THIS WAS THE PROBLEM. CHANGED TO gemini-3.6-flash <---
               response = client.models.generate_content(
-                  model="gemini-2.5-flash",
+                  model="gemini-3.6-flash",
                   contents=prompt,
               )
 
