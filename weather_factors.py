@@ -16,7 +16,7 @@ def fetch_ballpark_weather():
     conn = sqlite3.connect('mlb_engine.db')
     cursor = conn.cursor()
     
-    cursor.executescript('''
+    cursor.execute('''
     CREATE TABLE IF NOT EXISTS Ballpark_Weather (
         home_team TEXT PRIMARY KEY,
         weather_multiplier REAL
@@ -26,13 +26,14 @@ def fetch_ballpark_weather():
     for team, (lat, lon) in ballpark_coords.items():
         url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,wind_speed_10m"
         try:
-            res = requests.get(url).json()
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            res = response.json()
             temp_c = res['current']['temperature_2m']
             temp_f = (temp_c * 9/5) + 32
-            wind_kph = res['current']['wind_speed_10m']
             
             # Thermodynamic adjustment: Higher temp = thinner air = higher run factor
-            temp_factor = 1.0 + max(0, (temp_f - 70) * 0.002)
+            temp_factor = 1.0 + max(0.0, (temp_f - 70) * 0.002)
             
             cursor.execute('''
             INSERT OR REPLACE INTO Ballpark_Weather (home_team, weather_multiplier)

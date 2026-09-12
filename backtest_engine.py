@@ -85,6 +85,7 @@ def run_backtest_engine(target_games=1600):
     # Ingest in 30-day bulk chunks to eliminate the 3-hour per-day loop
     today = datetime.now()
     all_games = []
+    seen_pks = set()
     chunk_days = 30
     days_back = 150 # Covers approx 1,600 - 2,000 games across 5 chunks
 
@@ -98,7 +99,9 @@ def run_backtest_engine(target_games=1600):
             res = requests.get(bulk_url, timeout=15).json()
             for date_item in res.get('dates', []):
                 for g in date_item.get('games', []):
-                    if g['status']['abstractGameState'] == 'Final' and 'linescore' in g:
+                    pk = g.get('gamePk')
+                    if pk and pk not in seen_pks and g.get('status', {}).get('abstractGameState') == 'Final' and 'linescore' in g:
+                        seen_pks.add(pk)
                         all_games.append(g)
         except Exception as e:
             print(f"Chunk fetch error ({start_dt} to {end_dt}): {e}")
@@ -123,11 +126,14 @@ def run_backtest_engine(target_games=1600):
     for g in all_games[:target_games]:
         pk = g['gamePk']
         teams = g.get('teams', {})
-        home = teams['home']['team']['name']
-        away = teams['away']['team']['name']
+        home = teams.get('home', {}).get('team', {}).get('name')
+        away = teams.get('away', {}).get('team', {}).get('name')
+
+        if not home or not away:
+            continue
         
-        home_score = teams['home'].get('score')
-        away_score = teams['away'].get('score')
+        home_score = teams.get('home', {}).get('score')
+        away_score = teams.get('away', {}).get('score')
 
         if home_score is None or away_score is None:
             continue
@@ -145,7 +151,7 @@ def run_backtest_engine(target_games=1600):
 
         # Projected probabilities (Pythagorean 1.83 exponent)
         denom = (base_h ** 1.83) + (base_a ** 1.83)
-        home_prob = round((base_h ** 1.83) / denom, 4)
+        home_prob = round((base_h ** 1.83) / denom, 4) if denom != 0 else 0.5
         away_prob = round(1.0 - home_prob, 4)
         edge = round(abs(home_prob - away_prob), 4)
 
@@ -170,8 +176,8 @@ def run_backtest_engine(target_games=1600):
 
         # Extract F5 scores from linescore innings 1-5 if present
         innings = g.get('linescore', {}).get('innings', [])
-        f5_h = sum([inn.get('home', {}).get('runs', 0) for inn in innings[:5] if 'runs' in inn.get('home', {})])
-        f5_a = sum([inn.get('away', {}).get('runs', 0) for inn in innings[:5] if 'runs' in inn.get('away', {})])
+        f5_h = sum(inn.get('home', {}).get('runs') or 0 for inn in innings[:5])
+        f5_a = sum(inn.get('away', {}).get('runs') or 0 for inn in innings[:5])
 
         cursor.execute('''
         INSERT OR REPLACE INTO Post_Match_Analysis 
@@ -182,6 +188,11 @@ def run_backtest_engine(target_games=1600):
         processed_count += 1
 
     conn.commit()
+
+    if processed_count == 0:
+        print("[BYPASS] No games processed.")
+        conn.close()
+        return
 
     # Calculate aggregate performance benchmark
     final_brier = round(float(np.mean(brier_scores)), 4)
@@ -197,7 +208,7 @@ def run_backtest_engine(target_games=1600):
     conn.close()
 
     print("\n" + "=" * 65)
-    print(f"⚡ BACKTEST EVALUATION COMPLETED IN UNDER 90 SECONDS")
+    print("⚡ BACKTEST EVALUATION COMPLETED IN UNDER 90 SECONDS")
     print(f"• Total Matchups Evaluated : {processed_count} Games")
     print(f"• Model Win Accuracy       : {final_acc:.2%}")
     print(f"• Calibrated Brier Score   : {final_brier:.4f} (Lower is better, < 0.25 is profitable)")

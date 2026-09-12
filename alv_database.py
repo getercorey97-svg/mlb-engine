@@ -41,8 +41,15 @@ STADIUMS = {
 
 def get_robust_session():
     session = requests.Session()
-    retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
-    session.mount('https://', HTTPAdapter(max_retries=retries))
+    retries = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        raise_on_status=False
+    )
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount('https://', adapter)
+    session.mount('http://', adapter)
     return session
 
 def get_dynamic_atmosphere(team_name, session, game_hour_utc=19):
@@ -51,15 +58,25 @@ def get_dynamic_atmosphere(team_name, session, game_hour_utc=19):
     params = {
         "latitude": coords[0],
         "longitude": coords[1],
-        "current_weather": True,
         "hourly": "surface_pressure,cloud_cover,temperature_2m"
     }
     try:
         res = session.get(url, params=params, timeout=10).json()
-        hour_idx = min(game_hour_utc, len(res['hourly']['surface_pressure']) - 1)
-        temp_c = res['hourly']['temperature_2m'][hour_idx]
-        pressure_hpa = res['hourly']['surface_pressure'][hour_idx]
-        cloud_cover = res['hourly']['cloud_cover'][hour_idx]
+        hourly_data = res.get('hourly', {})
+        pressures = hourly_data.get('surface_pressure', [])
+        temps = hourly_data.get('temperature_2m', [])
+        clouds = hourly_data.get('cloud_cover', [])
+
+        if not pressures or not temps or not clouds:
+            return 1.225, 1.00
+
+        hour_idx = min(max(0, game_hour_utc), len(pressures) - 1)
+        temp_c = temps[hour_idx]
+        pressure_hpa = pressures[hour_idx]
+        cloud_cover = clouds[hour_idx]
+
+        if temp_c is None or pressure_hpa is None or cloud_cover is None:
+            return 1.225, 1.00
 
         # Ideal Gas Law: rho = P / (R * T)
         temp_k = temp_c + 273.15
@@ -110,25 +127,29 @@ def execute_unified_alv():
 
     for date_data in response.get('dates', []):
         for game in date_data.get('games', []):
-            game_pk = game['gamePk']
-            status = game['status']['abstractGameState']
+            game_pk = game.get('gamePk')
+            if not game_pk:
+                continue
+
+            status = game.get('status', {}).get('abstractGameState', 'Unknown')
             teams = game.get('teams', {})
 
-            away = teams['away']['team']['name']
-            home = teams['home']['team']['name']
+            away = teams.get('away', {}).get('team', {}).get('name', 'Unknown Away')
+            home = teams.get('home', {}).get('team', {}).get('name', 'Unknown Home')
 
             away_pitcher = teams.get('away', {}).get('probablePitcher', {}).get('fullName', 'TBD')
             home_pitcher = teams.get('home', {}).get('probablePitcher', {}).get('fullName', 'TBD')
 
-            home_lineup = teams['home'].get('lineup', [])
-            away_lineup = teams['away'].get('lineup', [])
+            home_lineup = teams.get('home', {}).get('lineup', [])
+            away_lineup = teams.get('away', {}).get('lineup', [])
             lineup_status = "Confirmed" if len(home_lineup) >= 9 and len(away_lineup) >= 9 else "Pending/TBD"
 
             game_dt = game.get('gameDate')
             game_hour = 19
             if game_dt:
                 try:
-                    game_hour = datetime.strptime(game_dt, "%Y-%m-%dT%H:%M:%SZ").hour
+                    dt_str = game_dt.replace("Z", "+00:00")
+                    game_hour = datetime.fromisoformat(dt_str).hour
                 except Exception:
                     pass
 

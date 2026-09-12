@@ -16,14 +16,24 @@ def fetch_platoon_splits():
     );
     ''')
 
-    # Fetch hitting stats split by opposing pitcher handedness
-    for hand, code in [('LHP', 'left'), ('RHP', 'right')]:
-        url = f"https://statsapi.mlb.com/api/v1/teams/stats?season=2026&group=hitting&stats=statSplits&sitCodes=vs{code.capitalize()}&sportIds=1"
+    # Fetch hitting stats split by opposing pitcher handedness (vl = vs Left, vr = vs Right)
+    for hand, code in [('LHP', 'vl'), ('RHP', 'vr')]:
+        url = f"https://statsapi.mlb.com/api/v1/teams/stats?season=2026&group=hitting&stats=statSplits&sitCodes={code}&sportIds=1"
         try:
-            response = requests.get(url).json()
-            for split in response.get('stats', [{}])[0].get('splits', []):
-                team_name = split['team']['name']
-                ops = float(split['stat'].get('ops', 0.720))
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            stats_list = data.get('stats', [])
+            splits = stats_list[0].get('splits', []) if stats_list else []
+            
+            for split in splits:
+                team_name = split.get('team', {}).get('name')
+                if not team_name:
+                    continue
+                
+                ops_val = split.get('stat', {}).get('ops')
+                ops = float(ops_val) if ops_val is not None else 0.720
                 
                 cursor.execute('''
                 INSERT OR REPLACE INTO Team_Platoon_Splits (team_name, vs_hand, ops)

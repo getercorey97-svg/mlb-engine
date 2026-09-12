@@ -1,10 +1,7 @@
 import sqlite3
 import requests
-import numpy as np
-import pandas as pd
 import warnings
 from datetime import datetime, timedelta
-from sklearn.isotonic import IsotonicRegression
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -37,9 +34,16 @@ def get_historical_atmosphere(team_name, date_str):
     }
     try:
         res = requests.get(url, params=params, timeout=10).json()
-        temp_c = res['hourly']['temperature_2m'][12] 
-        pressure_hpa = res['hourly']['surface_pressure'][12]
-        cloud_cover = res['hourly']['cloud_cover'][12]
+        hourly = res.get('hourly', {})
+        temps = hourly.get('temperature_2m', [])
+        pressures = hourly.get('surface_pressure', [])
+        clouds = hourly.get('cloud_cover', [])
+
+        idx = 12 if len(temps) > 12 else 0
+        temp_c = temps[idx] if len(temps) > idx and temps[idx] is not None else 15.0
+        pressure_hpa = pressures[idx] if len(pressures) > idx and pressures[idx] is not None else 1013.25
+        cloud_cover = clouds[idx] if len(clouds) > idx and clouds[idx] is not None else 0.0
+
         temp_k = temp_c + 273.15
         pressure_pa = pressure_hpa * 100
         density = round(pressure_pa / (287.05 * temp_k), 4)
@@ -134,16 +138,16 @@ def run_backtest_sweep(years_back=1):
                 cursor.execute('SELECT offensive_modifier, pitching_modifier FROM Dynamic_Modifiers WHERE team_name = ?', (away_team,))
                 a_mod = cursor.fetchone() or (1.0, 1.0)
                 
-                pred_h_runs = round(4.2 * h_mod[0] * a_mod[1] * (1.225 / air_density), 2)
-                pred_a_runs = round(4.0 * a_mod[0] * h_mod[1], 2)
+                pred_h_runs = round(4.2 * h_mod[0] * a_mod[1] * (1.225 / air_density) * uv_modifier, 2)
+                pred_a_runs = round(4.0 * a_mod[0] * h_mod[1] * (1.225 / air_density) * uv_modifier, 2)
                 
                 home_prob = 0.52 if pred_h_runs > pred_a_runs else 0.48
-                away_prob = 1.0 - home_prob
+                away_prob = round(1.0 - home_prob, 2)
                 
                 cursor.execute('''
                     INSERT OR REPLACE INTO Model_Forecasts (game_pk, home_team, away_team, home_prob, away_prob, predicted_edge, predicted_home_runs, predicted_away_runs, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (game_pk, home_team, away_team, home_prob, away_prob, abs(home_prob - away_prob), pred_h_runs, pred_a_runs, date_str))
+                ''', (game_pk, home_team, away_team, home_prob, away_prob, round(abs(home_prob - away_prob), 2), pred_h_runs, pred_a_runs, date_str))
 
                 actual_winner = home_team if home_score > away_score else away_team
                 predicted_winner = home_team if home_prob > away_prob else away_team
@@ -153,7 +157,9 @@ def run_backtest_sweep(years_back=1):
                 correct_predictions += is_correct
                 
                 update_dynamic_weights(cursor, home_team, pred_h_runs, home_score, is_offense=True)
+                update_dynamic_weights(cursor, away_team, pred_h_runs, home_score, is_offense=False)
                 update_dynamic_weights(cursor, away_team, pred_a_runs, away_score, is_offense=True)
+                update_dynamic_weights(cursor, home_team, pred_a_runs, away_score, is_offense=False)
                 
                 cursor.execute('''
                     INSERT OR REPLACE INTO Post_Match_Analysis (game_pk, actual_winner, home_score, away_score, model_correct, processed_at)

@@ -8,8 +8,14 @@ def verify_starting_lineups():
     today = datetime.now().strftime('%Y-%m-%d')
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today}&hydrate=lineups"
     
-    response = requests.get(url).json()
-    
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+    except requests.RequestException as e:
+        print(f"Error fetching schedule data: {e}")
+        return
+
     conn = sqlite3.connect('mlb_engine.db')
     cursor = conn.cursor()
     
@@ -22,14 +28,27 @@ def verify_starting_lineups():
     );
     ''')
 
-    for date_data in response.get('dates', []):
+    for date_data in data.get('dates', []):
         for game in date_data.get('games', []):
-            game_pk = game['gamePk']
+            game_pk = game.get('gamePk')
+            if not game_pk:
+                continue
+            
             teams = game.get('teams', {})
+            game_lineups = game.get('lineups', {})
             
             for side in ['away', 'home']:
-                team_name = teams[side]['team']['name']
-                lineup = teams[side].get('lineup', [])
+                side_data = teams.get(side, {})
+                team_name = side_data.get('team', {}).get('name')
+                if not team_name:
+                    continue
+                
+                lineup = (
+                    side_data.get('lineup', [])
+                    or game_lineups.get(f"{side}Players", [])
+                    or game_lineups.get(side, [])
+                    or []
+                )
                 
                 status = "Confirmed" if len(lineup) >= 9 else "Pending/TBD"
                 

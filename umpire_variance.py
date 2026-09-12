@@ -14,7 +14,7 @@ KNOWN_UMPIRES = {
 def execute_umpire_variance_pipeline():
     """Ingests assigned Home Plate Umpires with automated schema migration."""
     print("=" * 65)
-    print(f"[{datetime.now()}] Initializing Umpire Variance & Lock Pipeline...")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Initializing Umpire Variance & Lock Pipeline...")
     print("=" * 65)
 
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
@@ -32,7 +32,7 @@ def execute_umpire_variance_pipeline():
     );
     ''')
 
-    # Migration: Ensure umpire_locked exists
+    # Migration: Ensure columns exist
     cursor.execute("PRAGMA table_info(Daily_Umpires);")
     cols = [c[1] for c in cursor.fetchall()]
     if 'umpire_locked' not in cols:
@@ -45,7 +45,9 @@ def execute_umpire_variance_pipeline():
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today}&hydrate=officials"
 
     try:
-        data = requests.get(url, timeout=12).json()
+        response = requests.get(url, timeout=12)
+        response.raise_for_status()
+        data = response.json()
     except Exception as e:
         print(f"[UMPIRE WARNING] Failed to connect to MLB Officials API: {e}")
         conn.close()
@@ -55,7 +57,10 @@ def execute_umpire_variance_pipeline():
 
     for date_item in data.get('dates', []):
         for game in date_item.get('games', []):
-            game_pk = game['gamePk']
+            game_pk = game.get('gamePk')
+            if not game_pk:
+                continue
+
             officials = game.get('officials', [])
 
             cursor.execute("SELECT home_plate_umpire, run_modifier, umpire_locked FROM Daily_Umpires WHERE game_pk = ?", (game_pk,))
@@ -64,7 +69,8 @@ def execute_umpire_variance_pipeline():
             hp_umpire = "Unknown / TBD"
             for official in officials:
                 if official.get('officialType') == 'Home Plate':
-                    hp_umpire = official.get('person', {}).get('fullName', 'Unknown / TBD')
+                    person = official.get('person') or official.get('official') or {}
+                    hp_umpire = person.get('fullName', 'Unknown / TBD')
                     break
 
             if hp_umpire != "Unknown / TBD":
@@ -73,8 +79,8 @@ def execute_umpire_variance_pipeline():
                 status_label = f"LOCKED: {hp_umpire} ({mod:.3f}x)"
             else:
                 if existing and len(existing) >= 3 and existing[2] == 1:
-                    hp_umpire = existing[0]
-                    mod = existing[1]
+                    hp_umpire = existing[0] if existing[0] is not None else "Unknown / TBD"
+                    mod = float(existing[1]) if existing[1] is not None else 1.000
                     is_locked = 1
                     status_label = f"PRESERVED LOCKED: {hp_umpire} ({mod:.3f}x)"
                 else:
@@ -83,9 +89,14 @@ def execute_umpire_variance_pipeline():
                     status_label = "AWAITING OFFICIAL LINEUP CARD (1.000x fallback)"
 
             cursor.execute('''
-            INSERT OR REPLACE INTO Daily_Umpires 
+            INSERT INTO Daily_Umpires 
             (game_pk, home_plate_umpire, run_modifier, umpire_locked, updated_at)
             VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(game_pk) DO UPDATE SET
+                home_plate_umpire = excluded.home_plate_umpire,
+                run_modifier = excluded.run_modifier,
+                umpire_locked = excluded.umpire_locked,
+                updated_at = excluded.updated_at
             ''', (game_pk, hp_umpire, mod, is_locked, now_ts))
 
             print(f"Game {game_pk} | HP Umpire: {status_label}")

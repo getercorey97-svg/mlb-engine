@@ -42,13 +42,15 @@ def ingest_mlb_data():
         except sqlite3.OperationalError:
             pass
 
-    season = "2026"
+    season = str(datetime.now().year)
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     # Fetch Empirical Team Offense (Calculating True Base Runs) and Bullpen Stats
     teams_url = "https://statsapi.mlb.com/api/v1/teams?sportId=1"
     try:
-        response = requests.get(teams_url, timeout=15).json()
+        res = requests.get(teams_url, timeout=15)
+        res.raise_for_status()
+        response = res.json()
     except Exception as e:
         print(f"API Error fetching teams: {e}")
         conn.close()
@@ -57,25 +59,29 @@ def ingest_mlb_data():
     for team in response.get('teams', []):
         team_name = team.get('name')
         team_id = team.get('id')
+        if not team_name or not team_id:
+            continue
         
         stats_url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?group=hitting,pitching&stats=season&season={season}"
         factual_ops, factual_era, bsr_per_game = 0.720, 4.00, 4.50
         
         try:
-            stats_res = requests.get(stats_url, timeout=10).json()
+            stats_req = requests.get(stats_url, timeout=10)
+            stats_req.raise_for_status()
+            stats_res = stats_req.json()
             for split in stats_res.get('stats', []):
                 group = split.get('group', {}).get('displayName')
                 if group == 'hitting' and split.get('splits'):
                     stat = split['splits'][0]['stat']
-                    factual_ops = float(stat.get('ops', 0.720))
+                    factual_ops = float(stat.get('ops') or 0.720)
                     
                     # Extract raw metrics for mathematical Base Runs (BsR) calculation
-                    h = float(stat.get('hits', 0))
-                    bb = float(stat.get('baseOnBalls', 0))
-                    hr = float(stat.get('homeRuns', 0))
-                    ab = float(stat.get('atBats', 1))
-                    tb = float(stat.get('totalBases', 0))
-                    games_played = float(stat.get('gamesPlayed', 1))
+                    h = float(stat.get('hits') or 0)
+                    bb = float(stat.get('baseOnBalls') or 0)
+                    hr = float(stat.get('homeRuns') or 0)
+                    ab = float(stat.get('atBats') or 1)
+                    tb = float(stat.get('totalBases') or 0)
+                    games_played = float(stat.get('gamesPlayed') or 1)
                     
                     # SOTA BsR Formulation
                     A = h + bb - hr
@@ -83,12 +89,12 @@ def ingest_mlb_data():
                     C = ab - h
                     D = hr
                     
-                    if (B + C) > 0:
+                    if (B + C) > 0 and games_played > 0:
                         total_bsr = ((A * B) / (B + C)) + D
                         bsr_per_game = round(total_bsr / games_played, 3)
                         
                 elif group == 'pitching' and split.get('splits'):
-                    factual_era = float(split['splits'][0]['stat'].get('era', 4.00))
+                    factual_era = float(split['splits'][0]['stat'].get('era') or 4.00)
                     
             cursor.execute('''
                 INSERT OR REPLACE INTO Team_Offense (team_name, ops, bsr_per_game, updated_at) 
@@ -108,7 +114,9 @@ def ingest_mlb_data():
     schedule_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={live_date}&hydrate=probablePitcher"
     
     try:
-        sched_res = requests.get(schedule_url, timeout=15).json()
+        sched_req = requests.get(schedule_url, timeout=15)
+        sched_req.raise_for_status()
+        sched_res = sched_req.json()
         for date_data in sched_res.get('dates', []):
             for game in date_data.get('games', []):
                 for side in ['home', 'away']:
@@ -120,10 +128,12 @@ def ingest_mlb_data():
                         p_url = f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}/stats?stats=season&group=pitching&season={season}"
                         factual_era = 4.20
                         try:
-                            p_res = requests.get(p_url, timeout=10).json()
+                            p_req = requests.get(p_url, timeout=10)
+                            p_req.raise_for_status()
+                            p_res = p_req.json()
                             stats_data = p_res.get('stats', [])
                             if stats_data and stats_data[0].get('splits'):
-                                factual_era = float(stats_data[0]['splits'][0]['stat'].get('era', 4.20))
+                                factual_era = float(stats_data[0]['splits'][0]['stat'].get('era') or 4.20)
                                 
                             cursor.execute('''
                                 INSERT OR REPLACE INTO Pitcher_Stats (last_name, est_era, updated_at) 

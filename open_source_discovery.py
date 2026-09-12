@@ -9,8 +9,10 @@ def fetch_geomagnetic_kp():
     """Pulls live NOAA planetary geomagnetic Kp-index with fast 3-second timeout."""
     try:
         res = requests.get(NOAA_KP_URL, timeout=3).json()
-        if len(res) > 1:
-            return float(res[-1][1])
+        if isinstance(res, list) and len(res) > 1:
+            val = res[-1][1]
+            if val is not None:
+                return float(val)
     except Exception:
         pass
     return 2.0
@@ -28,8 +30,22 @@ def fetch_gdelt_tone(team_name):
     try:
         res = requests.get(url, params=params, headers=headers, timeout=3).json()
         articles = res.get('articles', [])
-        tone = sum([float(a.get('tone', 0.0)) for a in articles]) / max(1, len(articles))
-        return (team_name, len(articles), round(tone, 2))
+        if not articles:
+            return (team_name, 0, 0.0)
+        tones = []
+        for a in articles:
+            raw_tone = a.get('tone')
+            if raw_tone is not None:
+                try:
+                    if isinstance(raw_tone, str) and ',' in raw_tone:
+                        raw_tone = raw_tone.split(',')[0]
+                    tones.append(float(raw_tone))
+                except (ValueError, TypeError):
+                    tones.append(0.0)
+            else:
+                tones.append(0.0)
+        tone_avg = sum(tones) / max(1, len(tones))
+        return (team_name, len(articles), round(tone_avg, 2))
     except Exception:
         return (team_name, 0, 0.0)
 
@@ -45,6 +61,11 @@ def execute_discovery_ingestion():
     cursor.execute("PRAGMA busy_timeout=10000;")
 
     cursor.executescript('''
+    CREATE TABLE IF NOT EXISTS Daily_Lineups (
+        game_pk INTEGER PRIMARY KEY,
+        home_team TEXT,
+        status TEXT
+    );
     CREATE TABLE IF NOT EXISTS Esoteric_Signals (
         game_pk INTEGER PRIMARY KEY,
         geomagnetic_kp REAL DEFAULT 2.0,
@@ -68,16 +89,18 @@ def execute_discovery_ingestion():
         conn.close()
         return
 
-    # De-duplicate teams and poll concurrently across 8 threads
-    unique_teams = list(set([home for _, home in games]))
+    # De-duplicate teams and poll concurrently across threads
+    unique_teams = list(set([home for _, home in games if home]))
     team_results = {}
 
-    print(f"Polling media tone across {len(unique_teams)} home franchises in parallel...")
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(fetch_gdelt_tone, team) for team in unique_teams]
-        for f in futures:
-            t_name, vol, tone = f.result()
-            team_results[t_name] = (vol, tone)
+    if unique_teams:
+        print(f"Polling media tone across {len(unique_teams)} home franchises in parallel...")
+        max_workers = min(8, max(1, len(unique_teams)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(fetch_gdelt_tone, team) for team in unique_teams]
+            for f in futures:
+                t_name, vol, tone = f.result()
+                team_results[t_name] = (vol, tone)
 
     for game_pk, home_team in games:
         vol, tone = team_results.get(home_team, (0, 0.0))
