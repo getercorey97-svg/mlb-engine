@@ -1,0 +1,86 @@
+name: Gemini Repository Auto-Fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix-all-code:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Google GenAI SDK
+        run: pip install google-genai
+
+      - name: Scan and fix files with Gemini
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python - << 'EOF'
+          import os
+          import re
+          from google import genai
+
+          client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+          TARGET_EXTENSIONS = {".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".json", ".sql", ".sh"}
+          IGNORED_DIRS = {".git", ".github", "node_modules", "venv", ".venv", "__pycache__", "dist", "build"}
+
+          def strip_markdown(text: str) -> str:
+              text = text.strip()
+              fence_match = re.match(r"^```[a-zA-Z0-9_-]*\n(.*)\n```$", text, re.DOTALL)
+              if fence_match:
+                  return fence_match.group(1)
+              return text
+
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
+
+              for file in files:
+                  _, ext = os.path.splitext(file)
+                  if ext.lower() in TARGET_EXTENSIONS:
+                      file_path = os.path.join(root, file)
+
+                      with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                          code = f.read()
+
+                      if not code.strip():
+                          continue
+
+                      prompt = (
+                          f"Fix any bugs, broken syntax, or logic errors in the following file ({file}).\n"
+                          "Requirements:\n"
+                          "- Output ONLY the functional, corrected code.\n"
+                          "- Do not include explanations or markdown code fences.\n\n"
+                          f"{code}"
+                      )
+
+                      try:
+                          response = client.models.generate_content(
+                              model="gemini-2.5-flash",
+                              contents=prompt
+                          )
+                          if response.text:
+                              cleaned = strip_markdown(response.text)
+                              with open(file_path, "w", encoding="utf-8") as f:
+                                  f.write(cleaned)
+                              print(f"Processed: {file_path}")
+                      except Exception as e:
+                          print(f"Failed to process {file_path}: {e}")
+          EOF
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --staged --quiet || (git commit -m "fix: automated codebase repair via Gemini" && git push)
