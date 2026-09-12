@@ -1,21 +1,30 @@
-name: fix-all-code
+name: scan-and-fix
 
 on:
   workflow_dispatch:
   push:
     branches:
       - main
+  schedule:
+    - cron: '0 */6 * * *'
 
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  scan-and-fix:
+  google-api-repair-and-run:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,83 +34,100 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install google-genai
+          pip install google-genai numpy scikit-learn
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Scan and fix files with Gemini
+      - name: Scan, diagnose, and fix code with Google Gemini API
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: "gemini-3.6-flash"
         run: |
           python - << 'EOF'
           import os
-          import glob
+          import sys
+          from pathlib import Path
           from google import genai
 
           api_key = os.environ.get("GEMINI_API_KEY")
           if not api_key:
-              raise ValueError("GEMINI_API_KEY environment variable is missing.")
+              print("ERROR: GEMINI_API_KEY secret is missing. Add it under Repository Settings -> Secrets and variables -> Actions.")
+              sys.exit(1)
 
           client = genai.Client(api_key=api_key)
-          model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
-          # Locate target Python files while ignoring virtual environments and hidden directories
-          files_to_process = [
-              f for f in glob.glob("**/*.py", recursive=True)
-              if not any(part.startswith(".") or part in ("venv", "env", "site-packages") for part in f.split(os.sep))
-          ]
+          # Locate relevant Python files in the repository
+          py_files = [p for p in Path(".").rglob("*.py") if not any(part.startswith((".", "venv", "__pycache__")) for part in p.parts)]
 
-          print(f"Found {len(files_to_process)} Python files to inspect.")
+          if not py_files:
+              print("No Python files detected in repository.")
+              sys.exit(0)
 
-          for filepath in files_to_process:
-              print(f"Processing {filepath}...")
-              try:
-                  with open(filepath, "r", encoding="utf-8") as f:
-                      original_code = f.read()
+          for file_path in py_files:
+              with open(file_path, "r", encoding="utf-8") as f:
+                  code_content = f.read()
 
-                  prompt = (
-                      "You are an automated code remediation agent. Analyze the following Python file, "
-                      "fix any syntax bugs, deprecated API calls, and logic errors, and return ONLY the "
-                      "fully runnable, corrected code. Do not wrap the output in markdown code fence blocks "
-                      "(e.g., ```python), and do not add conversational remarks or notes.\n\n"
-                      f"{original_code}"
-                  )
+              # Only target files managing games, predictions, odds, or README generation
+              keywords = ["schedule", "statsapi", "README", "odds", "pitcher", "umpire", "prediction", "sqlite3"]
+              if not any(k in code_content for k in keywords):
+                  continue
 
-                  response = client.models.generate_content(
-                      model=model_name,
-                      contents=prompt
-                  )
+              print(f"Submitting {file_path} to Google Gemini API for structural diagnosis and repair...")
 
-                  fixed_code = response.text.strip()
+              prompt = f"""
+          You are an expert Python engineer debugging an automated MLB prediction engine.
+          Below is the current file '{file_path}':
 
-                  # Clean code fences if the model output includes them
-                  if fixed_code.startswith("```python"):
-                      fixed_code = fixed_code[len("```python"):].strip()
-                  elif fixed_code.startswith("```"):
-                      fixed_code = fixed_code[3:].strip()
+          ```python
+          {code_content}
+          ```
 
-                  if fixed_code.endswith("```"):
-                      fixed_code = fixed_code[:-3].strip()
+          CRITICAL ISSUES TO DIAGNOSE AND REPAIR IN THIS FILE:
+          1. DUPLICATE ROWS ON RE-RUN: Ensure game-level deduplication using the official MLB unique identifier (`game_pk`). The README must overwrite old values, NEVER append duplicate rows.
+          2. UNBOUNDED DATE QUERY: Ensure `update_readme()` isolates variables strictly for today's games to prevent historical slates from inflating the daily table.
+          3. STAT COMPOUNDING: Verify that baseline variables are static pulls on each cycle, completely avoiding cumulative state increments or infinite metric looping.
+          4. PROBABILITY / ODDS OVERFLOW: Bounded win probabilities must sit within standard distributions (between 0.05 and 0.95) and convert to realistic American odds (bound strictly between -10000 and +10000).
+          5. POST-MORTEM FACTUAL MANDATE: Completed events (status='Final') must be documented via factual comparison only. Absolutely no simulations or stochastic processes are authorized for finalized data.
 
-                  if fixed_code and fixed_code != original_code.strip():
-                      with open(filepath, "w", encoding="utf-8") as f:
-                          f.write(fixed_code + "\n")
-                      print(f"Successfully remediated: {filepath}")
-                  else:
-                      print(f"No changes required for: {filepath}")
+          Return ONLY the valid, production-ready, fully corrected Python code. Do not wrap with conversational commentary. Use ```python and ``` code blocks.
+          """
 
-              except Exception as e:
-                  print(f"Failed to process {filepath}: {e}")
+              response = client.models.generate_content(
+                  model="gemini-2.5-flash",
+                  contents=prompt,
+              )
+
+              repaired_code = response.text
+              if "```python" in repaired_code:
+                  repaired_code = repaired_code.split("```python")[1].split("```")[0].strip()
+              elif "```" in repaired_code:
+                  repaired_code = repaired_code.split("```")[1].split("```")[0].strip()
+
+              with open(file_path, "w", encoding="utf-8") as f:
+                  f.write(repaired_code + "\n")
+
+              print(f"Successfully repaired and rewrote {file_path}")
 
           EOF
 
-      - name: Commit and push fixes
+      - name: Validate Python syntax and compilation
+        run: |
+          python -m compileall -q .
+
+      - name: Execute updated engine
+        run: |
+          # Ensures output formats natively without failing
+          python mlb_engine.py
+
+      - name: Commit and push verified fixes
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
           git add -A
-          if git diff --staged --quiet; then
-            echo "No code changes detected."
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Google API code repair and clean table update [skip ci]"
+            git pull --rebase origin main
+            git push origin main
           else
-            git commit -m "Auto-remediate codebase via gemini-3.6-flash [skip ci]"
-            git push
+            echo "Working tree is clean; no changes to commit."
           fi
