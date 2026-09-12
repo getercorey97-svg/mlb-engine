@@ -1,0 +1,139 @@
+name: OpenRouter AI Auto-Fixer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '0 */6 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  openrouter-api-repair:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # OpenRouter uses the standard OpenAI python client!
+          pip install openai numpy scikit-learn pandas
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Scan, diagnose, and fix code with OpenRouter API
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python - << 'EOF'
+          import os
+          import sys
+          from pathlib import Path
+          from openai import OpenAI
+
+          api_key = os.environ.get("OPENROUTER_API_KEY")
+          if not api_key:
+              print("ERROR: OPENROUTER_API_KEY secret is missing. Add it in Repo Settings.")
+              sys.exit(1)
+
+          # Point the OpenAI client to OpenRouter's servers
+          client = OpenAI(
+              base_url="https://openrouter.ai/api/v1",
+              api_key=api_key,
+          )
+
+          # Locate relevant Python files in the repository
+          py_files = [p for p in Path(".").rglob("*.py") if not any(part.startswith((".", "venv", "__pycache__")) for part in p.parts)]
+
+          if not py_files:
+              print("No Python files detected in repository.")
+              sys.exit(0)
+
+          for file_path in py_files:
+              with open(file_path, "r", encoding="utf-8") as f:
+                  code_content = f.read()
+
+              # Only target files managing games, predictions, odds, or README generation
+              keywords = ["schedule", "statsapi", "README", "odds", "pitcher", "umpire", "prediction", "sqlite3"]
+              if not any(k in code_content for k in keywords):
+                  continue
+
+              print(f"Submitting {file_path} to OpenRouter API for structural diagnosis and repair...")
+
+              prompt = f"""
+          You are an expert Python engineer debugging an automated MLB prediction engine.
+          Below is the current file '{file_path}':
+
+          ```python
+          {code_content}
+          ```
+
+          CRITICAL ISSUES TO PREVENT:
+          1. DUPLICATE ROWS: Ensure game-level deduplication using the official MLB unique identifier (`game_pk`). 
+          2. UNBOUNDED QUERIES: Ensure logic isolates variables strictly for today's games to prevent historical slates from inflating daily tables.
+          3. PROBABILITY / ODDS OVERFLOW: Bounded win probabilities must sit within standard distributions (between 0.05 and 0.95) and convert to realistic American odds.
+
+          Return ONLY the valid, production-ready, fully corrected Python code. Do not wrap with conversational commentary. Use ```python and ``` code blocks.
+          """
+              try:
+                  response = client.chat.completions.create(
+                      model="meta-llama/llama-3.1-8b-instruct:free",
+                      messages=[
+                          {"role": "system", "content": "You are a master Python developer. Return ONLY valid Python code inside ```python blocks."},
+                          {"role": "user", "content": prompt}
+                      ]
+                  )
+
+                  repaired_code = response.choices[0].message.content
+                  
+                  # Extract the code from the markdown blocks
+                  if "```python" in repaired_code:
+                      repaired_code = repaired_code.split("```python")[1].split("```")[0].strip()
+                  elif "```" in repaired_code:
+                      repaired_code = repaired_code.split("```")[1].split("```")[0].strip()
+
+                  # Write the repaired code back to the file
+                  with open(file_path, "w", encoding="utf-8") as f:
+                      f.write(repaired_code + "\n")
+
+                  print(f"Successfully repaired and rewrote {file_path}")
+              except Exception as e:
+                  print(f"Failed to process {file_path} via OpenRouter: {e}")
+
+          EOF
+
+      - name: Validate Python syntax and compilation
+        run: |
+          python -m compileall -q .
+
+      - name: Commit and push verified fixes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if ! git diff --cached --quiet; then
+            git commit -m "OpenRouter API code repair and clean table update [skip ci]"
+            git pull --rebase origin main
+            git push origin main
+          else
+            echo "Working tree is clean; no changes to commit."
+          fi
