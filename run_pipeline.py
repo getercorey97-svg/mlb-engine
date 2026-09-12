@@ -170,6 +170,9 @@ def main():
     safe_run("engine_f5_props", ["run_f5_and_props_engine", "main"], "First 5 & Props Engine")
     safe_run("export_and_odds", ["export_forecasts_and_check_odds", "main"], "Betting Slip Generator")
 
+    print("\n--- PHASE 5: SOTA Parlay Combinatorics ---")
+    safe_run("parlay_engine", ["main", "generate_parlay_cards"], "SOTA Parlay Engine")
+
     print("\n" + "=" * 65)
     print(f"[{datetime.now()}] MLB Prediction Pipeline completed successfully.")
     print("=" * 65)
