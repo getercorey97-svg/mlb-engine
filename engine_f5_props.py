@@ -25,9 +25,11 @@ def run_f5_and_props_engine():
         pass
 
     try:
+        # THE FIX: Added the WHERE clause to permanently filter out finalized and processed games
         cursor.execute('''
             SELECT d.game_pk, d.away_team, d.home_team, d.away_pitcher, d.home_pitcher, d.air_density, d.uv_modifier, COALESCE(u.run_modifier, 1.0)
             FROM Daily_Lineups d LEFT JOIN Daily_Umpires u ON d.game_pk = u.game_pk
+            WHERE d.status != 'Final' AND d.game_pk NOT IN (SELECT game_pk FROM Post_Match_Analysis)
         ''')
         matchups = cursor.fetchall()
     except Exception as e:
