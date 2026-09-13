@@ -144,11 +144,12 @@ def update_readme(cursor):
         f.write("\n".join(lines))
 
 def build_mlb_stacking_classifier():
-    """Constructs the Level-1 Stacked Generalization ensemble."""
+    """Constructs the Level-1 Stacked Generalization ensemble with feature passthrough enabled."""
     rf_base = RandomForestClassifier(n_estimators=200, max_depth=6, min_samples_leaf=4, random_state=42, n_jobs=-1)
     xgb_base = XGBClassifier(n_estimators=150, learning_rate=0.05, max_depth=5, eval_metric='logloss', random_state=42, n_jobs=-1)
     
-    level_1_meta = LogisticRegression(penalty='l2', C=0.1, solver='lbfgs', max_iter=1000)
+    # Increased C from 0.1 to 1.0 to reduce shrinkage and allow team variance
+    level_1_meta = LogisticRegression(penalty='l2', C=1.0, solver='lbfgs', max_iter=1000)
     cv_strategy = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     
     stacked_model = StackingClassifier(
@@ -156,9 +157,11 @@ def build_mlb_stacking_classifier():
         final_estimator=level_1_meta,
         cv=cv_strategy,
         stack_method='predict_proba',
-        passthrough=False,
+        passthrough=True, # FIXED: Passes raw features (runs & raw probabilities) directly to the meta-model
         n_jobs=-1
     )
+    return stacked_model
+
     return stacked_model
 
 def run_ultimate_monte_carlo():
