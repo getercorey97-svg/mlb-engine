@@ -101,6 +101,8 @@ def probability_to_american(prob: float) -> str:
 
 def update_readme(cursor):
     today_date = datetime.now().strftime("%Y-%m-%d")
+    
+    # THE FIX: Added mathematical lock to prevent duplicate games appearing on the README
     cursor.execute('''
         SELECT m.game_pk, m.away_team, m.home_team, m.away_prob, m.home_prob, 
                m.predicted_edge, m.predicted_away_runs, m.predicted_home_runs,
@@ -109,7 +111,7 @@ def update_readme(cursor):
         FROM Model_Forecasts m
         INNER JOIN Daily_Lineups l ON m.game_pk = l.game_pk
         LEFT JOIN Daily_Umpires u ON m.game_pk = u.game_pk
-        WHERE l.status != 'Final'
+        WHERE l.status != 'Final' AND l.game_pk NOT IN (SELECT game_pk FROM Post_Match_Analysis)
     ''')
     active_games = cursor.fetchall()
 
@@ -204,11 +206,12 @@ def run_ultimate_monte_carlo():
     except Exception:
         umpire_mods = {}
 
+    # THE FIX: Added mathematical lock to permanently block old, finalized ghost games from simulating
     cursor.execute('''
         SELECT game_pk, away_team, home_team, away_pitcher, home_pitcher, 
                COALESCE(air_density, 1.225), COALESCE(uv_modifier, 1.00)
         FROM Daily_Lineups 
-        WHERE status != "Final"
+        WHERE status != "Final" AND game_pk NOT IN (SELECT game_pk FROM Post_Match_Analysis)
     ''')
     games = cursor.fetchall()
 
