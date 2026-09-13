@@ -447,9 +447,9 @@
 | Cincinnati Reds @ Milwaukee Brewers | **Milwaukee Brewers** | `-112` | 🔥 **+5.8%** | 4.6 - 5.3 | Chase Burns vs Robert Gasser | 🔒 Doug Eddings |
 | Cincinnati Reds @ Milwaukee Brewers | **Milwaukee Brewers** | `-112` | 🔥 **+5.8%** | 4.6 - 5.2 | Andrew Abbott vs Dustin May | ⏳ Awaiting HP Umpire |
 | Texas Rangers @ Arizona Diamondbacks | **Arizona Diamondbacks** | `-112` | 🔥 **+5.8%** | 5.4 - 5.3 | Kumar Rocker vs Brandon Pfaadt | 🔒 Chad Fairchild |
+| San Diego Padres @ San Francisco Giants | **San Francisco Giants** | `-112` | 🔥 **+5.8%** | 4.1 - 4.1 | Nick Pivetta vs Logan Webb | 🔒 Junior Valentine |
 | Seattle Mariners @ Athletics | **Athletics** | `-112` | 🔥 **+5.8%** | 4.7 - 5.1 | George Kirby vs Jeffrey Springs | ⏳ Awaiting HP Umpire |
 | San Diego Padres @ San Francisco Giants | **San Francisco Giants** | `-112` | 🔥 **+5.8%** | 4.1 - 4.1 | Michael King vs Cesar Perdomo | 🔒 Jordan Baker |
-| San Diego Padres @ San Francisco Giants | **San Francisco Giants** | `-112` | 🔥 **+5.8%** | 4.1 - 4.1 | Nick Pivetta vs Logan Webb | 🔒 Junior Valentine |
 | Pittsburgh Pirates @ San Francisco Giants | **San Francisco Giants** | `-112` | 🔥 **+5.7%** | 2.7 - 3.2 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | Pittsburgh Pirates @ Chicago Cubs | **Chicago Cubs** | `-112` | 🔥 **+5.7%** | 5.0 - 5.6 | Bubba Chandler vs Matthew Boyd | 🔒 Ryan Wills |
 | Seattle Mariners @ Athletics | **Athletics** | `-112` | 🔥 **+5.7%** | 4.8 - 5.2 | Bryan Woo vs Gage Jump | 🔒 Cory Blaser |
@@ -2697,9 +2697,9 @@
 | Cincinnati Reds @ Milwaukee Brewers | **Cincinnati Reds** | `-105` | 4.7 Runs |
 | Cincinnati Reds @ Milwaukee Brewers | **Milwaukee Brewers** | `-405` | 7.3 Runs |
 | Texas Rangers @ Arizona Diamondbacks | **Arizona Diamondbacks** | `-126` | 5.2 Runs |
+| San Diego Padres @ San Francisco Giants | **San Diego Padres** | `-437` | 6.4 Runs |
 | Seattle Mariners @ Athletics | **Seattle Mariners** | `-377` | 6.9 Runs |
 | San Diego Padres @ San Francisco Giants | **San Diego Padres** | `-175` | 4.3 Runs |
-| San Diego Padres @ San Francisco Giants | **San Diego Padres** | `-427` | 6.4 Runs |
 | Pittsburgh Pirates @ San Francisco Giants | **San Francisco Giants** | `+105` | 3.2 Runs |
 | Pittsburgh Pirates @ Chicago Cubs | **Chicago Cubs** | `-172` | 3.3 Runs |
 | Seattle Mariners @ Athletics | **Seattle Mariners** | `-1211` | 6.7 Runs |
@@ -4505,23 +4505,23 @@
 > Generated using EV Maximization, Kelly Combinatorics, Gaussian Copulas, Joint Monte Carlo, & Mean-Variance Optimization.
 
 ### 🔥 Top 2-Leg Parlay
-**True Hit Probability:** 27.9%
+**True Hit Probability:** 28.0%
 
-- **Leg 1:** Boston Red Sox ML (Engine Prob: 52.8%)
-- **Leg 2:** Atlanta Braves ML (Engine Prob: 52.8%)
+- **Leg 1:** San Francisco Giants ML (Engine Prob: 52.9%)
+- **Leg 2:** Athletics ML (Engine Prob: 52.9%)
 
 ### 🔥 Top 3-Leg Parlay
 **True Hit Probability:** 14.8%
 
-- **Leg 1:** Tampa Bay Rays ML (Engine Prob: 52.9%)
-- **Leg 2:** Milwaukee Brewers ML (Engine Prob: 52.9%)
+- **Leg 1:** Milwaukee Brewers ML (Engine Prob: 52.9%)
+- **Leg 2:** Athletics ML (Engine Prob: 52.9%)
 - **Leg 3:** Arizona Diamondbacks ML (Engine Prob: 52.9%)
 
 ### 🔥 Top 4-Leg Parlay
 **True Hit Probability:** 7.8%
 
-- **Leg 1:** Tampa Bay Rays ML (Engine Prob: 52.9%)
-- **Leg 2:** New York Yankees ML (Engine Prob: 52.9%)
-- **Leg 3:** Milwaukee Brewers ML (Engine Prob: 52.9%)
+- **Leg 1:** San Francisco Giants ML (Engine Prob: 52.9%)
+- **Leg 2:** Milwaukee Brewers ML (Engine Prob: 52.9%)
+- **Leg 3:** Athletics ML (Engine Prob: 52.9%)
 - **Leg 4:** Arizona Diamondbacks ML (Engine Prob: 52.9%)
 
