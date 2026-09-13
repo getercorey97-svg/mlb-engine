@@ -20,7 +20,7 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests scikit-learn lightgbm pybaseball
+          pip install pandas numpy requests scikit-learn xgboost lightgbm pybaseball
 
       - name: Run Backtest Framework
         run: python backtest_engine.py
@@ -41,4 +41,3 @@ jobs:
           
           # Push the final payload back to your repository
           git push
- 
