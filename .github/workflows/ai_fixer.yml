@@ -1,0 +1,55 @@
+name: 🤖 AI System Architect (Self-Correction)
+
+on:
+  workflow_dispatch: 
+  schedule:
+    - cron: '0 0 * * 1' 
+
+permissions:
+  contents: write 
+
+jobs:
+  total-system-repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📂 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 
+          token: ${{ secrets.PAT_WORKFLOW }}
+
+      - name: 🐍 Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 Install Repair Dependencies
+        run: |
+          pip install requests urllib3 pandas numpy scipy scikit-learn openai joblib
+
+      - name: 🛠️ Run Universal AI Fixer
+        run: python ai_universal_fixer.py
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+      - name: 🚀 Commit & Push Healed Code
+        run: |
+          git config --global user.name 'AI-System-Architect'
+          git config --global user.email 'architect-bot@mlb.ai'
+          
+          git add ai_universal_fixer.py
+          git add .github/workflows/ai_fixer.yml 2>/dev/null || echo "No ai_fixer.yml found."
+          git add *.py
+          git add engine_metadata.json 2>/dev/null || echo "No metadata found."
+          git add .github/workflows/mlb_engine.yml 2>/dev/null || echo "No mlb_engine.yml found."
+          git add PREDICTIONS_TODAY.md 2>/dev/null || echo "No predictions file found."
+          git add mlb_engine.db 2>/dev/null || echo "No database found."
+          git add profiles/*.json 2>/dev/null || echo "No profiles found yet."
+          git add data/state.json 2>/dev/null || echo "No state file found yet."
+          
+          if git diff --staged --quiet; then
+            echo "No changes detected by AI Architect."
+          else
+            git commit -m "AI SELF-HEALING: Total System Audit & Mathematical Repair [$(date)]"
+            git push origin main
+          fi
