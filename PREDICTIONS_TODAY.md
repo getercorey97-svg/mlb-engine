@@ -447,7 +447,6 @@
 | Cincinnati Reds @ Milwaukee Brewers | **Milwaukee Brewers** | `-112` | 🔥 **+5.8%** | 4.6 - 5.3 | Chase Burns vs Robert Gasser | 🔒 Doug Eddings |
 | Cincinnati Reds @ Milwaukee Brewers | **Milwaukee Brewers** | `-112` | 🔥 **+5.8%** | 4.6 - 5.2 | Andrew Abbott vs Dustin May | ⏳ Awaiting HP Umpire |
 | Texas Rangers @ Arizona Diamondbacks | **Arizona Diamondbacks** | `-112` | 🔥 **+5.8%** | 5.4 - 5.3 | Kumar Rocker vs Brandon Pfaadt | 🔒 Chad Fairchild |
-| San Diego Padres @ San Francisco Giants | **San Francisco Giants** | `-112` | 🔥 **+5.8%** | 4.1 - 4.1 | Nick Pivetta vs Logan Webb | 🔒 Junior Valentine |
 | Seattle Mariners @ Athletics | **Athletics** | `-112` | 🔥 **+5.8%** | 4.7 - 5.1 | George Kirby vs Jeffrey Springs | ⏳ Awaiting HP Umpire |
 | San Diego Padres @ San Francisco Giants | **San Francisco Giants** | `-112` | 🔥 **+5.8%** | 4.1 - 4.1 | Michael King vs Cesar Perdomo | 🔒 Jordan Baker |
 | Pittsburgh Pirates @ San Francisco Giants | **San Francisco Giants** | `-112` | 🔥 **+5.7%** | 2.7 - 3.2 | TBD vs TBD | ⏳ Awaiting HP Umpire |
@@ -477,6 +476,7 @@
 | New York Yankees @ Houston Astros | **New York Yankees** | `-110` | +4.8% | 2.7 - 1.7 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | New York Yankees @ Boston Red Sox | **New York Yankees** | `-110` | +4.8% | 4.5 - 2.2 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | Boston Red Sox @ Baltimore Orioles | **Boston Red Sox** | `-110` | +4.8% | 7.2 - 4.2 | TBD vs TBD | ⏳ Awaiting HP Umpire |
+| San Diego Padres @ San Francisco Giants | **San Francisco Giants** | `-110` | +4.8% | 4.0 - 4.1 | Nick Pivetta vs Logan Webb | 🔒 Junior Valentine |
 | New York Mets @ New York Yankees | **New York Yankees** | `-110` | +4.7% | 4.4 - 4.5 | Christian Scott vs Cam Schlittler | 🔒 Willie Traynor |
 | Philadelphia Phillies @ Atlanta Braves | **Atlanta Braves** | `-110` | +4.6% | 4.8 - 4.9 | Andrew Painter vs Grant Holmes | 🔒 Charlie Ramos |
 | Houston Astros @ Tampa Bay Rays | **Tampa Bay Rays** | `-109` | +4.5% | 4.4 - 4.5 | Hayden Wesneski vs Freddy Peralta | 🔒 Bruce Dreckman |
@@ -2697,7 +2697,6 @@
 | Cincinnati Reds @ Milwaukee Brewers | **Cincinnati Reds** | `-105` | 4.7 Runs |
 | Cincinnati Reds @ Milwaukee Brewers | **Milwaukee Brewers** | `-405` | 7.3 Runs |
 | Texas Rangers @ Arizona Diamondbacks | **Arizona Diamondbacks** | `-126` | 5.2 Runs |
-| San Diego Padres @ San Francisco Giants | **San Diego Padres** | `-437` | 6.4 Runs |
 | Seattle Mariners @ Athletics | **Seattle Mariners** | `-377` | 6.9 Runs |
 | San Diego Padres @ San Francisco Giants | **San Diego Padres** | `-175` | 4.3 Runs |
 | Pittsburgh Pirates @ San Francisco Giants | **San Francisco Giants** | `+105` | 3.2 Runs |
@@ -2727,6 +2726,7 @@
 | New York Yankees @ Houston Astros | **New York Yankees** | `+102` | 5.3 Runs |
 | New York Yankees @ Boston Red Sox | **New York Yankees** | `+103` | 4.0 Runs |
 | Boston Red Sox @ Baltimore Orioles | **Baltimore Orioles** | `-105` | 5.0 Runs |
+| San Diego Padres @ San Francisco Giants | **San Diego Padres** | `-435` | 6.4 Runs |
 | New York Mets @ New York Yankees | **New York Mets** | `+127` | 2.3 Runs |
 | Philadelphia Phillies @ Atlanta Braves | **Atlanta Braves** | `-133` | 6.4 Runs |
 | Houston Astros @ Tampa Bay Rays | **Tampa Bay Rays** | `-313` | 7.8 Runs |
