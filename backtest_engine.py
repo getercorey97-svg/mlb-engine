@@ -2,8 +2,15 @@ import sqlite3
 import requests
 import numpy as np
 from datetime import datetime, timedelta
+from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.ensemble import RandomForestClassifier, StackingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, brier_score_loss
+from xgboost import XGBClassifier
+import warnings
 
-# Pre-indexed stadium air density (rho) baselines based on venue altitude & summer climate
+warnings.filterwarnings('ignore')
+
 STADIUM_RHO_BASELINES = {
     "Colorado Rockies": 1.050, "Arizona Diamondbacks": 1.075, "Texas Rangers": 1.135,
     "Atlanta Braves": 1.145, "Minnesota Twins": 1.150, "Cincinnati Reds": 1.160,
@@ -32,7 +39,6 @@ DEFAULT_PARK_FACTORS = {
 }
 
 def ensure_backtest_tables(cursor):
-    """Guarantees historical ledgers exist with WAL performance settings."""
     cursor.executescript('''
     CREATE TABLE IF NOT EXISTS Post_Match_Analysis (
         game_pk INTEGER PRIMARY KEY,
@@ -65,9 +71,27 @@ def ensure_backtest_tables(cursor):
     );
     ''')
 
+def build_mlb_stacking_classifier():
+    """Constructs the Level-1 Stacked Generalization ensemble for hold-out validation."""
+    rf_base = RandomForestClassifier(n_estimators=200, max_depth=6, min_samples_leaf=4, random_state=42, n_jobs=-1)
+    xgb_base = XGBClassifier(n_estimators=150, learning_rate=0.05, max_depth=5, eval_metric='logloss', random_state=42, n_jobs=-1)
+    
+    level_1_meta = LogisticRegression(penalty='l2', C=0.1, solver='lbfgs', max_iter=1000)
+    cv_strategy = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    
+    stacked_model = StackingClassifier(
+        estimators=[('rf', rf_base), ('xgb', xgb_base)],
+        final_estimator=level_1_meta,
+        cv=cv_strategy,
+        stack_method='predict_proba',
+        passthrough=False,
+        n_jobs=-1
+    )
+    return stacked_model
+
 def run_backtest_engine(target_games=1600):
     print("=" * 65)
-    print(f"[{datetime.now()}] Initializing High-Speed Vectorized Backtest ({target_games} Games)...")
+    print(f"[{datetime.now()}] Initializing SOTA Machine Learning Backtest ({target_games} Games)...")
     print("=" * 65)
 
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
@@ -77,17 +101,14 @@ def run_backtest_engine(target_games=1600):
     ensure_backtest_tables(cursor)
     conn.commit()
 
-    # Preload existing completed games to avoid duplicate API calls
     cursor.execute("SELECT game_pk FROM Post_Match_Analysis")
-    existing_pks = {row[0] for row in cursor.fetchall()}
-    print(f"Existing historical records in database: {len(existing_pks)} games.")
+    seen_pks = {row[0] for row in cursor.fetchall()}
+    print(f"Existing historical records in database: {len(seen_pks)} games.")
 
-    # Ingest in 30-day bulk chunks to eliminate the 3-hour per-day loop
     today = datetime.now()
     all_games = []
-    seen_pks = set()
     chunk_days = 30
-    days_back = 150 # Covers approx 1,600 - 2,000 games across 5 chunks
+    days_back = 150 
 
     print("Fetching bulk schedule chunks from MLB Stats API...")
     for chunk_start in range(0, days_back, chunk_days):
@@ -109,16 +130,16 @@ def run_backtest_engine(target_games=1600):
         if len(all_games) >= target_games:
             break
 
-    print(f"Ingested {len(all_games)} completed MLB games for high-speed evaluation.")
+    print(f"Ingested {len(all_games)} completed MLB games for ML evaluation.")
 
     if not all_games:
-        print("[BYPASS] No games retrieved for backtesting.")
+        print("[BYPASS] No new games retrieved for backtesting.")
         conn.close()
         return
 
-    # Vectorized In-Memory Backtesting
-    brier_scores = []
-    accuracies = []
+    # Data Collection for ML
+    X_data = []
+    y_data = []
     run_errors = []
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -139,42 +160,23 @@ def run_backtest_engine(target_games=1600):
             continue
 
         actual_winner = home if home_score > away_score else away
+        actual_home_win = 1.0 if home_score > away_score else 0.0
 
-        # Retrieve venue baselines (zero network latency)
         rho = STADIUM_RHO_BASELINES.get(home, 1.225)
         park_mult = DEFAULT_PARK_FACTORS.get(home, 1.00)
         air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
 
-        # Baseline expected runs (BsR 1.8 model expectation)
         base_h = 4.45 * park_mult * air_drag_mult
         base_a = 4.25 * park_mult * air_drag_mult
 
-        # Projected probabilities (Pythagorean 1.83 exponent)
         denom = (base_h ** 1.83) + (base_a ** 1.83)
-        home_prob = round((base_h ** 1.83) / denom, 4) if denom != 0 else 0.5
-        away_prob = round(1.0 - home_prob, 4)
-        edge = round(abs(home_prob - away_prob), 4)
+        raw_home_prob = round((base_h ** 1.83) / denom, 4) if denom != 0 else 0.5
+        
+        # Features for ML Pipeline
+        X_data.append([base_h, base_a, raw_home_prob])
+        y_data.append(actual_home_win)
+        run_errors.append(abs((home_score + away_score) - (base_h + base_a)))
 
-        pred_winner = home if home_prob >= 0.5 else away
-        is_correct = 1 if pred_winner == actual_winner else 0
-
-        # Scoring metrics
-        actual_home_win = 1.0 if home_score > away_score else 0.0
-        brier = (home_prob - actual_home_win) ** 2
-        total_run_err = abs((home_score + away_score) - (base_h + base_a))
-
-        brier_scores.append(brier)
-        accuracies.append(is_correct)
-        run_errors.append(total_run_err)
-
-        # Store historical forecast & factual linescore
-        cursor.execute('''
-        INSERT OR REPLACE INTO Model_Forecasts 
-        (game_pk, home_team, away_team, home_prob, away_prob, predicted_edge, predicted_home_runs, predicted_away_runs, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (pk, home, away, home_prob, away_prob, edge, round(base_h, 2), round(base_a, 2), now_ts))
-
-        # Extract F5 scores from linescore innings 1-5 if present
         innings = g.get('linescore', {}).get('innings', [])
         f5_h = sum(inn.get('home', {}).get('runs') or 0 for inn in innings[:5])
         f5_a = sum(inn.get('away', {}).get('runs') or 0 for inn in innings[:5])
@@ -183,36 +185,49 @@ def run_backtest_engine(target_games=1600):
         INSERT OR REPLACE INTO Post_Match_Analysis 
         (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (pk, actual_winner, home_score, away_score, f5_h, f5_a, is_correct, now_ts))
+        ''', (pk, actual_winner, home_score, away_score, f5_h, f5_a, -1, now_ts)) # -1 indicates awaiting ML prediction
 
         processed_count += 1
 
     conn.commit()
 
-    if processed_count == 0:
-        print("[BYPASS] No games processed.")
+    if processed_count < 100:
+        print(f"[BYPASS] Not enough data for a valid Machine Learning hold-out validation (N={processed_count}). Needed 100+.")
         conn.close()
         return
 
-    # Calculate aggregate performance benchmark
-    final_brier = round(float(np.mean(brier_scores)), 4)
-    final_acc = round(float(np.mean(accuracies)), 4)
+    print("Splitting dataset into 80% Training / 20% Hold-Out Testing...")
+    X = np.array(X_data)
+    y = np.array(y_data)
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    
+    print("Training SOTA Stacking Classifier (RF + XGB -> LogReg) on historical data...")
+    stack = build_mlb_stacking_classifier()
+    stack.fit(X_train, y_train)
+
+    print("Executing inferences on unseen validation set...")
+    y_pred_proba = stack.predict_proba(X_test)[:, 1]
+    y_pred_bin = stack.predict(X_test)
+    
+    final_brier = round(brier_score_loss(y_test, y_pred_proba), 4)
+    final_acc = round(accuracy_score(y_test, y_pred_bin), 4)
     final_run_err = round(float(np.mean(run_errors)), 2)
 
     cursor.execute('''
     INSERT INTO Backtest_Ledger (games_evaluated, brier_score, win_accuracy, avg_run_error, executed_at)
     VALUES (?, ?, ?, ?, ?)
-    ''', (processed_count, final_brier, final_acc, final_run_err, now_ts))
+    ''', (len(y_test), final_brier, final_acc, final_run_err, now_ts))
 
     conn.commit()
     conn.close()
 
     print("\n" + "=" * 65)
-    print("⚡ BACKTEST EVALUATION COMPLETED IN UNDER 90 SECONDS")
-    print(f"• Total Matchups Evaluated : {processed_count} Games")
-    print(f"• Model Win Accuracy       : {final_acc:.2%}")
-    print(f"• Calibrated Brier Score   : {final_brier:.4f} (Lower is better, < 0.25 is profitable)")
-    print(f"• Average Total Run Error  : {final_run_err:.2f} Runs/Game")
+    print("⚡ MACHINE LEARNING VALIDATION COMPLETED (80/20 SPLIT)")
+    print(f"• Total Validation Set Evaluated : {len(y_test)} Games (Unseen)")
+    print(f"• Stacked Ensemble Accuracy    : {final_acc:.2%}")
+    print(f"• Calibrated Brier Score       : {final_brier:.4f} (Lower is better, < 0.25 is profitable)")
+    print(f"• Average Total Run Error      : {final_run_err:.2f} Runs/Game")
     print("=" * 65)
 
 if __name__ == "__main__":
