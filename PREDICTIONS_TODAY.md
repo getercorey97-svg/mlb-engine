@@ -461,10 +461,12 @@
 | Kansas City Royals @ Boston Red Sox | **Boston Red Sox** | `-112` | 🔥 **+5.5%** | 4.8 - 4.9 | Seth Lugo vs Sonny Gray | ⏳ Awaiting HP Umpire |
 | San Diego Padres @ San Francisco Giants | **San Francisco Giants** | `-112` | 🔥 **+5.5%** | 4.0 - 4.1 | Robbie Ray vs Anthony Molina | ⏳ Awaiting HP Umpire |
 | Pittsburgh Pirates @ Chicago Cubs | **Chicago Cubs** | `-112` | 🔥 **+5.5%** | 5.2 - 5.8 | Paul Skenes vs Clay Holmes | 🔒 Lance Barksdale |
+| Baltimore Orioles @ New York Mets | **New York Mets** | `-111` | 🔥 **+5.4%** | 3.9 - 3.9 | Brandon Young vs Jonah Tong | 🔒 Dan Bellino |
 | Los Angeles Angels @ Washington Nationals | **Washington Nationals** | `-111` | 🔥 **+5.3%** | 4.2 - 5.1 | Yusei Kikuchi vs Cade Cavalli | ⏳ Awaiting HP Umpire |
-| Baltimore Orioles @ New York Mets | **New York Mets** | `-111` | 🔥 **+5.3%** | 3.9 - 3.9 | Brandon Young vs Jonah Tong | 🔒 Dan Bellino |
 | New York Yankees @ Seattle Mariners | **Seattle Mariners** | `-111` | 🔥 **+5.2%** | 2.2 - 2.5 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | Los Angeles Angels @ Washington Nationals | **Washington Nationals** | `-111` | 🔥 **+5.2%** | 4.3 - 5.2 | Walbert Ureña vs Andrew Alvarez | 🔒 Steven Jaschinski |
+| San Francisco Giants @ St. Louis Cardinals | **St. Louis Cardinals** | `-111` | 🔥 **+5.2%** | 4.5 - 4.5 | Landen Roupp vs Quinn Mathews | 🔒 Carlos Torres |
+| Detroit Tigers @ Toronto Blue Jays | **Toronto Blue Jays** | `-111` | 🔥 **+5.1%** | 4.3 - 4.1 | Troy Melton vs José Soriano | 🔒 Jeremie Rehak |
 | Los Angeles Dodgers @ Miami Marlins | **Miami Marlins** | `-111` | 🔥 **+5.1%** | 5.0 - 4.5 | Blake Snell vs Ryan Gusto | ⏳ Awaiting HP Umpire |
 | Chicago White Sox @ St. Louis Cardinals | **St. Louis Cardinals** | `-111` | 🔥 **+5.1%** | 4.6 - 4.4 | Anthony Kay vs Matthew Liberatore | ⏳ Awaiting HP Umpire |
 | Cleveland Guardians @ Minnesota Twins | **Minnesota Twins** | `-111` | 🔥 **+5.1%** | 4.2 - 4.6 | Tanner Bibee vs Joe Ryan | 🔒 Sean Barber |
@@ -478,13 +480,12 @@
 | New York Yankees @ Boston Red Sox | **New York Yankees** | `-110` | +4.8% | 4.5 - 2.2 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | Boston Red Sox @ Baltimore Orioles | **Boston Red Sox** | `-110` | +4.8% | 7.2 - 4.2 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | San Diego Padres @ San Francisco Giants | **San Francisco Giants** | `-110` | +4.8% | 4.0 - 4.1 | Nick Pivetta vs Logan Webb | 🔒 Junior Valentine |
-| San Francisco Giants @ St. Louis Cardinals | **St. Louis Cardinals** | `-110` | +4.7% | 4.6 - 4.6 | Landen Roupp vs Quinn Mathews | 🔒 Carlos Torres |
 | New York Mets @ New York Yankees | **New York Yankees** | `-110` | +4.7% | 4.4 - 4.5 | Christian Scott vs Cam Schlittler | 🔒 Willie Traynor |
-| Chicago White Sox @ Cleveland Guardians | **Cleveland Guardians** | `-110` | +4.7% | 4.4 - 4.0 | Sean Newcomb vs Gavin Williams | 🔒 Nic Lentz |
-| Atlanta Braves @ Chicago Cubs | **Chicago Cubs** | `-110` | +4.7% | 4.6 - 5.4 | Reynaldo López vs David Peterson | ⏳ Awaiting HP Umpire |
+| Chicago White Sox @ Cleveland Guardians | **Cleveland Guardians** | `-110` | +4.6% | 4.4 - 4.0 | Sean Newcomb vs Gavin Williams | 🔒 Nic Lentz |
 | Philadelphia Phillies @ Atlanta Braves | **Atlanta Braves** | `-110` | +4.6% | 4.8 - 4.9 | Andrew Painter vs Grant Holmes | 🔒 Charlie Ramos |
 | Houston Astros @ Tampa Bay Rays | **Tampa Bay Rays** | `-109` | +4.5% | 4.4 - 4.5 | Hayden Wesneski vs Freddy Peralta | 🔒 Bruce Dreckman |
-| Detroit Tigers @ Toronto Blue Jays | **Toronto Blue Jays** | `-109` | +4.4% | 4.4 - 4.1 | Troy Melton vs José Soriano | 🔒 Jeremie Rehak |
+| Atlanta Braves @ Chicago Cubs | **Chicago Cubs** | `-109` | +4.5% | 4.6 - 5.4 | Reynaldo López vs David Peterson | 🔒 Paul Clemons |
+| New York Yankees @ Minnesota Twins | **Minnesota Twins** | `-109` | +4.4% | 4.7 - 4.7 | Will Warren vs Dean Kremer | 🔒 John Tumpane |
 | Los Angeles Dodgers @ Washington Nationals | **Los Angeles Dodgers** | `-109` | +4.3% | 10.8 - 5.4 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | Cincinnati Reds @ Texas Rangers | **Cincinnati Reds** | `-109` | +4.3% | 3.2 - 1.8 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | New York Mets @ Los Angeles Angels | **Los Angeles Angels** | `-109` | +4.3% | 3.7 - 3.8 | TBD vs TBD | ⏳ Awaiting HP Umpire |
@@ -2105,14 +2106,13 @@
 | Toronto Blue Jays @ Arizona Diamondbacks | **Arizona Diamondbacks** | `-109` | +4.2% | 5.4 - 5.7 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | Kansas City Royals @ Boston Red Sox | **Boston Red Sox** | `-109` | +4.2% | 5.0 - 5.0 | Randy Dobnak vs Ranger Suarez | 🔒 Jim Wolf |
 | Colorado Rockies @ Detroit Tigers | **Detroit Tigers** | `-108` | +3.8% | 4.8 - 4.6 | Gabriel Hughes vs Jackson Jobe | 🔒 James Jean |
-| New York Yankees @ Minnesota Twins | **Minnesota Twins** | `-108` | +3.8% | 4.8 - 4.7 | Will Warren vs Dean Kremer | ⏳ Awaiting HP Umpire |
-| Miami Marlins @ Arizona Diamondbacks | **Arizona Diamondbacks** | `-108` | +3.7% | 5.5 - 5.3 | Sandy Alcantara vs Corbin Burnes | ⏳ Awaiting HP Umpire |
+| Miami Marlins @ Arizona Diamondbacks | **Arizona Diamondbacks** | `-108` | +3.7% | 5.5 - 5.3 | Sandy Alcantara vs Corbin Burnes | 🔒 Austin Jones |
 | Chicago Cubs @ Los Angeles Dodgers | **Los Angeles Dodgers** | `-108` | +3.7% | 5.2 - 4.8 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | Baltimore Orioles @ Toronto Blue Jays | **Toronto Blue Jays** | `-108` | +3.7% | 4.6 - 4.4 | Trevor Rogers vs Dylan Cease | 🔒 Scott Barry |
 | Chicago White Sox @ St. Louis Cardinals | **St. Louis Cardinals** | `-108` | +3.6% | 4.7 - 4.4 | David Sandlin vs Michael McGreevy | 🔒 Mike Estabrook |
 | Cleveland Guardians @ Seattle Mariners | **Cleveland Guardians** | `-108` | +3.6% | 3.4 - 3.3 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | Detroit Tigers @ San Diego Padres | **Detroit Tigers** | `-108` | +3.6% | 4.0 - 3.8 | TBD vs TBD | ⏳ Awaiting HP Umpire |
-| Seattle Mariners @ Los Angeles Angels | **Los Angeles Angels** | `-107` | +3.6% | 4.3 - 4.1 | Kade Anderson vs Reid Detmers | ⏳ Awaiting HP Umpire |
+| Seattle Mariners @ Los Angeles Angels | **Los Angeles Angels** | `-107` | +3.6% | 4.3 - 4.1 | Kade Anderson vs Reid Detmers | 🔒 Chad Whitson |
 | Colorado Rockies @ Detroit Tigers | **Detroit Tigers** | `-107` | +3.5% | 4.9 - 4.7 | Tanner Gordon vs Andrew Sears | 🔒 Ryan Blakney |
 | Baltimore Orioles @ Toronto Blue Jays | **Toronto Blue Jays** | `-107` | +3.4% | 4.7 - 4.5 | Kyle Bradish vs Spencer Miles | 🔒 Edwin Moscoso |
 | Los Angeles Dodgers @ Miami Marlins | **Miami Marlins** | `-106` | +3.1% | 5.0 - 4.5 | Emmet Sheehan vs Eury Pérez | 🔒 Brock Ballou |
@@ -2183,7 +2183,6 @@
 | Baltimore Orioles @ Miami Marlins | **Miami Marlins** | `-103` | +1.3% | 8.1 - 4.9 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | Cleveland Guardians @ Kansas City Royals | **Kansas City Royals** | `-103` | +1.3% | 2.3 - 2.1 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | Pittsburgh Pirates @ Arizona Diamondbacks | **Arizona Diamondbacks** | `-103` | +1.3% | 2.6 - 1.3 | TBD vs TBD | ⏳ Awaiting HP Umpire |
-| Los Angeles Dodgers @ Cincinnati Reds | **Cincinnati Reds** | `-102` | +1.2% | 5.6 - 4.9 | Tarik Skubal vs Nick Lodolo | 🔒 Tom Hanahan |
 | Atlanta Braves @ Seattle Mariners | **Seattle Mariners** | `-102` | +1.1% | 3.8 - 3.0 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | Baltimore Orioles @ Miami Marlins | **Miami Marlins** | `-102` | +1.1% | 8.3 - 5.2 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | Chicago White Sox @ Los Angeles Angels | **Los Angeles Angels** | `-102` | +1.1% | 3.9 - 2.4 | TBD vs TBD | ⏳ Awaiting HP Umpire |
@@ -2192,6 +2191,7 @@
 | Detroit Tigers @ Kansas City Royals | **Kansas City Royals** | `-102` | +1.0% | 4.0 - 4.2 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | Seattle Mariners @ Chicago White Sox | **Chicago White Sox** | `-102` | +1.0% | 8.5 - 8.6 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | San Francisco Giants @ Los Angeles Dodgers | **Los Angeles Dodgers** | `-102` | +1.0% | 6.7 - 3.0 | TBD vs TBD | ⏳ Awaiting HP Umpire |
+| Los Angeles Dodgers @ Cincinnati Reds | **Cincinnati Reds** | `-102` | +1.0% | 5.6 - 4.9 | Tarik Skubal vs Nick Lodolo | 🔒 Tom Hanahan |
 | Tampa Bay Rays @ New York Yankees | **New York Yankees** | `-101` | +0.6% | 4.0 - 1.8 | TBD vs TBD | ⏳ Awaiting HP Umpire |
 | San Diego Padres @ Colorado Rockies | **Colorado Rockies** | `-101` | +0.5% | 8.0 - 8.7 | Casey Mize vs Tomoyuki Sugano | 🔒 Jansen Visconti |
 | Seattle Mariners @ Chicago White Sox | **Chicago White Sox** | `-101` | +0.4% | 4.1 - 1.5 | TBD vs TBD | ⏳ Awaiting HP Umpire |
@@ -2721,10 +2721,12 @@
 | Kansas City Royals @ Boston Red Sox | **Boston Red Sox** | `-167` | 3.8 Runs |
 | San Diego Padres @ San Francisco Giants | **San Diego Padres** | `-137` | 7.8 Runs |
 | Pittsburgh Pirates @ Chicago Cubs | **Chicago Cubs** | `-180` | 4.9 Runs |
+| Baltimore Orioles @ New York Mets | **New York Mets** | `-101` | 5.4 Runs |
 | Los Angeles Angels @ Washington Nationals | **Washington Nationals** | `-178` | 4.4 Runs |
-| Baltimore Orioles @ New York Mets | **New York Mets** | `-103` | 5.3 Runs |
 | New York Yankees @ Seattle Mariners | **Seattle Mariners** | `+144` | 4.7 Runs |
 | Los Angeles Angels @ Washington Nationals | **Washington Nationals** | `+115` | 3.4 Runs |
+| San Francisco Giants @ St. Louis Cardinals | **St. Louis Cardinals** | `+134` | 6.0 Runs |
+| Detroit Tigers @ Toronto Blue Jays | **Detroit Tigers** | `+112` | 3.4 Runs |
 | Los Angeles Dodgers @ Miami Marlins | **Los Angeles Dodgers** | `-242` | 5.4 Runs |
 | Chicago White Sox @ St. Louis Cardinals | **St. Louis Cardinals** | `-205` | 7.9 Runs |
 | Cleveland Guardians @ Minnesota Twins | **Cleveland Guardians** | `-499` | 7.0 Runs |
@@ -2738,13 +2740,12 @@
 | New York Yankees @ Boston Red Sox | **New York Yankees** | `+103` | 4.0 Runs |
 | Boston Red Sox @ Baltimore Orioles | **Baltimore Orioles** | `-105` | 5.0 Runs |
 | San Diego Padres @ San Francisco Giants | **San Diego Padres** | `-435` | 6.4 Runs |
-| San Francisco Giants @ St. Louis Cardinals | **St. Louis Cardinals** | `+133` | 6.0 Runs |
 | New York Mets @ New York Yankees | **New York Mets** | `+127` | 2.3 Runs |
-| Chicago White Sox @ Cleveland Guardians | **Cleveland Guardians** | `+123` | 4.1 Runs |
-| Atlanta Braves @ Chicago Cubs | **Atlanta Braves** | `-170` | 8.8 Runs |
+| Chicago White Sox @ Cleveland Guardians | **Cleveland Guardians** | `+121` | 4.1 Runs |
 | Philadelphia Phillies @ Atlanta Braves | **Atlanta Braves** | `-133` | 6.4 Runs |
 | Houston Astros @ Tampa Bay Rays | **Tampa Bay Rays** | `-313` | 7.8 Runs |
-| Detroit Tigers @ Toronto Blue Jays | **Detroit Tigers** | `+110` | 3.4 Runs |
+| Atlanta Braves @ Chicago Cubs | **Atlanta Braves** | `-162` | 8.8 Runs |
+| New York Yankees @ Minnesota Twins | **New York Yankees** | `-141` | 3.6 Runs |
 | Los Angeles Dodgers @ Washington Nationals | **Washington Nationals** | `+134` | 6.2 Runs |
 | Cincinnati Reds @ Texas Rangers | **Texas Rangers** | `+149` | 2.6 Runs |
 | New York Mets @ Los Angeles Angels | **Los Angeles Angels** | `+135` | 2.2 Runs |
@@ -4365,14 +4366,13 @@
 | Toronto Blue Jays @ Arizona Diamondbacks | **Arizona Diamondbacks** | `+105` | 4.7 Runs |
 | Kansas City Royals @ Boston Red Sox | **Kansas City Royals** | `-106` | 2.5 Runs |
 | Colorado Rockies @ Detroit Tigers | **Detroit Tigers** | `-618` | 7.1 Runs |
-| New York Yankees @ Minnesota Twins | **New York Yankees** | `-136` | 3.7 Runs |
-| Miami Marlins @ Arizona Diamondbacks | **Arizona Diamondbacks** | `-147` | 6.1 Runs |
+| Miami Marlins @ Arizona Diamondbacks | **Arizona Diamondbacks** | `-146` | 6.1 Runs |
 | Chicago Cubs @ Los Angeles Dodgers | **Chicago Cubs** | `+104` | 5.7 Runs |
 | Baltimore Orioles @ Toronto Blue Jays | **Toronto Blue Jays** | `-271` | 5.0 Runs |
 | Chicago White Sox @ St. Louis Cardinals | **St. Louis Cardinals** | `+115` | 5.8 Runs |
 | Cleveland Guardians @ Seattle Mariners | **Cleveland Guardians** | `+147` | 3.9 Runs |
 | Detroit Tigers @ San Diego Padres | **Detroit Tigers** | `+141` | 4.6 Runs |
-| Seattle Mariners @ Los Angeles Angels | **Los Angeles Angels** | `+131` | 3.9 Runs |
+| Seattle Mariners @ Los Angeles Angels | **Los Angeles Angels** | `+132` | 3.9 Runs |
 | Colorado Rockies @ Detroit Tigers | **Detroit Tigers** | `-725` | 6.9 Runs |
 | Baltimore Orioles @ Toronto Blue Jays | **Toronto Blue Jays** | `-193` | 6.5 Runs |
 | Los Angeles Dodgers @ Miami Marlins | **Los Angeles Dodgers** | `-251` | 6.8 Runs |
@@ -4443,7 +4443,6 @@
 | Baltimore Orioles @ Miami Marlins | **Miami Marlins** | `+105` | 4.1 Runs |
 | Cleveland Guardians @ Kansas City Royals | **Kansas City Royals** | `+107` | 3.9 Runs |
 | Pittsburgh Pirates @ Arizona Diamondbacks | **Pittsburgh Pirates** | `+130` | 2.3 Runs |
-| Los Angeles Dodgers @ Cincinnati Reds | **Los Angeles Dodgers** | `-681` | 6.1 Runs |
 | Atlanta Braves @ Seattle Mariners | **Atlanta Braves** | `+102` | 5.2 Runs |
 | Baltimore Orioles @ Miami Marlins | **Miami Marlins** | `+120` | 5.9 Runs |
 | Chicago White Sox @ Los Angeles Angels | **Los Angeles Angels** | `+121` | 2.8 Runs |
@@ -4452,8 +4451,9 @@
 | Detroit Tigers @ Kansas City Royals | **Kansas City Royals** | `+104` | 4.3 Runs |
 | Seattle Mariners @ Chicago White Sox | **Chicago White Sox** | `+121` | 8.9 Runs |
 | San Francisco Giants @ Los Angeles Dodgers | **San Francisco Giants** | `-113` | 3.5 Runs |
+| Los Angeles Dodgers @ Cincinnati Reds | **Los Angeles Dodgers** | `-709` | 6.1 Runs |
 | Tampa Bay Rays @ New York Yankees | **New York Yankees** | `+123` | 3.0 Runs |
-| San Diego Padres @ Colorado Rockies | **San Diego Padres** | `-776` | 13.8 Runs |
+| San Diego Padres @ Colorado Rockies | **San Diego Padres** | `-794` | 13.8 Runs |
 | Seattle Mariners @ Chicago White Sox | **Chicago White Sox** | `+147` | 1.9 Runs |
 | San Francisco Giants @ Los Angeles Dodgers | **San Francisco Giants** | `-108` | 6.0 Runs |
 | Cincinnati Reds @ Pittsburgh Pirates | **Pittsburgh Pirates** | `+118` | 4.3 Runs |
@@ -4525,10 +4525,10 @@
 > Generated using EV Maximization, Kelly Combinatorics, Gaussian Copulas, Joint Monte Carlo, & Mean-Variance Optimization.
 
 ### 🔥 Top 2-Leg Parlay
-**True Hit Probability:** 28.0%
+**True Hit Probability:** 27.6%
 
-- **Leg 1:** San Francisco Giants ML (Engine Prob: 52.9%)
-- **Leg 2:** Athletics ML (Engine Prob: 52.9%)
+- **Leg 1:** Toronto Blue Jays ML (Engine Prob: 52.6%)
+- **Leg 2:** Miami Marlins ML (Engine Prob: 52.6%)
 
 ### 🔥 Top 3-Leg Parlay
 **True Hit Probability:** 14.8%
