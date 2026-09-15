@@ -162,8 +162,6 @@ def build_mlb_stacking_classifier():
     )
     return stacked_model
 
-    return stacked_model
-
 def run_ultimate_monte_carlo():
     print("=" * 65)
     print(f"[{datetime.now()}] Running Deterministic Dual-Engine Monte Carlo (BsR 1.8 + NegBinomial)")
