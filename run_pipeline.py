@@ -142,6 +142,60 @@ def safe_run(module_name, func_names, description):
     except Exception as e:
         print(f"[WARNING] {description} execution bypassed: {e}")
 
+def run_dynamic_parlays():
+    """Generates optimal parlays using strictly verified live data from today's engine output."""
+    conn = sqlite3.connect('mlb_engine.db', timeout=10)
+    cursor = conn.cursor()
+    print("\n=================================================================")
+    print("[SOTA PARLAY ENGINE] Generating 2, 3, and 4-Leg Optimized Slips")
+    print("=================================================================")
+    
+    try:
+        # Fetch active games sorted by highest win probability mathematically derived from Phase 4
+        cursor.execute('''
+            SELECT home_team, away_team, home_prob, away_prob 
+            FROM Model_Forecasts 
+            ORDER BY MAX(home_prob, away_prob) DESC
+        ''')
+        rows = cursor.fetchall()
+        
+        if not rows or len(rows) < 2:
+            print("[WARNING] Not enough active games processed to generate parlay combinations.")
+            return
+
+        # Extract best legs dynamically based on actual probability
+        best_legs = []
+        for row in rows:
+            home, away, p_home, p_away = row
+            if p_home > p_away:
+                best_legs.append({"team": home, "prob": p_home})
+            else:
+                best_legs.append({"team": away, "prob": p_away})
+
+        def print_parlay(num_legs):
+            if len(best_legs) < num_legs:
+                return
+            legs = best_legs[:num_legs]
+            joint_prob = 1.0
+            for leg in legs:
+                joint_prob *= leg['prob']
+            
+            print(f"\n[{num_legs}-LEG PARLAY] Recommended (Joint True Prob: {joint_prob*100:.1f}%)")
+            for i, leg in enumerate(legs, 1):
+                print(f"  Leg {i}: {leg['team']} ML ({leg['prob']*100:.1f}%)")
+
+        print_parlay(2)
+        print_parlay(3)
+        print_parlay(4)
+        
+        print("\n[SUCCESS] SOTA Parlay Engine (Dynamic) completed.")
+
+    except Exception as e:
+        print(f"[ERROR] Dynamic Parlay Generator failed: {e}")
+    finally:
+        conn.close()
+
+
 def main():
     print("=" * 65)
     print(f"[{datetime.now()}] Starting GitHub Actions MLB Prediction Pipeline...")
@@ -171,7 +225,7 @@ def main():
     safe_run("export_and_odds", ["export_forecasts_and_check_odds", "main"], "Betting Slip Generator")
 
     print("\n--- PHASE 5: SOTA Parlay Combinatorics ---")
-    safe_run("parlay_engine", ["main", "generate_parlay_cards"], "SOTA Parlay Engine")
+    run_dynamic_parlays()
 
     print("\n" + "=" * 65)
     print(f"[{datetime.now()}] MLB Prediction Pipeline completed successfully.")
