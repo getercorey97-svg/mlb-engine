@@ -3,7 +3,11 @@ import numpy as np
 
 def run_f5_and_props_engine():
     print("Initializing Phase 4B: Secondary Engine (First 5 & Pitcher Props)...")
-    conn = sqlite3.connect('mlb_engine.db')
+    
+    # THE FIX: Added timeout and WAL mode to prevent database lock collisions during GitHub Actions pipeline execution
+    conn = sqlite3.connect('mlb_engine.db', timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=10000;")
     cursor = conn.cursor()
     
     # Failsafe Schema Execution
@@ -25,7 +29,6 @@ def run_f5_and_props_engine():
         pass
 
     try:
-        # THE FIX: Added the WHERE clause to permanently filter out finalized and processed games
         cursor.execute('''
             SELECT d.game_pk, d.away_team, d.home_team, d.away_pitcher, d.home_pitcher, d.air_density, d.uv_modifier, COALESCE(u.run_modifier, 1.0)
             FROM Daily_Lineups d LEFT JOIN Daily_Umpires u ON d.game_pk = u.game_pk
