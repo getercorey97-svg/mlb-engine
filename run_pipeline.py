@@ -288,6 +288,14 @@ def main():
     except Exception as e:
         print(f"[BYPASS] Lineup verifier skipped: {e}")
 
+    # 3.6 Override Baseline Stadium Rho with Live Thermodynamics
+    try:
+        import weather_thermodynamics
+        print("[PHASE 3.6] Executing Live Weather Thermodynamics...")
+        weather_thermodynamics.update_ballpark_thermodynamics()
+    except Exception as e:
+        print(f"[BYPASS] Weather thermodynamics skipped: {e}")
+
     # 3.7 Ingest Umpire Assignments
     try:
         import umpire_variance
