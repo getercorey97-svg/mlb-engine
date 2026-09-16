@@ -1,16 +1,21 @@
-name: Aider PR Assistant
+name: Aider Assistant
 
 on:
   issue_comment:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      instruction:
+        description: 'What do you want Aider to do?'
+        required: true
+        type: string
 
 jobs:
-  aider_chatops:
-    # Only run on pull request comments starting with /aider by an owner or collaborator
+  aider_execution:
+    # Run if triggered manually OR if triggered via PR comment by an owner/collaborator
     if: >
-      github.event.issue.pull_request && 
-      startsWith(github.event.comment.body, '/aider') && 
-      (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'COLLABORATOR')
+      github.event_name == 'workflow_dispatch' || 
+      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/aider') && (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'COLLABORATOR'))
     
     runs-on: ubuntu-latest
     permissions:
@@ -24,7 +29,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Checkout PR branch
+      - name: Checkout PR branch (if triggered via PR comment)
+        if: github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -47,13 +53,15 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           COMMENT_BODY: ${{ github.event.comment.body }}
+          MANUAL_INPUT: ${{ inputs.instruction }}
         run: |
-          # Safely extract the instruction by removing the /aider prefix
-          INSTRUCTION=$(echo "$COMMENT_BODY" | sed 's/^\/aider *//')
+          # Determine the instruction source based on how the workflow was triggered
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            INSTRUCTION="$MANUAL_INPUT"
+          else
+            INSTRUCTION=$(echo "$COMMENT_BODY" | sed 's/^\/aider *//')
+          fi
           
-          # Run aider non-interactively, automatically commit, and route through OpenRouter
-          # You can change claude-3.5-sonnet to another OpenRouter model if preferred
           aider --model openrouter/anthropic/claude-3.5-sonnet --yes --message "$INSTRUCTION"
           
-          # Push the changes back to the PR branch
           git push
