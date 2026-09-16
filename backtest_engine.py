@@ -104,6 +104,10 @@ def ensure_unified_schemas(cursor):
         appearance_count INTEGER DEFAULT 0,
         last_updated TEXT
     );
+    CREATE TABLE IF NOT EXISTS Bullpen_Fatigue (
+        team_name TEXT PRIMARY KEY,
+        fatigue_multiplier REAL DEFAULT 1.00
+    );
     CREATE TABLE IF NOT EXISTS Backtest_Ledger (
         run_id INTEGER PRIMARY KEY AUTOINCREMENT,
         games_evaluated INTEGER,
@@ -123,7 +127,6 @@ def ensure_unified_schemas(cursor):
     ''')
 
 def sync_historical_schedule_if_needed(conn, cursor, min_required=200):
-    """Verifies that Post_Match_Analysis and Daily_Lineups contain sufficient overlapping records."""
     cursor.execute('''
         SELECT COUNT(*) 
         FROM Post_Match_Analysis p 
@@ -202,7 +205,7 @@ def build_mlb_stacking_classifier():
 
 def run_ml_backtest(conn, cursor, max_eval=1600):
     print("=" * 65)
-    print(f"[{datetime.now()}] Initializing Chronological EWMA & Stacking Backtest...")
+    print(f"[{datetime.now()}] Initializing Clean Baseline Replay Backtest...")
     print("=" * 65)
 
     query = '''
@@ -234,15 +237,20 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
         print(f"[BYPASS] Insufficient dataset for ML Hold-Out validation (N={len(records)} < 100).")
         return
 
-    print(f"Running simulation across {len(records)} verified historical games...")
+    print(f"Replaying chronological history across {len(records)} games from baseline 1.00...")
 
-    sim_team_off, sim_team_pitch, sim_team_count = {}, {}, {}
-    sim_pitcher_mod, sim_pitcher_count = {}, {}
+    # Clean Baseline Replay: Always reset memory to neutral baselines to prevent compounding
+    sim_team_off = {}
+    sim_team_pitch = {}
+    sim_team_count = {}
+    sim_pitcher_mod = {}
+    sim_pitcher_count = {}
     sim_bullpen_fatigue = {}
 
     X_data, y_data, run_errors = [], [], []
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Sequential Warm-Up: Chronological progression simulating live learning
     for row in records:
         pk, home_score, away_score, h_f5, a_f5, home, away, home_p, away_p, rho, uv = row
         h_late = max(0, home_score - h_f5)
@@ -250,7 +258,7 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
 
         actual_home_win = 1.0 if home_score > away_score else 0.0
 
-        # Bayesian Shrinkage regularizer (N < 10 appearances pulled toward 1.00 baseline)
+        # Bayesian Shrinkage: Small sample sizes (< 10 appearances) pulled toward 1.00 baseline
         w_h_team = min(1.0, sim_team_count.get(home, 0) / 10.0)
         w_a_team = min(1.0, sim_team_count.get(away, 0) / 10.0)
         h_off_mod = w_h_team * sim_team_off.get(home, 1.0) + (1.0 - w_h_team) * 1.0
@@ -282,7 +290,7 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (pk, home, away, raw_home_prob, 1.0 - raw_home_prob, round(raw_home_prob - 0.5, 4), round(base_h, 2), round(base_a, 2), now_ts))
 
-        # Decoupled Multi-Target Loss Optimization using EWMA
+        # Decoupled Multi-Target Loss Updates with Sequential EWMA
         pred_home_f5, pred_away_f5 = base_h * 0.55, base_a * 0.55
         pred_home_late, pred_away_late = base_h * 0.45, base_a * 0.45
 
@@ -312,6 +320,31 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
             alpha = min(0.30, 0.10 + (abs(err) * 0.02))
             old_fatigue = sim_bullpen_fatigue.get(t_name, 1.0)
             sim_bullpen_fatigue[t_name] = max(0.70, min(1.30, alpha * (old_fatigue + err * 0.15) + (1.0 - alpha) * old_fatigue))
+
+    # Operational Database Commits: Cleanly overwrite production tables with final calibrated weights
+    print(f"Committing {len(sim_pitcher_mod)} pitcher weights and {len(sim_team_off)} team weights to operational memory for live pipeline consumption...")
+    for p_name, mod in sim_pitcher_mod.items():
+        if p_name != 'Unknown':
+            cursor.execute('''
+            INSERT OR REPLACE INTO Pitcher_Modifiers (pitcher_name, k_modifier, f5_run_modifier, appearance_count, last_updated)
+            VALUES (?, 1.0, ?, ?, ?)
+            ''', (p_name, round(mod, 4), sim_pitcher_count.get(p_name, 0), now_ts))
+
+    all_teams = set(list(sim_team_off.keys()) + list(sim_team_pitch.keys()))
+    for t_name in all_teams:
+        off_mod = sim_team_off.get(t_name, 1.0)
+        pitch_mod = sim_team_pitch.get(t_name, 1.0)
+        count = sim_team_count.get(t_name, 0)
+        cursor.execute('''
+        INSERT OR REPLACE INTO Dynamic_Modifiers (team_name, offensive_modifier, pitching_modifier, appearance_count, last_updated)
+        VALUES (?, ?, ?, ?, ?)
+        ''', (t_name, round(off_mod, 4), round(pitch_mod, 4), count, now_ts))
+
+    for t_name, fatigue in sim_bullpen_fatigue.items():
+        cursor.execute('''
+        INSERT OR REPLACE INTO Bullpen_Fatigue (team_name, fatigue_multiplier)
+        VALUES (?, ?)
+        ''', (t_name, round(fatigue, 4)))
 
     conn.commit()
 
