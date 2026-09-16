@@ -7,11 +7,10 @@ from sklearn.model_selection import StratifiedKFold
 from xgboost import XGBClassifier
 import warnings
 
-# Suppress sklearn warnings for clean GitHub Action logs
 warnings.filterwarnings('ignore')
 
 def ensure_engine_schemas(cursor):
-    """Guarantees all reference tables exist with auto-migration for Daily_Umpires, xFIP, and appearance counts."""
+    """Guarantees all reference tables exist with auto-migration for appearance tracking and umpire states."""
     cursor.executescript('''
     CREATE TABLE IF NOT EXISTS Model_Forecasts (
         game_pk INTEGER PRIMARY KEY,
@@ -41,7 +40,8 @@ def ensure_engine_schemas(cursor):
     );
     CREATE TABLE IF NOT EXISTS Bullpen_Fatigue (
         team_name TEXT PRIMARY KEY,
-        fatigue_multiplier REAL DEFAULT 1.00
+        fatigue_multiplier REAL DEFAULT 1.00,
+        last_updated TEXT
     );
     CREATE TABLE IF NOT EXISTS Biological_Modifiers (
         team_name TEXT PRIMARY KEY,
@@ -92,12 +92,11 @@ def ensure_engine_schemas(cursor):
     );
     ''')
 
-    # Migrations
     cursor.execute("PRAGMA table_info(Daily_Umpires);")
     cols = [c[1] for c in cursor.fetchall()]
     if 'umpire_locked' not in cols:
         cursor.execute("ALTER TABLE Daily_Umpires ADD COLUMN umpire_locked INTEGER DEFAULT 0;")
-        
+
     cursor.execute("PRAGMA table_info(Pitcher_Stats);")
     cols_p = [c[1] for c in cursor.fetchall()]
     if 'xfip' not in cols_p:
@@ -166,14 +165,13 @@ def update_readme(cursor):
         f.write("\n".join(lines))
 
 def build_mlb_stacking_classifier():
-    """Constructs the Level-1 Stacked Generalization ensemble with feature passthrough enabled."""
-    rf_base = RandomForestClassifier(n_estimators=200, max_depth=6, min_samples_leaf=4, random_state=42, n_jobs=-1)
-    xgb_base = XGBClassifier(n_estimators=150, learning_rate=0.05, max_depth=5, eval_metric='logloss', random_state=42, n_jobs=-1)
-    
-    level_1_meta = LogisticRegression(penalty='l2', C=1.0, solver='lbfgs', max_iter=1000)
+    """Builds a regularized Stacking Calibrator to prevent over-fitting probabilities."""
+    rf_base = RandomForestClassifier(n_estimators=100, max_depth=3, min_samples_leaf=10, random_state=42, n_jobs=-1)
+    xgb_base = XGBClassifier(n_estimators=80, learning_rate=0.03, max_depth=3, subsample=0.8, eval_metric='logloss', random_state=42, n_jobs=-1)
+    level_1_meta = LogisticRegression(penalty='l2', C=0.5, solver='lbfgs', max_iter=1000)
     cv_strategy = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     
-    stacked_model = StackingClassifier(
+    return StackingClassifier(
         estimators=[('rf', rf_base), ('xgb', xgb_base)],
         final_estimator=level_1_meta,
         cv=cv_strategy,
@@ -181,7 +179,6 @@ def build_mlb_stacking_classifier():
         passthrough=True,
         n_jobs=-1
     )
-    return stacked_model
 
 def run_ultimate_monte_carlo():
     print("=" * 65)
@@ -196,26 +193,6 @@ def run_ultimate_monte_carlo():
     ensure_engine_schemas(cursor)
     conn.commit()
 
-    cursor.execute("PRAGMA table_info(Daily_Lineups);")
-    lineup_cols = [c[1] for c in cursor.fetchall()]
-    h_score_col = 'home_team_score' if 'home_team_score' in lineup_cols else 'home_score' if 'home_score' in lineup_cols else None
-    a_score_col = 'away_team_score' if 'away_team_score' in lineup_cols else 'away_score' if 'away_score' in lineup_cols else None
-
-    if h_score_col and a_score_col:
-        try:
-            cursor.execute(f'''
-                INSERT OR IGNORE INTO Post_Match_Analysis (game_pk, actual_winner, home_score, away_score, processed_at)
-                SELECT l.game_pk, 
-                       CASE WHEN l.{h_score_col} > l.{a_score_col} THEN l.home_team ELSE l.away_team END,
-                       l.{h_score_col}, l.{a_score_col}, datetime('now')
-                FROM Daily_Lineups l
-                WHERE l.status = 'Final' 
-                AND l.game_pk NOT IN (SELECT game_pk FROM Post_Match_Analysis)
-            ''')
-            conn.commit()
-        except Exception:
-            pass
-
     team_bsr = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(bsr_per_game, 4.50) FROM Team_Offense").fetchall()}
     team_ops = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(ops, 0.720) FROM Team_Offense").fetchall()}
     pitcher_metrics = {r[0]: r[1] for r in cursor.execute("SELECT last_name, COALESCE(xfip, est_era, 4.20) FROM Pitcher_Stats").fetchall()}
@@ -223,12 +200,11 @@ def run_ultimate_monte_carlo():
     bullpen_fatigue = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(fatigue_multiplier, 1.00) FROM Bullpen_Fatigue").fetchall()}
     circadian_drag = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(jet_lag_runs_penalty, 0.00) FROM Biological_Modifiers").fetchall()}
     
-    # Fetch dynamic learning weights with appearance counts for Bayesian Shrinkage
     dynamic_mods = {r[0]: (r[1], r[2], r[3]) for r in cursor.execute("SELECT team_name, COALESCE(offensive_modifier, 1.0), COALESCE(pitching_modifier, 1.0), COALESCE(appearance_count, 0) FROM Dynamic_Modifiers").fetchall()}
     pitcher_mods = {r[0]: (r[1], r[2], r[3]) for r in cursor.execute("SELECT pitcher_name, COALESCE(k_modifier, 1.0), COALESCE(f5_run_modifier, 1.0), COALESCE(appearance_count, 0) FROM Pitcher_Modifiers").fetchall()}
 
     try:
-        umpire_mods = {r[0]: (r[1], r[2]) for r in cursor.execute("SELECT game_pk, COALESCE(run_modifier, 1.00), COALESCE(umpire_locked, 0) FROM Daily_Umpires").fetchall()}
+        umpire_mods = {r[0]: (r[1], r[2], r[3]) for r in cursor.execute("SELECT game_pk, COALESCE(run_modifier, 1.00), COALESCE(umpire_locked, 0), COALESCE(home_plate_umpire, 'TBD') FROM Daily_Umpires").fetchall()}
     except Exception:
         umpire_mods = {}
 
@@ -246,7 +222,7 @@ def run_ultimate_monte_carlo():
         conn.close()
         return
 
-    # Train SOTA Stacking Calibrator on expanded dataset (Extracting 3 features)
+    # Train Calibrator on Empirical Matchups
     cursor.execute('''
         SELECT m.predicted_home_runs, m.predicted_away_runs, m.home_prob, 
                (CASE WHEN p.home_score > p.away_score THEN 1.0 ELSE 0.0 END)
@@ -265,11 +241,9 @@ def run_ultimate_monte_carlo():
             if len(np.unique(y_train)) > 1:
                 calibrator = build_mlb_stacking_classifier()
                 calibrator.fit(X_train, y_train)
-                print(f"[CALIBRATOR] SOTA Stacking Ensemble (RF + XGB -> LogReg) active (trained on {len(hist_data)} empirical linescores)")
-            else:
-                print("[CALIBRATOR] Insufficient variance in outcome history.")
+                print(f"[CALIBRATOR] Regularized Stacking Ensemble active (trained on {len(hist_data)} empirical linescores)")
         except Exception as e:
-            print(f"[CALIBRATOR] Error during training: {e}. Using raw probability.")
+            print(f"[CALIBRATOR] Error: {e}. Defaulting to Monte Carlo probabilities.")
             calibrator = None
 
     it = 50000
@@ -287,7 +261,7 @@ def run_ultimate_monte_carlo():
         a_base_runs = team_bsr.get(away, (team_ops.get(away, 0.720) / 0.720) * 4.50)
         h_base_runs = team_bsr.get(home, (team_ops.get(home, 0.720) / 0.720) * 4.50)
 
-        # Apply dynamic team modifiers with Bayesian Shrinkage (N < 10 pulled to 1.00)
+        # Team Modifiers with Bayesian Shrinkage
         a_off_mod_raw, a_pitch_mod_raw, a_team_n = dynamic_mods.get(away, (1.0, 1.0, 0))
         h_off_mod_raw, h_pitch_mod_raw, h_team_n = dynamic_mods.get(home, (1.0, 1.0, 0))
         
@@ -299,7 +273,7 @@ def run_ultimate_monte_carlo():
         h_off_mod = w_h_team * h_off_mod_raw + (1.0 - w_h_team) * 1.0
         h_pitch_mod = w_h_team * h_pitch_mod_raw + (1.0 - w_h_team) * 1.0
 
-        # Apply dynamic pitcher modifiers with Bayesian Shrinkage
+        # Pitcher Modifiers with Bayesian Shrinkage
         a_p_k_mod, a_p_run_mod_raw, a_p_n = pitcher_mods.get(away_p, (1.0, 1.0, 0))
         if a_p_run_mod_raw == 1.0 and a_sp_last:
             for name, mods in pitcher_mods.items():
@@ -323,14 +297,14 @@ def run_ultimate_monte_carlo():
         park_mult = park_mods.get(home, 1.00)
         air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
         uv_mult = uv or 1.00
-        ump_mod, ump_locked = umpire_mods.get(pk, (1.00, 0))
-        ump_badge = "🔒 LOCKED" if ump_locked == 1 else "⏳ TBD"
+        ump_mod, ump_locked, ump_name = umpire_mods.get(pk, (1.00, 0, 'TBD'))
+        ump_badge = f"🔒 {ump_name}" if ump_locked == 1 and ump_name != "Unknown / TBD" else "⏳ TBD"
 
         a_pen_fatigue = bullpen_fatigue.get(away, 1.00)
         h_pen_fatigue = bullpen_fatigue.get(home, 1.00)
         a_circadian_penalty = circadian_drag.get(away, 0.00)
 
-        # Integrated expected runs formula incorporating dynamic learning weights
+        # Expected Runs Formulation
         exp_away_runs = max(0.2, ((a_base_runs * a_off_mod * 0.55 * (h_sp_metric / 4.20) * h_p_run_mod) + (a_base_runs * a_off_mod * 0.45 * h_pen_fatigue * h_pitch_mod)) * park_mult * air_drag_mult * uv_mult * ump_mod - a_circadian_penalty)
         exp_home_runs = max(0.2, ((h_base_runs * h_off_mod * 0.55 * (a_sp_metric / 4.20) * a_p_run_mod) + (h_base_runs * h_off_mod * 0.45 * a_pen_fatigue * a_pitch_mod)) * park_mult * air_drag_mult * uv_mult * ump_mod)
 
@@ -341,7 +315,11 @@ def run_ultimate_monte_carlo():
         away_sim = np.clip(rng.negative_binomial(na, pa, it), 0, 22)
         home_sim = np.clip(rng.negative_binomial(nh, ph, it), 0, 22)
 
-        raw_home_prob = float(np.mean(home_sim > away_sim))
+        p_home_reg = float(np.mean(home_sim > away_sim))
+        p_tie_reg = float(np.mean(home_sim == away_sim))
+        
+        # Extra-Innings Ghost Runner Tie Allocation (53% empirical home edge in extras)
+        raw_home_prob = p_home_reg + (0.53 * p_tie_reg)
 
         if calibrator:
             try:
