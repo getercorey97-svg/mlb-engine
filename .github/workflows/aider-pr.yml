@@ -1,0 +1,59 @@
+name: Aider PR Assistant
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  aider_chatops:
+    # Only run on pull request comments starting with /aider by an owner or collaborator
+    if: >
+      github.event.issue.pull_request && 
+      startsWith(github.event.comment.body, '/aider') && 
+      (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'COLLABORATOR')
+    
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout PR branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr checkout ${{ github.event.issue.number }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Configure Git for Aider
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Install Aider
+        run: pip install aider-chat
+
+      - name: Execute Aider with OpenRouter
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          # Safely extract the instruction by removing the /aider prefix
+          INSTRUCTION=$(echo "$COMMENT_BODY" | sed 's/^\/aider *//')
+          
+          # Run aider non-interactively, automatically commit, and route through OpenRouter
+          # You can change claude-3.5-sonnet to another OpenRouter model if preferred
+          aider --model openrouter/anthropic/claude-3.5-sonnet --yes --message "$INSTRUCTION"
+          
+          # Push the changes back to the PR branch
+          git push
