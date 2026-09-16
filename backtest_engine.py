@@ -76,7 +76,7 @@ def build_mlb_stacking_classifier():
     rf_base = RandomForestClassifier(n_estimators=200, max_depth=6, min_samples_leaf=4, random_state=42, n_jobs=-1)
     xgb_base = XGBClassifier(n_estimators=150, learning_rate=0.05, max_depth=5, eval_metric='logloss', random_state=42, n_jobs=-1)
     
-    level_1_meta = LogisticRegression(penalty='l2', C=0.1, solver='lbfgs', max_iter=1000)
+    level_1_meta = LogisticRegression(penalty='l2', C=1.0, solver='lbfgs', max_iter=1000)
     cv_strategy = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     
     stacked_model = StackingClassifier(
@@ -84,7 +84,7 @@ def build_mlb_stacking_classifier():
         final_estimator=level_1_meta,
         cv=cv_strategy,
         stack_method='predict_proba',
-        passthrough=False,
+        passthrough=True,
         n_jobs=-1
     )
     return stacked_model
@@ -185,7 +185,7 @@ def run_backtest_engine(target_games=1600):
         INSERT OR REPLACE INTO Post_Match_Analysis 
         (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (pk, actual_winner, home_score, away_score, f5_h, f5_a, -1, now_ts)) # -1 indicates awaiting ML prediction
+        ''', (pk, actual_winner, home_score, away_score, f5_h, f5_a, -1, now_ts))
 
         processed_count += 1
 
@@ -220,6 +220,7 @@ def run_backtest_engine(target_games=1600):
     ''', (len(y_test), final_brier, final_acc, final_run_err, now_ts))
 
     conn.commit()
+    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
     conn.close()
 
     print("\n" + "=" * 65)

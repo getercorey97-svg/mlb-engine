@@ -1,7 +1,6 @@
 import sqlite3
 import numpy as np
 from datetime import datetime
-from pathlib import Path
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, StackingClassifier
 from sklearn.model_selection import StratifiedKFold
@@ -102,7 +101,6 @@ def probability_to_american(prob: float) -> str:
 def update_readme(cursor):
     today_date = datetime.now().strftime("%Y-%m-%d")
     
-    # THE FIX: Added mathematical lock to prevent duplicate games appearing on the README
     cursor.execute('''
         SELECT m.game_pk, m.away_team, m.home_team, m.away_prob, m.home_prob, 
                m.predicted_edge, m.predicted_away_runs, m.predicted_home_runs,
@@ -148,7 +146,6 @@ def build_mlb_stacking_classifier():
     rf_base = RandomForestClassifier(n_estimators=200, max_depth=6, min_samples_leaf=4, random_state=42, n_jobs=-1)
     xgb_base = XGBClassifier(n_estimators=150, learning_rate=0.05, max_depth=5, eval_metric='logloss', random_state=42, n_jobs=-1)
     
-    # Increased C from 0.1 to 1.0 to reduce shrinkage and allow team variance
     level_1_meta = LogisticRegression(penalty='l2', C=1.0, solver='lbfgs', max_iter=1000)
     cv_strategy = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     
@@ -157,7 +154,7 @@ def build_mlb_stacking_classifier():
         final_estimator=level_1_meta,
         cv=cv_strategy,
         stack_method='predict_proba',
-        passthrough=True, # FIXED: Passes raw features (runs & raw probabilities) directly to the meta-model
+        passthrough=True,
         n_jobs=-1
     )
     return stacked_model
@@ -207,7 +204,6 @@ def run_ultimate_monte_carlo():
     except Exception:
         umpire_mods = {}
 
-    # THE FIX: Added mathematical lock to permanently block old, finalized ghost games from simulating
     cursor.execute('''
         SELECT game_pk, away_team, home_team, away_pitcher, home_pitcher, 
                COALESCE(air_density, 1.225), COALESCE(uv_modifier, 1.00)
@@ -285,7 +281,6 @@ def run_ultimate_monte_carlo():
 
         raw_home_prob = float(np.mean(home_sim > away_sim))
 
-        # Pass 3 features to the Stacking Classifier
         if calibrator:
             try:
                 feature_vector = np.array([[exp_home_runs, exp_away_runs, raw_home_prob]])
@@ -311,6 +306,7 @@ def run_ultimate_monte_carlo():
 
     update_readme(cursor)
     conn.commit()
+    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
     conn.close()
     print("[SUCCESS] SOTA Monte Carlo simulation completed and README updated.")
 

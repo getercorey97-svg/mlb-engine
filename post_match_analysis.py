@@ -11,7 +11,7 @@ def update_dynamic_weights(cursor, name, predicted_runs, actual_runs, is_offense
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     base_lr = 0.03
-    adaptive_lr = min(0.15, base_lr + (abs(error_delta) * 0.015))
+    adaptive_lr = min(0.12, base_lr + (abs(error_delta) * 0.012))
     
     if is_pitcher:
         cursor.execute('SELECT f5_run_modifier, k_modifier FROM Pitcher_Modifiers WHERE pitcher_name = ?', (name,))
@@ -19,7 +19,7 @@ def update_dynamic_weights(cursor, name, predicted_runs, actual_runs, is_offense
         mod = result[0] if result else 1.0
         k_mod = result[1] if result else 1.0
         
-        new_mod = max(0.53, min(1.47, mod + (error_delta * adaptive_lr)))
+        new_mod = max(0.60, min(1.40, mod + (error_delta * adaptive_lr)))
         
         cursor.execute('''
             INSERT OR REPLACE INTO Pitcher_Modifiers (pitcher_name, k_modifier, f5_run_modifier, last_updated) 
@@ -40,11 +40,11 @@ def update_dynamic_weights(cursor, name, predicted_runs, actual_runs, is_offense
         off_mod, pitch_mod = result
     
     if is_offense:
-        new_off_mod = max(0.53, min(1.47, off_mod + (error_delta * adaptive_lr)))
+        new_off_mod = max(0.60, min(1.40, off_mod + (error_delta * adaptive_lr)))
         cursor.execute('UPDATE Dynamic_Modifiers SET offensive_modifier = ?, last_updated = ? WHERE team_name = ?', (new_off_mod, current_time, name))
         print(f"  [Dynamic Update] {name} Offense: {off_mod:.3f} -> {new_off_mod:.3f} (LR: {adaptive_lr:.3f})")
     else:
-        new_pitch_mod = max(0.53, min(1.47, pitch_mod + (error_delta * adaptive_lr)))
+        new_pitch_mod = max(0.60, min(1.40, pitch_mod + (error_delta * adaptive_lr)))
         cursor.execute('UPDATE Dynamic_Modifiers SET pitching_modifier = ?, last_updated = ? WHERE team_name = ?', (new_pitch_mod, current_time, name))
         print(f"  [Dynamic Update] {name} Pitching: {pitch_mod:.3f} -> {new_pitch_mod:.3f} (LR: {adaptive_lr:.3f})")
 
@@ -143,6 +143,7 @@ def run_post_match_analysis():
                 ''', (game_pk, actual_winner, home_score, away_score, h_f5, a_f5, model_correct, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
     conn.commit()
+    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
     conn.close()
     print("Post-match analysis & F5 micro-evolution completed.")
 

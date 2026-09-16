@@ -1,4 +1,3 @@
-import os
 import sqlite3
 from datetime import datetime
 
@@ -123,6 +122,7 @@ def initialize_database_schemas():
             cursor.execute("INSERT OR REPLACE INTO Bullpen_Fatigue (team_name, fatigue_multiplier) VALUES (?, 1.00)", (team,))
 
     conn.commit()
+    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
     conn.close()
     print("[INIT] Database schema and 30-franchise baseline integrity locked.")
 
@@ -151,7 +151,6 @@ def run_dynamic_parlays():
     print("=================================================================")
     
     try:
-        # Fetch active games sorted by highest win probability mathematically derived from Phase 4
         cursor.execute('''
             SELECT home_team, away_team, home_prob, away_prob 
             FROM Model_Forecasts 
@@ -163,7 +162,6 @@ def run_dynamic_parlays():
             print("[WARNING] Not enough active games processed to generate parlay combinations.")
             return
 
-        # Extract best legs dynamically based on actual probability
         best_legs = []
         for row in rows:
             home, away, p_home, p_away = row
