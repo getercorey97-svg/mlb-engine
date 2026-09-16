@@ -39,6 +39,16 @@ jobs:
       - name: Run Unified Orchestration Pipeline
         run: python run_pipeline.py
 
+      - name: Run Dedicated F5 & Pitcher Props Engine
+        run: |
+          if [ -f engine_f5_props.py ]; then
+            python engine_f5_props.py
+          elif [ -f engine_f5.py ]; then
+            python engine_f5.py
+          else
+            echo "No standalone F5 script detected; handled inside run_pipeline.py"
+          fi
+
       - name: Run Live Monitor & Send Alerts via ntfy
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
@@ -54,14 +64,15 @@ jobs:
           find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
           find . -name "*.pyc" -delete 2>/dev/null || true
           
-          # Stage documentation, operational database, and dynamic forecast outputs
+          # Stage documentation, operational database, full-game, and F5 prop outputs
           [ -f README.md ] && git add README.md
           [ -f PREDICTIONS_TODAY.md ] && git add PREDICTIONS_TODAY.md
+          [ -f F5_PREDICTIONS_TODAY.md ] && git add F5_PREDICTIONS_TODAY.md
           [ -f mlb_engine.db ] && git add mlb_engine.db
           [ -f mlb_forecasts_2026.csv ] && git add mlb_forecasts_2026.csv
           
           if ! git diff-index --quiet HEAD; then
-            git commit -m "Auto-update forecasts, README, and operational database [skip ci]"
+            git commit -m "Auto-update full-game, F5 props, README, and operational database [skip ci]"
             git pull --rebase --autostash
             git push origin main
           else
