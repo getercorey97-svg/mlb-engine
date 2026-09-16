@@ -104,3 +104,17 @@ def initialize_database_schemas():
             model_correct INTEGER,
             processed_at TEXT
         );
+    ''')
+    
+    # Seed default park factors if empty
+    cursor.execute("SELECT COUNT(*) FROM Park_Factors")
+    if cursor.fetchone()[0] == 0:
+        for team, factor in DEFAULT_PARK_FACTORS.items():
+            cursor.execute("INSERT OR REPLACE INTO Park_Factors (home_team, run_factor) VALUES (?, ?)", (team, factor))
+            
+    conn.commit()
+    conn.close()
+    print("[DATABASE] Schemas initialized and default park factors seeded successfully.")
+
+if __name__ == "__main__":
+    initialize_database_schemas()
