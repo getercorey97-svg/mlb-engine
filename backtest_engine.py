@@ -126,6 +126,17 @@ def ensure_unified_schemas(cursor):
     );
     ''')
 
+    # Auto-migration for appearance_count in existing tables
+    cursor.execute("PRAGMA table_info(Pitcher_Modifiers);")
+    pm_cols = [c[1] for c in cursor.fetchall()]
+    if 'appearance_count' not in pm_cols:
+        cursor.execute("ALTER TABLE Pitcher_Modifiers ADD COLUMN appearance_count INTEGER DEFAULT 0;")
+
+    cursor.execute("PRAGMA table_info(Dynamic_Modifiers);")
+    dm_cols = [c[1] for c in cursor.fetchall()]
+    if 'appearance_count' not in dm_cols:
+        cursor.execute("ALTER TABLE Dynamic_Modifiers ADD COLUMN appearance_count INTEGER DEFAULT 0;")
+
 def sync_historical_schedule_if_needed(conn, cursor, min_required=200):
     cursor.execute('''
         SELECT COUNT(*) 
@@ -321,7 +332,7 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
             old_fatigue = sim_bullpen_fatigue.get(t_name, 1.0)
             sim_bullpen_fatigue[t_name] = max(0.70, min(1.30, alpha * (old_fatigue + err * 0.15) + (1.0 - alpha) * old_fatigue))
 
-    # Operational Database Commits: Cleanly overwrite production tables with final calibrated weights
+    # Operational Database Commits
     print(f"Committing {len(sim_pitcher_mod)} pitcher weights and {len(sim_team_off)} team weights to operational memory for live pipeline consumption...")
     for p_name, mod in sim_pitcher_mod.items():
         if p_name != 'Unknown':
