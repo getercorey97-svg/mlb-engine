@@ -123,14 +123,20 @@ def ensure_unified_schemas(cursor):
     ''')
 
 def sync_historical_schedule_if_needed(conn, cursor, min_required=200):
-    cursor.execute("SELECT COUNT(*) FROM Post_Match_Analysis WHERE home_score IS NOT NULL")
-    existing_count = cursor.fetchone()[0]
-    print(f"[DATABASE CHECK] Existing valid historical records in DB: {existing_count} games.")
+    """Verifies that Post_Match_Analysis and Daily_Lineups contain sufficient overlapping records."""
+    cursor.execute('''
+        SELECT COUNT(*) 
+        FROM Post_Match_Analysis p 
+        INNER JOIN Daily_Lineups d ON p.game_pk = d.game_pk 
+        WHERE p.home_score IS NOT NULL AND d.home_team IS NOT NULL
+    ''')
+    matched_count = cursor.fetchone()[0]
+    print(f"[DATABASE CHECK] Existing matched game records in DB: {matched_count} games.")
 
-    if existing_count >= min_required:
+    if matched_count >= min_required:
         return
 
-    print(f"[INGESTION] Database below target ({existing_count} < {min_required}). Fetching schedule chunks from MLB API...")
+    print(f"[INGESTION] Valid matched dataset below target ({matched_count} < {min_required}). Ingesting empirical games from MLB Stats API...")
     today = datetime.now()
     chunk_days = 30
     days_back = 180
@@ -163,7 +169,7 @@ def sync_historical_schedule_if_needed(conn, cursor, min_required=200):
                     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                     cursor.execute('''
-                    INSERT OR IGNORE INTO Post_Match_Analysis 
+                    INSERT OR REPLACE INTO Post_Match_Analysis 
                     (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
                     VALUES (?, ?, ?, ?, ?, ?, -1, ?)
                     ''', (pk, actual_winner, h_score, a_score, h_f5, a_f5, now_ts))
@@ -171,13 +177,13 @@ def sync_historical_schedule_if_needed(conn, cursor, min_required=200):
                     home_p = teams.get('home', {}).get('probablePitcher', {}).get('fullName', 'Unknown')
                     away_p = teams.get('away', {}).get('probablePitcher', {}).get('fullName', 'Unknown')
                     cursor.execute('''
-                    INSERT OR IGNORE INTO Daily_Lineups
+                    INSERT OR REPLACE INTO Daily_Lineups
                     (game_pk, game_date, away_team, home_team, away_pitcher, home_pitcher, lineup_status, air_density, uv_modifier, status)
                     VALUES (?, ?, ?, ?, ?, ?, 'Official', 1.225, 1.0, 'Final')
                     ''', (pk, g.get('gameDate', '')[:10], away, home, away_p, home_p))
             conn.commit()
         except Exception as e:
-            print(f"Schedule chunk error ({start_dt} to {end_dt}): {e}")
+            print(f"Schedule chunk ingestion error ({start_dt} to {end_dt}): {e}")
 
 def build_mlb_stacking_classifier():
     rf_base = RandomForestClassifier(n_estimators=200, max_depth=6, min_samples_leaf=4, random_state=42, n_jobs=-1)
@@ -206,15 +212,18 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
         p.away_score,
         COALESCE(p.home_f5_score, 0),
         COALESCE(p.away_f5_score, 0),
-        d.home_team,
-        d.away_team,
+        COALESCE(d.home_team, m.home_team),
+        COALESCE(d.away_team, m.away_team),
         COALESCE(d.home_pitcher, 'Unknown'),
         COALESCE(d.away_pitcher, 'Unknown'),
         COALESCE(d.air_density, 1.225),
         COALESCE(d.uv_modifier, 1.0)
     FROM Post_Match_Analysis p
-    INNER JOIN Daily_Lineups d ON p.game_pk = d.game_pk
-    WHERE p.home_score IS NOT NULL AND p.away_score IS NOT NULL
+    LEFT JOIN Daily_Lineups d ON p.game_pk = d.game_pk
+    LEFT JOIN Model_Forecasts m ON p.game_pk = m.game_pk
+    WHERE p.home_score IS NOT NULL 
+      AND p.away_score IS NOT NULL 
+      AND (d.home_team IS NOT NULL OR m.home_team IS NOT NULL)
     ORDER BY p.game_pk ASC
     LIMIT ?
     '''
@@ -241,7 +250,7 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
 
         actual_home_win = 1.0 if home_score > away_score else 0.0
 
-        # Bayesian Shrinkage regularizer (N < 10 shrunk to 1.00 baseline)
+        # Bayesian Shrinkage regularizer (N < 10 appearances pulled toward 1.00 baseline)
         w_h_team = min(1.0, sim_team_count.get(home, 0) / 10.0)
         w_a_team = min(1.0, sim_team_count.get(away, 0) / 10.0)
         h_off_mod = w_h_team * sim_team_off.get(home, 1.0) + (1.0 - w_h_team) * 1.0
@@ -267,14 +276,13 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
         y_data.append(actual_home_win)
         run_errors.append(abs((home_score + away_score) - (base_h + base_a)))
 
-        # Update Forecasts Table to fuel the Correlation Sweeper
         cursor.execute('''
         INSERT OR REPLACE INTO Model_Forecasts 
         (game_pk, home_team, away_team, home_prob, away_prob, predicted_edge, predicted_home_runs, predicted_away_runs, timestamp)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (pk, home, away, raw_home_prob, 1.0 - raw_home_prob, round(raw_home_prob - 0.5, 4), round(base_h, 2), round(base_a, 2), now_ts))
 
-        # Decoupled Multi-Target Loss Updates with EWMA
+        # Decoupled Multi-Target Loss Optimization using EWMA
         pred_home_f5, pred_away_f5 = base_h * 0.55, base_a * 0.55
         pred_home_late, pred_away_late = base_h * 0.45, base_a * 0.45
 
