@@ -69,6 +69,20 @@ def ensure_backtest_tables(cursor):
         avg_run_error REAL,
         executed_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS Pitcher_Modifiers (
+        pitcher_name TEXT PRIMARY KEY,
+        k_modifier REAL DEFAULT 1.0,
+        f5_run_modifier REAL DEFAULT 1.0,
+        appearance_count INTEGER DEFAULT 0,
+        last_updated TEXT
+    );
+    CREATE TABLE IF NOT EXISTS Dynamic_Modifiers (
+        team_name TEXT PRIMARY KEY,
+        offensive_modifier REAL DEFAULT 1.0,
+        pitching_modifier REAL DEFAULT 1.0,
+        appearance_count INTEGER DEFAULT 0,
+        last_updated TEXT
+    );
     ''')
 
 def build_mlb_stacking_classifier():
@@ -137,7 +151,17 @@ def run_backtest_engine(target_games=1600):
         conn.close()
         return
 
-    # Data Collection for ML
+    # Sort games chronologically to simulate real-time EWMA learning
+    all_games.sort(key=lambda x: x.get('gamePk', 0))
+
+    # In-memory simulation of EWMA, Multi-Target, and Bayesian Shrinkage weights
+    sim_team_off = {}
+    sim_team_pitch = {}
+    sim_team_count = {}
+    sim_pitcher_mod = {}
+    sim_pitcher_count = {}
+    sim_bullpen_fatigue = {}
+
     X_data = []
     y_data = []
     run_errors = []
@@ -162,12 +186,37 @@ def run_backtest_engine(target_games=1600):
         actual_winner = home if home_score > away_score else away
         actual_home_win = 1.0 if home_score > away_score else 0.0
 
+        # Extract F5 and Late Inning scores
+        innings = g.get('linescore', {}).get('innings', [])
+        h_f5 = sum(inn.get('home', {}).get('runs') or 0 for inn in innings[:5])
+        a_f5 = sum(inn.get('away', {}).get('runs') or 0 for inn in innings[:5])
+        h_late = sum(inn.get('home', {}).get('runs') or 0 for inn in innings[5:9])
+        a_late = sum(inn.get('away', {}).get('runs') or 0 for inn in innings[5:9])
+
+        home_p = teams.get('home', {}).get('probablePitcher', {}).get('fullName', 'Unknown')
+        away_p = teams.get('away', {}).get('probablePitcher', {}).get('fullName', 'Unknown')
+
+        # Apply Bayesian Shrinkage to simulated weights
+        w_h_team = min(1.0, sim_team_count.get(home, 0) / 10.0)
+        w_a_team = min(1.0, sim_team_count.get(away, 0) / 10.0)
+        
+        h_off_mod = w_h_team * sim_team_off.get(home, 1.0) + (1.0 - w_h_team) * 1.0
+        h_pitch_mod = w_h_team * sim_team_pitch.get(home, 1.0) + (1.0 - w_h_team) * 1.0
+        a_off_mod = w_a_team * sim_team_off.get(away, 1.0) + (1.0 - w_a_team) * 1.0
+        a_pitch_mod = w_a_team * sim_team_pitch.get(away, 1.0) + (1.0 - w_a_team) * 1.0
+
+        w_h_p = min(1.0, sim_pitcher_count.get(home_p, 0) / 10.0)
+        w_a_p = min(1.0, sim_pitcher_count.get(away_p, 0) / 10.0)
+        h_p_mod = w_h_p * sim_pitcher_mod.get(home_p, 1.0) + (1.0 - w_h_p) * 1.0
+        a_p_mod = w_a_p * sim_pitcher_mod.get(away_p, 1.0) + (1.0 - w_a_p) * 1.0
+
         rho = STADIUM_RHO_BASELINES.get(home, 1.225)
         park_mult = DEFAULT_PARK_FACTORS.get(home, 1.00)
         air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
 
-        base_h = 4.45 * park_mult * air_drag_mult
-        base_a = 4.25 * park_mult * air_drag_mult
+        # Base runs with dynamic modifiers
+        base_h = 4.45 * park_mult * air_drag_mult * h_off_mod * (0.55 * a_p_mod + 0.45 * sim_bullpen_fatigue.get(away, 1.0) * a_pitch_mod)
+        base_a = 4.25 * park_mult * air_drag_mult * a_off_mod * (0.55 * h_p_mod + 0.45 * sim_bullpen_fatigue.get(home, 1.0) * h_pitch_mod)
 
         denom = (base_h ** 1.83) + (base_a ** 1.83)
         raw_home_prob = round((base_h ** 1.83) / denom, 4) if denom != 0 else 0.5
@@ -177,15 +226,42 @@ def run_backtest_engine(target_games=1600):
         y_data.append(actual_home_win)
         run_errors.append(abs((home_score + away_score) - (base_h + base_a)))
 
-        innings = g.get('linescore', {}).get('innings', [])
-        f5_h = sum(inn.get('home', {}).get('runs') or 0 for inn in innings[:5])
-        f5_a = sum(inn.get('away', {}).get('runs') or 0 for inn in innings[:5])
+        # Chronological EWMA & Multi-Target Updates
+        pred_home_f5, pred_away_f5 = base_h * 0.55, base_a * 0.55
+        pred_home_late, pred_away_late = base_h * 0.45, base_a * 0.45
+
+        # 1. Pitcher F5 Updates
+        for p_name, pred_f5, act_f5 in [(home_p, pred_away_f5, a_f5), (away_p, pred_home_f5, h_f5)]:
+            err = act_f5 - pred_f5
+            alpha = min(0.30, 0.10 + (abs(err) * 0.02))
+            old_mod = sim_pitcher_mod.get(p_name, 1.0)
+            sim_pitcher_mod[p_name] = max(0.60, min(1.40, alpha * (old_mod + err * 0.15) + (1.0 - alpha) * old_mod))
+            sim_pitcher_count[p_name] = sim_pitcher_count.get(p_name, 0) + 1
+
+        # 2. Team Late Inning Updates
+        for t_name, pred_late, act_late, is_off in [(home, pred_home_late, h_late, True), (away, pred_home_late, h_late, False), (away, pred_away_late, a_late, True), (home, pred_away_late, a_late, False)]:
+            err = act_late - pred_late
+            alpha = min(0.30, 0.10 + (abs(err) * 0.02))
+            if is_off:
+                old_mod = sim_team_off.get(t_name, 1.0)
+                sim_team_off[t_name] = max(0.60, min(1.40, alpha * (old_mod + err * 0.15) + (1.0 - alpha) * old_mod))
+            else:
+                old_mod = sim_team_pitch.get(t_name, 1.0)
+                sim_team_pitch[t_name] = max(0.60, min(1.40, alpha * (old_mod + err * 0.15) + (1.0 - alpha) * old_mod))
+            sim_team_count[t_name] = sim_team_count.get(t_name, 0) + 1
+
+        # 3. Bullpen Fatigue Updates
+        for t_name, pred_late, act_late in [(away, pred_home_late, h_late), (home, pred_away_late, a_late)]:
+            err = act_late - pred_late
+            alpha = min(0.30, 0.10 + (abs(err) * 0.02))
+            old_fatigue = sim_bullpen_fatigue.get(t_name, 1.0)
+            sim_bullpen_fatigue[t_name] = max(0.70, min(1.30, alpha * (old_fatigue + err * 0.15) + (1.0 - alpha) * old_fatigue))
 
         cursor.execute('''
         INSERT OR REPLACE INTO Post_Match_Analysis 
         (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (pk, actual_winner, home_score, away_score, f5_h, f5_a, -1, now_ts))
+        ''', (pk, actual_winner, home_score, away_score, h_f5, a_f5, -1, now_ts))
 
         processed_count += 1
 

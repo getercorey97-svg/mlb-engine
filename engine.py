@@ -11,7 +11,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 def ensure_engine_schemas(cursor):
-    """Guarantees all reference tables exist with auto-migration for Daily_Umpires and xFIP."""
+    """Guarantees all reference tables exist with auto-migration for Daily_Umpires, xFIP, and appearance counts."""
     cursor.executescript('''
     CREATE TABLE IF NOT EXISTS Model_Forecasts (
         game_pk INTEGER PRIMARY KEY,
@@ -80,12 +80,14 @@ def ensure_engine_schemas(cursor):
         pitcher_name TEXT PRIMARY KEY,
         k_modifier REAL DEFAULT 1.0,
         f5_run_modifier REAL DEFAULT 1.0,
+        appearance_count INTEGER DEFAULT 0,
         last_updated TEXT
     );
     CREATE TABLE IF NOT EXISTS Dynamic_Modifiers (
         team_name TEXT PRIMARY KEY,
         offensive_modifier REAL DEFAULT 1.0,
         pitching_modifier REAL DEFAULT 1.0,
+        appearance_count INTEGER DEFAULT 0,
         last_updated TEXT
     );
     ''')
@@ -100,6 +102,16 @@ def ensure_engine_schemas(cursor):
     cols_p = [c[1] for c in cursor.fetchall()]
     if 'xfip' not in cols_p:
         cursor.execute("ALTER TABLE Pitcher_Stats ADD COLUMN xfip REAL DEFAULT 4.20;")
+
+    cursor.execute("PRAGMA table_info(Pitcher_Modifiers);")
+    cols_pm = [c[1] for c in cursor.fetchall()]
+    if 'appearance_count' not in cols_pm:
+        cursor.execute("ALTER TABLE Pitcher_Modifiers ADD COLUMN appearance_count INTEGER DEFAULT 0;")
+
+    cursor.execute("PRAGMA table_info(Dynamic_Modifiers);")
+    cols_dm = [c[1] for c in cursor.fetchall()]
+    if 'appearance_count' not in cols_dm:
+        cursor.execute("ALTER TABLE Dynamic_Modifiers ADD COLUMN appearance_count INTEGER DEFAULT 0;")
 
 def probability_to_american(prob: float) -> str:
     prob = max(0.01, min(0.99, prob))
@@ -211,9 +223,9 @@ def run_ultimate_monte_carlo():
     bullpen_fatigue = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(fatigue_multiplier, 1.00) FROM Bullpen_Fatigue").fetchall()}
     circadian_drag = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(jet_lag_runs_penalty, 0.00) FROM Biological_Modifiers").fetchall()}
     
-    # Fetch dynamic learning weights
-    dynamic_mods = {r[0]: (r[1], r[2]) for r in cursor.execute("SELECT team_name, COALESCE(offensive_modifier, 1.0), COALESCE(pitching_modifier, 1.0) FROM Dynamic_Modifiers").fetchall()}
-    pitcher_mods = {r[0]: (r[1], r[2]) for r in cursor.execute("SELECT pitcher_name, COALESCE(k_modifier, 1.0), COALESCE(f5_run_modifier, 1.0) FROM Pitcher_Modifiers").fetchall()}
+    # Fetch dynamic learning weights with appearance counts for Bayesian Shrinkage
+    dynamic_mods = {r[0]: (r[1], r[2], r[3]) for r in cursor.execute("SELECT team_name, COALESCE(offensive_modifier, 1.0), COALESCE(pitching_modifier, 1.0), COALESCE(appearance_count, 0) FROM Dynamic_Modifiers").fetchall()}
+    pitcher_mods = {r[0]: (r[1], r[2], r[3]) for r in cursor.execute("SELECT pitcher_name, COALESCE(k_modifier, 1.0), COALESCE(f5_run_modifier, 1.0), COALESCE(appearance_count, 0) FROM Pitcher_Modifiers").fetchall()}
 
     try:
         umpire_mods = {r[0]: (r[1], r[2]) for r in cursor.execute("SELECT game_pk, COALESCE(run_modifier, 1.00), COALESCE(umpire_locked, 0) FROM Daily_Umpires").fetchall()}
@@ -275,24 +287,38 @@ def run_ultimate_monte_carlo():
         a_base_runs = team_bsr.get(away, (team_ops.get(away, 0.720) / 0.720) * 4.50)
         h_base_runs = team_bsr.get(home, (team_ops.get(home, 0.720) / 0.720) * 4.50)
 
-        # Apply dynamic team modifiers
-        a_off_mod, a_pitch_mod = dynamic_mods.get(away, (1.0, 1.0))
-        h_off_mod, h_pitch_mod = dynamic_mods.get(home, (1.0, 1.0))
+        # Apply dynamic team modifiers with Bayesian Shrinkage (N < 10 pulled to 1.00)
+        a_off_mod_raw, a_pitch_mod_raw, a_team_n = dynamic_mods.get(away, (1.0, 1.0, 0))
+        h_off_mod_raw, h_pitch_mod_raw, h_team_n = dynamic_mods.get(home, (1.0, 1.0, 0))
+        
+        w_a_team = min(1.0, a_team_n / 10.0)
+        w_h_team = min(1.0, h_team_n / 10.0)
+        
+        a_off_mod = w_a_team * a_off_mod_raw + (1.0 - w_a_team) * 1.0
+        a_pitch_mod = w_a_team * a_pitch_mod_raw + (1.0 - w_a_team) * 1.0
+        h_off_mod = w_h_team * h_off_mod_raw + (1.0 - w_h_team) * 1.0
+        h_pitch_mod = w_h_team * h_pitch_mod_raw + (1.0 - w_h_team) * 1.0
 
-        # Apply dynamic pitcher modifiers (with fallback to last name matching)
-        a_p_k_mod, a_p_run_mod = pitcher_mods.get(away_p, (1.0, 1.0))
-        if a_p_run_mod == 1.0 and a_sp_last:
+        # Apply dynamic pitcher modifiers with Bayesian Shrinkage
+        a_p_k_mod, a_p_run_mod_raw, a_p_n = pitcher_mods.get(away_p, (1.0, 1.0, 0))
+        if a_p_run_mod_raw == 1.0 and a_sp_last:
             for name, mods in pitcher_mods.items():
                 if name.endswith(a_sp_last):
-                    a_p_run_mod = mods[1]
+                    a_p_run_mod_raw = mods[1]
+                    a_p_n = mods[2]
                     break
+        w_a_p = min(1.0, a_p_n / 10.0)
+        a_p_run_mod = w_a_p * a_p_run_mod_raw + (1.0 - w_a_p) * 1.0
 
-        h_p_k_mod, h_p_run_mod = pitcher_mods.get(home_p, (1.0, 1.0))
-        if h_p_run_mod == 1.0 and h_sp_last:
+        h_p_k_mod, h_p_run_mod_raw, h_p_n = pitcher_mods.get(home_p, (1.0, 1.0, 0))
+        if h_p_run_mod_raw == 1.0 and h_sp_last:
             for name, mods in pitcher_mods.items():
                 if name.endswith(h_sp_last):
-                    h_p_run_mod = mods[1]
+                    h_p_run_mod_raw = mods[1]
+                    h_p_n = mods[2]
                     break
+        w_h_p = min(1.0, h_p_n / 10.0)
+        h_p_run_mod = w_h_p * h_p_run_mod_raw + (1.0 - w_h_p) * 1.0
 
         park_mult = park_mods.get(home, 1.00)
         air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
