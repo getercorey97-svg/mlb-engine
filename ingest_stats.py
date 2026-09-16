@@ -3,12 +3,14 @@ import requests
 from datetime import datetime
 
 def ingest_mlb_data():
-    print("Initializing Factual Data Ingestion: Base Runs (BsR) Upgrade...")
-    print("Enforcing Absolute Live Verification (ALV) for MLB Schedule...")
+    print("=" * 65)
+    print("Initializing Factual Data Ingestion: Base Runs (BsR) & Bullpen Metrics...")
+    print("=" * 65)
     
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
+    cursor.execute("PRAGMA busy_timeout=10000;")
     
     cursor.executescript('''
         CREATE TABLE IF NOT EXISTS Pitcher_Stats (
@@ -25,27 +27,28 @@ def ingest_mlb_data():
         CREATE TABLE IF NOT EXISTS Team_Bullpen (
             team_name TEXT PRIMARY KEY,
             team_era REAL,
+            team_whip REAL DEFAULT 1.25,
             updated_at TEXT
         );
     ''')
 
-    # Safe Schema Migrations & Failsafes
+    # Safe Schema Migrations
     for col in ["bsr_per_game REAL", "updated_at TEXT"]:
         try:
             cursor.execute(f"ALTER TABLE Team_Offense ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
             
-    for table in ['Pitcher_Stats', 'Team_Bullpen']:
+    for col in ["team_whip REAL DEFAULT 1.25", "updated_at TEXT"]:
         try:
-            cursor.execute(f"ALTER TABLE {table} ADD COLUMN updated_at TEXT")
+            cursor.execute(f"ALTER TABLE Team_Bullpen ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
 
     season = str(datetime.now().year)
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # Fetch Empirical Team Offense (Calculating True Base Runs) and Bullpen Stats
+    # Ingest Team Offense and Pitching/Bullpen Metrics
     teams_url = "https://statsapi.mlb.com/api/v1/teams?sportId=1"
     try:
         res = requests.get(teams_url, timeout=15)
@@ -63,19 +66,19 @@ def ingest_mlb_data():
             continue
         
         stats_url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?group=hitting,pitching&stats=season&season={season}"
-        factual_ops, factual_era, bsr_per_game = 0.720, 4.00, 4.50
+        factual_ops, factual_era, factual_whip, bsr_per_game = 0.720, 4.00, 1.25, 4.50
         
         try:
             stats_req = requests.get(stats_url, timeout=10)
             stats_req.raise_for_status()
             stats_res = stats_req.json()
+            
             for split in stats_res.get('stats', []):
                 group = split.get('group', {}).get('displayName')
                 if group == 'hitting' and split.get('splits'):
                     stat = split['splits'][0]['stat']
                     factual_ops = float(stat.get('ops') or 0.720)
                     
-                    # Extract raw metrics for mathematical Base Runs (BsR) calculation
                     h = float(stat.get('hits') or 0)
                     bb = float(stat.get('baseOnBalls') or 0)
                     hr = float(stat.get('homeRuns') or 0)
@@ -83,7 +86,7 @@ def ingest_mlb_data():
                     tb = float(stat.get('totalBases') or 0)
                     games_played = float(stat.get('gamesPlayed') or 1)
                     
-                    # SOTA BsR Formulation
+                    # Base Runs (BsR) Formulation
                     A = h + bb - hr
                     B = (1.4 * tb - 0.6 * h - 3 * hr + 0.1 * bb) * 1.02
                     C = ab - h
@@ -94,22 +97,32 @@ def ingest_mlb_data():
                         bsr_per_game = round(total_bsr / games_played, 3)
                         
                 elif group == 'pitching' and split.get('splits'):
-                    factual_era = float(split['splits'][0]['stat'].get('era') or 4.00)
+                    pstat = split['splits'][0]['stat']
+                    factual_era = float(pstat.get('era') or 4.00)
+                    factual_whip = float(pstat.get('whip') or 1.25)
                     
             cursor.execute('''
-                INSERT OR REPLACE INTO Team_Offense (team_name, ops, bsr_per_game, updated_at) 
+                INSERT INTO Team_Offense (team_name, ops, bsr_per_game, updated_at) 
                 VALUES (?, ?, ?, ?)
+                ON CONFLICT(team_name) DO UPDATE SET
+                    ops = excluded.ops,
+                    bsr_per_game = excluded.bsr_per_game,
+                    updated_at = excluded.updated_at
             ''', (team_name, factual_ops, bsr_per_game, current_time))
             
             cursor.execute('''
-                INSERT OR REPLACE INTO Team_Bullpen (team_name, team_era, updated_at) 
-                VALUES (?, ?, ?)
-            ''', (team_name, factual_era, current_time))
+                INSERT INTO Team_Bullpen (team_name, team_era, team_whip, updated_at) 
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(team_name) DO UPDATE SET
+                    team_era = excluded.team_era,
+                    team_whip = excluded.team_whip,
+                    updated_at = excluded.updated_at
+            ''', (team_name, factual_era, factual_whip, current_time))
             
         except Exception as e:
             print(f"Error mapping {team_name}: {e}")
 
-    # Absolute Live Verification (ALV) Mandate executed for precise Starting Pitcher mapping
+    # Fetch and Map Probable Starter Performance
     live_date = datetime.now().strftime('%Y-%m-%d')
     schedule_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={live_date}&hydrate=probablePitcher"
     
@@ -136,8 +149,11 @@ def ingest_mlb_data():
                                 factual_era = float(stats_data[0]['splits'][0]['stat'].get('era') or 4.20)
                                 
                             cursor.execute('''
-                                INSERT OR REPLACE INTO Pitcher_Stats (last_name, est_era, updated_at) 
+                                INSERT INTO Pitcher_Stats (last_name, est_era, updated_at) 
                                 VALUES (?, ?, ?)
+                                ON CONFLICT(last_name) DO UPDATE SET
+                                    est_era = excluded.est_era,
+                                    updated_at = excluded.updated_at
                             ''', (last_name, factual_era, current_time))
                         except Exception:
                             pass
@@ -146,7 +162,7 @@ def ingest_mlb_data():
 
     conn.commit()
     conn.close()
-    print(f"Ingestion complete. ALV mandated for {live_date}. Base Runs (BsR) mathematically locked.")
+    print(f"[SUCCESS] Ingestion completed for {live_date}. Offense, Bullpen, and Starter tables synced.")
 
 if __name__ == "__main__":
     ingest_mlb_data()
