@@ -19,15 +19,6 @@ def verify_starting_lineups():
     conn = sqlite3.connect('mlb_engine.db')
     cursor = conn.cursor()
     
-    cursor.executescript('''
-    CREATE TABLE IF NOT EXISTS Verified_Lineups (
-        game_pk INTEGER,
-        team_name TEXT,
-        lineup_status TEXT,
-        PRIMARY KEY(game_pk, team_name)
-    );
-    ''')
-
     for date_data in data.get('dates', []):
         for game in date_data.get('games', []):
             game_pk = game.get('gamePk')
@@ -37,31 +28,29 @@ def verify_starting_lineups():
             teams = game.get('teams', {})
             game_lineups = game.get('lineups', {})
             
-            for side in ['away', 'home']:
-                side_data = teams.get(side, {})
-                team_name = side_data.get('team', {}).get('name')
-                if not team_name:
-                    continue
-                
-                lineup = (
-                    side_data.get('lineup', [])
-                    or game_lineups.get(f"{side}Players", [])
-                    or game_lineups.get(side, [])
-                    or []
-                )
-                
-                status = "Confirmed" if len(lineup) >= 9 else "Pending/TBD"
-                
-                cursor.execute('''
-                INSERT OR REPLACE INTO Verified_Lineups (game_pk, team_name, lineup_status)
-                VALUES (?, ?, ?)
-                ''', (game_pk, team_name, status))
-                
-                print(f"Game {game_pk} | {team_name} Lineup: {status} ({len(lineup)} batters posted)")
+            away_data = teams.get('away', {})
+            home_data = teams.get('home', {})
+            
+            away_lineup = away_data.get('lineup', []) or game_lineups.get("awayPlayers", []) or game_lineups.get("away", []) or []
+            home_lineup = home_data.get('lineup', []) or game_lineups.get("homePlayers", []) or game_lineups.get("home", []) or []
+            
+            # A game's lineup status is only confirmed if BOTH teams have submitted their 9 batters
+            if len(away_lineup) >= 9 and len(home_lineup) >= 9:
+                status = "Confirmed"
+            else:
+                status = "Pending/TBD"
+            
+            cursor.execute('''
+            UPDATE Daily_Lineups 
+            SET lineup_status = ? 
+            WHERE game_pk = ?
+            ''', (status, game_pk))
+            
+            print(f"Game {game_pk} Lineup Status: {status} (Away: {len(away_lineup)}, Home: {len(home_lineup)})")
 
     conn.commit()
     conn.close()
-    print("Lineup verification status locked.")
+    print("Lineup verification status locked in Daily_Lineups table.")
 
 if __name__ == "__main__":
     verify_starting_lineups()
