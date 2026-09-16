@@ -76,6 +76,18 @@ def ensure_engine_schemas(cursor):
         model_correct INTEGER,
         processed_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS Pitcher_Modifiers (
+        pitcher_name TEXT PRIMARY KEY,
+        k_modifier REAL DEFAULT 1.0,
+        f5_run_modifier REAL DEFAULT 1.0,
+        last_updated TEXT
+    );
+    CREATE TABLE IF NOT EXISTS Dynamic_Modifiers (
+        team_name TEXT PRIMARY KEY,
+        offensive_modifier REAL DEFAULT 1.0,
+        pitching_modifier REAL DEFAULT 1.0,
+        last_updated TEXT
+    );
     ''')
 
     # Migrations
@@ -199,6 +211,10 @@ def run_ultimate_monte_carlo():
     bullpen_fatigue = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(fatigue_multiplier, 1.00) FROM Bullpen_Fatigue").fetchall()}
     circadian_drag = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(jet_lag_runs_penalty, 0.00) FROM Biological_Modifiers").fetchall()}
     
+    # Fetch dynamic learning weights
+    dynamic_mods = {r[0]: (r[1], r[2]) for r in cursor.execute("SELECT team_name, COALESCE(offensive_modifier, 1.0), COALESCE(pitching_modifier, 1.0) FROM Dynamic_Modifiers").fetchall()}
+    pitcher_mods = {r[0]: (r[1], r[2]) for r in cursor.execute("SELECT pitcher_name, COALESCE(k_modifier, 1.0), COALESCE(f5_run_modifier, 1.0) FROM Pitcher_Modifiers").fetchall()}
+
     try:
         umpire_mods = {r[0]: (r[1], r[2]) for r in cursor.execute("SELECT game_pk, COALESCE(run_modifier, 1.00), COALESCE(umpire_locked, 0) FROM Daily_Umpires").fetchall()}
     except Exception:
@@ -259,6 +275,25 @@ def run_ultimate_monte_carlo():
         a_base_runs = team_bsr.get(away, (team_ops.get(away, 0.720) / 0.720) * 4.50)
         h_base_runs = team_bsr.get(home, (team_ops.get(home, 0.720) / 0.720) * 4.50)
 
+        # Apply dynamic team modifiers
+        a_off_mod, a_pitch_mod = dynamic_mods.get(away, (1.0, 1.0))
+        h_off_mod, h_pitch_mod = dynamic_mods.get(home, (1.0, 1.0))
+
+        # Apply dynamic pitcher modifiers (with fallback to last name matching)
+        a_p_k_mod, a_p_run_mod = pitcher_mods.get(away_p, (1.0, 1.0))
+        if a_p_run_mod == 1.0 and a_sp_last:
+            for name, mods in pitcher_mods.items():
+                if name.endswith(a_sp_last):
+                    a_p_run_mod = mods[1]
+                    break
+
+        h_p_k_mod, h_p_run_mod = pitcher_mods.get(home_p, (1.0, 1.0))
+        if h_p_run_mod == 1.0 and h_sp_last:
+            for name, mods in pitcher_mods.items():
+                if name.endswith(h_sp_last):
+                    h_p_run_mod = mods[1]
+                    break
+
         park_mult = park_mods.get(home, 1.00)
         air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
         uv_mult = uv or 1.00
@@ -269,8 +304,9 @@ def run_ultimate_monte_carlo():
         h_pen_fatigue = bullpen_fatigue.get(home, 1.00)
         a_circadian_penalty = circadian_drag.get(away, 0.00)
 
-        exp_away_runs = max(0.2, ((a_base_runs * 0.55 * (h_sp_metric / 4.20)) + (a_base_runs * 0.45 * h_pen_fatigue)) * park_mult * air_drag_mult * uv_mult * ump_mod - a_circadian_penalty)
-        exp_home_runs = max(0.2, ((h_base_runs * 0.55 * (a_sp_metric / 4.20)) + (h_base_runs * 0.45 * a_pen_fatigue)) * park_mult * air_drag_mult * uv_mult * ump_mod)
+        # Integrated expected runs formula incorporating dynamic learning weights
+        exp_away_runs = max(0.2, ((a_base_runs * a_off_mod * 0.55 * (h_sp_metric / 4.20) * h_p_run_mod) + (a_base_runs * a_off_mod * 0.45 * h_pen_fatigue * h_pitch_mod)) * park_mult * air_drag_mult * uv_mult * ump_mod - a_circadian_penalty)
+        exp_home_runs = max(0.2, ((h_base_runs * h_off_mod * 0.55 * (a_sp_metric / 4.20) * a_p_run_mod) + (h_base_runs * h_off_mod * 0.45 * a_pen_fatigue * a_pitch_mod)) * park_mult * air_drag_mult * uv_mult * ump_mod)
 
         va, vh = max(exp_away_runs + 0.01, exp_away_runs * dispersion), max(exp_home_runs + 0.01, exp_home_runs * dispersion)
         pa, ph = max(0.01, min(0.99, exp_away_runs / va)), max(0.01, min(0.99, exp_home_runs / vh))
