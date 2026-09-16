@@ -11,6 +11,30 @@ KNOWN_UMPIRES = {
     "Default Umpire": 1.000
 }
 
+def init_umpire_tendencies():
+    """Initializes the baseline database matrix for umpires."""
+    print("Executing Extraction: Umpire Tendencies Baseline...")
+    conn = sqlite3.connect('mlb_engine.db')
+    cursor = conn.cursor()
+    
+    cursor.executescript('''
+    CREATE TABLE IF NOT EXISTS Umpire_Tendencies (
+        umpire_name TEXT PRIMARY KEY,
+        zone_bias TEXT,
+        run_adjustment REAL
+    );
+    ''')
+
+    # Seed baseline neutral umpire profiles and known database
+    cursor.execute("INSERT OR REPLACE INTO Umpire_Tendencies (umpire_name, zone_bias, run_adjustment) VALUES ('Default Umpire', 'Neutral', 1.0)")
+    for ump, mod in KNOWN_UMPIRES.items():
+        cursor.execute("INSERT OR REPLACE INTO Umpire_Tendencies (umpire_name, zone_bias, run_adjustment) VALUES (?, 'Neutral', ?)", (ump, mod))
+    
+    conn.commit()
+    conn.close()
+    print("Umpire tendencies matrix initialized.")
+
+
 def execute_umpire_variance_pipeline():
     """Ingests assigned Home Plate Umpires with automated schema migration."""
     print("=" * 65)
@@ -106,4 +130,5 @@ def execute_umpire_variance_pipeline():
     print("[SUCCESS] Umpire variance mapping completed.")
 
 if __name__ == "__main__":
+    init_umpire_tendencies()
     execute_umpire_variance_pipeline()
