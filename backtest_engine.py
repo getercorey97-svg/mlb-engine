@@ -126,7 +126,6 @@ def ensure_unified_schemas(cursor):
     );
     ''')
 
-    # Auto-migration for appearance_count in existing tables
     cursor.execute("PRAGMA table_info(Pitcher_Modifiers);")
     pm_cols = [c[1] for c in cursor.fetchall()]
     if 'appearance_count' not in pm_cols:
@@ -190,19 +189,23 @@ def sync_historical_schedule_if_needed(conn, cursor, min_required=200):
 
                     home_p = teams.get('home', {}).get('probablePitcher', {}).get('fullName', 'Unknown')
                     away_p = teams.get('away', {}).get('probablePitcher', {}).get('fullName', 'Unknown')
+                    
+                    # Use stadium baseline Rho to provide realistic thermodynamic variance
+                    rho = STADIUM_RHO_BASELINES.get(home, 1.225)
+
                     cursor.execute('''
-                    INSERT OR REPLACE INTO Daily_Lineups
+                    INSERT OR REPLACE INTO Daily_Lineups 
                     (game_pk, game_date, away_team, home_team, away_pitcher, home_pitcher, lineup_status, air_density, uv_modifier, status)
-                    VALUES (?, ?, ?, ?, ?, ?, 'Official', 1.225, 1.0, 'Final')
-                    ''', (pk, g.get('gameDate', '')[:10], away, home, away_p, home_p))
+                    VALUES (?, ?, ?, ?, ?, ?, 'Official', ?, 1.0, 'Final')
+                    ''', (pk, g.get('gameDate', '')[:10], away, home, away_p, home_p, rho))
             conn.commit()
         except Exception as e:
             print(f"Schedule chunk ingestion error ({start_dt} to {end_dt}): {e}")
 
 def build_mlb_stacking_classifier():
-    rf_base = RandomForestClassifier(n_estimators=200, max_depth=6, min_samples_leaf=4, random_state=42, n_jobs=-1)
-    xgb_base = XGBClassifier(n_estimators=150, learning_rate=0.05, max_depth=5, eval_metric='logloss', random_state=42, n_jobs=-1)
-    level_1_meta = LogisticRegression(penalty='l2', C=1.0, solver='lbfgs', max_iter=1000)
+    rf_base = RandomForestClassifier(n_estimators=250, max_depth=5, min_samples_leaf=6, random_state=42, n_jobs=-1)
+    xgb_base = XGBClassifier(n_estimators=180, learning_rate=0.03, max_depth=4, subsample=0.8, colsample_bytree=0.8, eval_metric='logloss', random_state=42, n_jobs=-1)
+    level_1_meta = LogisticRegression(penalty='l2', C=0.5, solver='lbfgs', max_iter=1000)
     cv_strategy = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
     return StackingClassifier(
@@ -250,7 +253,6 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
 
     print(f"Replaying chronological history across {len(records)} games from baseline 1.00...")
 
-    # Clean Baseline Replay: Always reset memory to neutral baselines to prevent compounding
     sim_team_off = {}
     sim_team_pitch = {}
     sim_team_count = {}
@@ -261,7 +263,6 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
     X_data, y_data, run_errors = [], [], []
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Sequential Warm-Up: Chronological progression simulating live learning
     for row in records:
         pk, home_score, away_score, h_f5, a_f5, home, away, home_p, away_p, rho, uv = row
         h_late = max(0, home_score - h_f5)
@@ -269,9 +270,9 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
 
         actual_home_win = 1.0 if home_score > away_score else 0.0
 
-        # Bayesian Shrinkage: Small sample sizes (< 10 appearances) pulled toward 1.00 baseline
-        w_h_team = min(1.0, sim_team_count.get(home, 0) / 10.0)
-        w_a_team = min(1.0, sim_team_count.get(away, 0) / 10.0)
+        # Bayesian Shrinkage: Regularize low sample counts toward 1.00 neutral baseline
+        w_h_team = min(1.0, sim_team_count.get(home, 0) / 15.0)
+        w_a_team = min(1.0, sim_team_count.get(away, 0) / 15.0)
         h_off_mod = w_h_team * sim_team_off.get(home, 1.0) + (1.0 - w_h_team) * 1.0
         h_pitch_mod = w_h_team * sim_team_pitch.get(home, 1.0) + (1.0 - w_h_team) * 1.0
         a_off_mod = w_a_team * sim_team_off.get(away, 1.0) + (1.0 - w_a_team) * 1.0
@@ -289,9 +290,26 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
         base_a = 4.25 * park_mult * air_drag_mult * a_off_mod * (0.55 * h_p_mod + 0.45 * sim_bullpen_fatigue.get(home, 1.0) * h_pitch_mod)
 
         denom = (base_h ** 1.83) + (base_a ** 1.83)
-        raw_home_prob = round((base_h ** 1.83) / denom, 4) if denom != 0 else 0.5
+        raw_home_prob = round((base_h ** 1.83) / denom, 4) if denom != 0 else 0.50
 
-        X_data.append([base_h, base_a, raw_home_prob])
+        # Multi-factor feature vector passed to ensemble
+        feature_vector = [
+            base_h,
+            base_a,
+            base_h - base_a,
+            base_h / max(0.5, (base_h + base_a)),
+            raw_home_prob,
+            park_mult,
+            air_drag_mult,
+            h_off_mod,
+            a_off_mod,
+            h_pitch_mod,
+            a_pitch_mod,
+            h_p_mod,
+            a_p_mod
+        ]
+
+        X_data.append(feature_vector)
         y_data.append(actual_home_win)
         run_errors.append(abs((home_score + away_score) - (base_h + base_a)))
 
@@ -301,38 +319,37 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (pk, home, away, raw_home_prob, 1.0 - raw_home_prob, round(raw_home_prob - 0.5, 4), round(base_h, 2), round(base_a, 2), now_ts))
 
-        # Decoupled Multi-Target Loss Updates with Sequential EWMA
+        # Stabilized EWMA updates with bounded learning rates
         pred_home_f5, pred_away_f5 = base_h * 0.55, base_a * 0.55
         pred_home_late, pred_away_late = base_h * 0.45, base_a * 0.45
 
-        # 1. Starting Pitcher F5 Updates
+        # 1. Starting Pitcher F5 EWMA Updates
         for p_name, pred_f5, act_f5 in [(home_p, pred_away_f5, a_f5), (away_p, pred_home_f5, h_f5)]:
             err = act_f5 - pred_f5
-            alpha = min(0.30, 0.10 + (abs(err) * 0.02))
+            alpha = min(0.12, 0.03 + (abs(err) * 0.01))
             old_mod = sim_pitcher_mod.get(p_name, 1.0)
-            sim_pitcher_mod[p_name] = max(0.60, min(1.40, alpha * (old_mod + err * 0.15) + (1.0 - alpha) * old_mod))
+            sim_pitcher_mod[p_name] = max(0.70, min(1.30, alpha * (old_mod + err * 0.05) + (1.0 - alpha) * old_mod))
             sim_pitcher_count[p_name] = sim_pitcher_count.get(p_name, 0) + 1
 
-        # 2. Team Late Inning Updates
+        # 2. Team Offense & Pitching Late-Inning Updates
         for t_name, pred_late, act_late, is_off in [(home, pred_home_late, h_late, True), (away, pred_home_late, h_late, False), (away, pred_away_late, a_late, True), (home, pred_away_late, a_late, False)]:
             err = act_late - pred_late
-            alpha = min(0.30, 0.10 + (abs(err) * 0.02))
+            alpha = min(0.10, 0.02 + (abs(err) * 0.008))
             if is_off:
                 old_mod = sim_team_off.get(t_name, 1.0)
-                sim_team_off[t_name] = max(0.60, min(1.40, alpha * (old_mod + err * 0.15) + (1.0 - alpha) * old_mod))
+                sim_team_off[t_name] = max(0.70, min(1.30, alpha * (old_mod + err * 0.04) + (1.0 - alpha) * old_mod))
             else:
                 old_mod = sim_team_pitch.get(t_name, 1.0)
-                sim_team_pitch[t_name] = max(0.60, min(1.40, alpha * (old_mod + err * 0.15) + (1.0 - alpha) * old_mod))
+                sim_team_pitch[t_name] = max(0.70, min(1.30, alpha * (old_mod + err * 0.04) + (1.0 - alpha) * old_mod))
             sim_team_count[t_name] = sim_team_count.get(t_name, 0) + 1
 
-        # 3. Bullpen Fatigue Updates
+        # 3. Bullpen Fatigue Workload Updates
         for t_name, pred_late, act_late in [(away, pred_home_late, h_late), (home, pred_away_late, a_late)]:
             err = act_late - pred_late
-            alpha = min(0.30, 0.10 + (abs(err) * 0.02))
+            alpha = min(0.10, 0.02 + (abs(err) * 0.008))
             old_fatigue = sim_bullpen_fatigue.get(t_name, 1.0)
-            sim_bullpen_fatigue[t_name] = max(0.70, min(1.30, alpha * (old_fatigue + err * 0.15) + (1.0 - alpha) * old_fatigue))
+            sim_bullpen_fatigue[t_name] = max(0.80, min(1.25, alpha * (old_fatigue + err * 0.04) + (1.0 - alpha) * old_fatigue))
 
-    # Operational Database Commits
     print(f"Committing {len(sim_pitcher_mod)} pitcher weights and {len(sim_team_off)} team weights to operational memory for live pipeline consumption...")
     for p_name, mod in sim_pitcher_mod.items():
         if p_name != 'Unknown':
@@ -363,7 +380,7 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
     y = np.array(y_data)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-    print("Fitting SOTA Level-1 Stacking Classifier...")
+    print("Fitting Calibrated SOTA Level-1 Stacking Classifier...")
     stack = build_mlb_stacking_classifier()
     stack.fit(X_train, y_train)
 
@@ -384,7 +401,7 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
     print("⚡ MACHINE LEARNING VALIDATION COMPLETED (80/20 SPLIT)")
     print(f"• Total Validation Set Evaluated : {len(y_test)} Games (Unseen)")
     print(f"• Stacked Ensemble Accuracy    : {final_acc:.2%}")
-    print(f"• Calibrated Brier Score       : {final_brier:.4f} (Lower is better, < 0.25 is profitable)")
+    print(f"• Calibrated Brier Score       : {final_brier:.4f} (Target < 0.2500)")
     print(f"• Average Total Run Error      : {final_run_err:.2f} Runs/Game")
     print("=" * 65)
 
