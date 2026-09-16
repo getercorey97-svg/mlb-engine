@@ -62,6 +62,7 @@ jobs:
             INSTRUCTION=$(echo "$COMMENT_BODY" | sed 's/^\/aider *//')
           fi
           
-          aider --model openrouter/anthropic/claude-3.5-sonnet --yes --message "$INSTRUCTION"
+          # Updated to use the valid current OpenRouter model slug
+          aider --model openrouter/anthropic/claude-sonnet-latest --yes --message "$INSTRUCTION"
           
           git push
