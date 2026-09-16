@@ -1,6 +1,7 @@
 import sqlite3
 import requests
 import numpy as np
+import pandas as pd
 from datetime import datetime, timedelta
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.ensemble import RandomForestClassifier, StackingClassifier
@@ -38,7 +39,9 @@ DEFAULT_PARK_FACTORS = {
     "Los Angeles Dodgers": 0.93, "San Diego Padres": 0.92, "Seattle Mariners": 0.91
 }
 
-def ensure_backtest_tables(cursor):
+CORRELATION_SIGNIFICANCE_THRESHOLD = 0.25
+
+def ensure_unified_schemas(cursor):
     cursor.executescript('''
     CREATE TABLE IF NOT EXISTS Post_Match_Analysis (
         game_pk INTEGER PRIMARY KEY,
@@ -61,13 +64,31 @@ def ensure_backtest_tables(cursor):
         predicted_away_runs REAL,
         timestamp TEXT
     );
-    CREATE TABLE IF NOT EXISTS Backtest_Ledger (
-        run_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        games_evaluated INTEGER,
-        brier_score REAL,
-        win_accuracy REAL,
-        avg_run_error REAL,
-        executed_at TEXT
+    CREATE TABLE IF NOT EXISTS Daily_Lineups (
+        game_pk INTEGER PRIMARY KEY,
+        game_date TEXT,
+        away_team TEXT,
+        home_team TEXT,
+        away_pitcher TEXT,
+        home_pitcher TEXT,
+        lineup_status TEXT,
+        air_density REAL,
+        uv_modifier REAL,
+        status TEXT
+    );
+    CREATE TABLE IF NOT EXISTS Daily_Umpires (
+        game_pk INTEGER PRIMARY KEY,
+        home_plate_umpire TEXT,
+        run_modifier REAL
+    );
+    CREATE TABLE IF NOT EXISTS Esoteric_Signals (
+        game_pk INTEGER PRIMARY KEY,
+        geomagnetic_kp REAL DEFAULT 2.0,
+        solar_xray_flux REAL DEFAULT 1.0,
+        home_media_pressure INTEGER DEFAULT 0,
+        home_media_tone REAL DEFAULT 0.0,
+        roster_birthday_active INTEGER DEFAULT 0,
+        captured_at TEXT
     );
     CREATE TABLE IF NOT EXISTS Pitcher_Modifiers (
         pitcher_name TEXT PRIMARY KEY,
@@ -83,17 +104,88 @@ def ensure_backtest_tables(cursor):
         appearance_count INTEGER DEFAULT 0,
         last_updated TEXT
     );
+    CREATE TABLE IF NOT EXISTS Backtest_Ledger (
+        run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        games_evaluated INTEGER,
+        brier_score REAL,
+        win_accuracy REAL,
+        avg_run_error REAL,
+        executed_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS Feature_Correlations (
+        feature_name TEXT PRIMARY KEY,
+        corr_with_total_runs REAL,
+        corr_with_model_error REAL,
+        sample_size INTEGER,
+        anomaly_flagged INTEGER,
+        last_updated TEXT
+    );
     ''')
 
+def sync_historical_schedule_if_needed(conn, cursor, min_required=200):
+    cursor.execute("SELECT COUNT(*) FROM Post_Match_Analysis WHERE home_score IS NOT NULL")
+    existing_count = cursor.fetchone()[0]
+    print(f"[DATABASE CHECK] Existing valid historical records in DB: {existing_count} games.")
+
+    if existing_count >= min_required:
+        return
+
+    print(f"[INGESTION] Database below target ({existing_count} < {min_required}). Fetching schedule chunks from MLB API...")
+    today = datetime.now()
+    chunk_days = 30
+    days_back = 180
+
+    for chunk_start in range(0, days_back, chunk_days):
+        end_dt = (today - timedelta(days=chunk_start)).strftime('%Y-%m-%d')
+        start_dt = (today - timedelta(days=chunk_start + chunk_days)).strftime('%Y-%m-%d')
+
+        url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={start_dt}&endDate={end_dt}&gameType=R&hydrate=linescore,probablePitcher"
+        try:
+            res = requests.get(url, timeout=15).json()
+            for date_item in res.get('dates', []):
+                for g in date_item.get('games', []):
+                    pk = g.get('gamePk')
+                    if not pk or g.get('status', {}).get('abstractGameState') != 'Final' or 'linescore' not in g:
+                        continue
+                    
+                    teams = g.get('teams', {})
+                    home = teams.get('home', {}).get('team', {}).get('name')
+                    away = teams.get('away', {}).get('team', {}).get('name')
+                    h_score = teams.get('home', {}).get('score')
+                    a_score = teams.get('away', {}).get('score')
+                    if not home or not away or h_score is None or a_score is None:
+                        continue
+
+                    actual_winner = home if h_score > a_score else away
+                    innings = g.get('linescore', {}).get('innings', [])
+                    h_f5 = sum(inn.get('home', {}).get('runs') or 0 for inn in innings[:5])
+                    a_f5 = sum(inn.get('away', {}).get('runs') or 0 for inn in innings[:5])
+                    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                    cursor.execute('''
+                    INSERT OR IGNORE INTO Post_Match_Analysis 
+                    (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, -1, ?)
+                    ''', (pk, actual_winner, h_score, a_score, h_f5, a_f5, now_ts))
+
+                    home_p = teams.get('home', {}).get('probablePitcher', {}).get('fullName', 'Unknown')
+                    away_p = teams.get('away', {}).get('probablePitcher', {}).get('fullName', 'Unknown')
+                    cursor.execute('''
+                    INSERT OR IGNORE INTO Daily_Lineups
+                    (game_pk, game_date, away_team, home_team, away_pitcher, home_pitcher, lineup_status, air_density, uv_modifier, status)
+                    VALUES (?, ?, ?, ?, ?, ?, 'Official', 1.225, 1.0, 'Final')
+                    ''', (pk, g.get('gameDate', '')[:10], away, home, away_p, home_p))
+            conn.commit()
+        except Exception as e:
+            print(f"Schedule chunk error ({start_dt} to {end_dt}): {e}")
+
 def build_mlb_stacking_classifier():
-    """Constructs the Level-1 Stacked Generalization ensemble for hold-out validation."""
     rf_base = RandomForestClassifier(n_estimators=200, max_depth=6, min_samples_leaf=4, random_state=42, n_jobs=-1)
     xgb_base = XGBClassifier(n_estimators=150, learning_rate=0.05, max_depth=5, eval_metric='logloss', random_state=42, n_jobs=-1)
-    
     level_1_meta = LogisticRegression(penalty='l2', C=1.0, solver='lbfgs', max_iter=1000)
     cv_strategy = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    
-    stacked_model = StackingClassifier(
+
+    return StackingClassifier(
         estimators=[('rf', rf_base), ('xgb', xgb_base)],
         final_estimator=level_1_meta,
         cv=cv_strategy,
@@ -101,105 +193,57 @@ def build_mlb_stacking_classifier():
         passthrough=True,
         n_jobs=-1
     )
-    return stacked_model
 
-def run_backtest_engine(target_games=1600):
+def run_ml_backtest(conn, cursor, max_eval=1600):
     print("=" * 65)
-    print(f"[{datetime.now()}] Initializing SOTA Machine Learning Backtest ({target_games} Games)...")
+    print(f"[{datetime.now()}] Initializing Chronological EWMA & Stacking Backtest...")
     print("=" * 65)
 
-    conn = sqlite3.connect('mlb_engine.db', timeout=30)
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL;")
-    cursor.execute("PRAGMA busy_timeout=10000;")
-    ensure_backtest_tables(cursor)
-    conn.commit()
+    query = '''
+    SELECT 
+        p.game_pk,
+        p.home_score,
+        p.away_score,
+        COALESCE(p.home_f5_score, 0),
+        COALESCE(p.away_f5_score, 0),
+        d.home_team,
+        d.away_team,
+        COALESCE(d.home_pitcher, 'Unknown'),
+        COALESCE(d.away_pitcher, 'Unknown'),
+        COALESCE(d.air_density, 1.225),
+        COALESCE(d.uv_modifier, 1.0)
+    FROM Post_Match_Analysis p
+    INNER JOIN Daily_Lineups d ON p.game_pk = d.game_pk
+    WHERE p.home_score IS NOT NULL AND p.away_score IS NOT NULL
+    ORDER BY p.game_pk ASC
+    LIMIT ?
+    '''
+    cursor.execute(query, (max_eval,))
+    records = cursor.fetchall()
 
-    cursor.execute("SELECT game_pk FROM Post_Match_Analysis")
-    seen_pks = {row[0] for row in cursor.fetchall()}
-    print(f"Existing historical records in database: {len(seen_pks)} games.")
-
-    today = datetime.now()
-    all_games = []
-    chunk_days = 30
-    days_back = 150 
-
-    print("Fetching bulk schedule chunks from MLB Stats API...")
-    for chunk_start in range(0, days_back, chunk_days):
-        end_dt = (today - timedelta(days=chunk_start)).strftime('%Y-%m-%d')
-        start_dt = (today - timedelta(days=chunk_start + chunk_days)).strftime('%Y-%m-%d')
-
-        bulk_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={start_dt}&endDate={end_dt}&gameType=R&hydrate=linescore,probablePitcher"
-        try:
-            res = requests.get(bulk_url, timeout=15).json()
-            for date_item in res.get('dates', []):
-                for g in date_item.get('games', []):
-                    pk = g.get('gamePk')
-                    if pk and pk not in seen_pks and g.get('status', {}).get('abstractGameState') == 'Final' and 'linescore' in g:
-                        seen_pks.add(pk)
-                        all_games.append(g)
-        except Exception as e:
-            print(f"Chunk fetch error ({start_dt} to {end_dt}): {e}")
-
-        if len(all_games) >= target_games:
-            break
-
-    print(f"Ingested {len(all_games)} completed MLB games for ML evaluation.")
-
-    if not all_games:
-        print("[BYPASS] No new games retrieved for backtesting.")
-        conn.close()
+    if len(records) < 100:
+        print(f"[BYPASS] Insufficient dataset for ML Hold-Out validation (N={len(records)} < 100).")
         return
 
-    # Sort games chronologically to simulate real-time EWMA learning
-    all_games.sort(key=lambda x: x.get('gamePk', 0))
+    print(f"Running simulation across {len(records)} verified historical games...")
 
-    # In-memory simulation of EWMA, Multi-Target, and Bayesian Shrinkage weights
-    sim_team_off = {}
-    sim_team_pitch = {}
-    sim_team_count = {}
-    sim_pitcher_mod = {}
-    sim_pitcher_count = {}
+    sim_team_off, sim_team_pitch, sim_team_count = {}, {}, {}
+    sim_pitcher_mod, sim_pitcher_count = {}, {}
     sim_bullpen_fatigue = {}
 
-    X_data = []
-    y_data = []
-    run_errors = []
+    X_data, y_data, run_errors = [], [], []
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    processed_count = 0
-    for g in all_games[:target_games]:
-        pk = g['gamePk']
-        teams = g.get('teams', {})
-        home = teams.get('home', {}).get('team', {}).get('name')
-        away = teams.get('away', {}).get('team', {}).get('name')
+    for row in records:
+        pk, home_score, away_score, h_f5, a_f5, home, away, home_p, away_p, rho, uv = row
+        h_late = max(0, home_score - h_f5)
+        a_late = max(0, away_score - a_f5)
 
-        if not home or not away:
-            continue
-        
-        home_score = teams.get('home', {}).get('score')
-        away_score = teams.get('away', {}).get('score')
-
-        if home_score is None or away_score is None:
-            continue
-
-        actual_winner = home if home_score > away_score else away
         actual_home_win = 1.0 if home_score > away_score else 0.0
 
-        # Extract F5 and Late Inning scores
-        innings = g.get('linescore', {}).get('innings', [])
-        h_f5 = sum(inn.get('home', {}).get('runs') or 0 for inn in innings[:5])
-        a_f5 = sum(inn.get('away', {}).get('runs') or 0 for inn in innings[:5])
-        h_late = sum(inn.get('home', {}).get('runs') or 0 for inn in innings[5:9])
-        a_late = sum(inn.get('away', {}).get('runs') or 0 for inn in innings[5:9])
-
-        home_p = teams.get('home', {}).get('probablePitcher', {}).get('fullName', 'Unknown')
-        away_p = teams.get('away', {}).get('probablePitcher', {}).get('fullName', 'Unknown')
-
-        # Apply Bayesian Shrinkage to simulated weights
+        # Bayesian Shrinkage regularizer (N < 10 shrunk to 1.00 baseline)
         w_h_team = min(1.0, sim_team_count.get(home, 0) / 10.0)
         w_a_team = min(1.0, sim_team_count.get(away, 0) / 10.0)
-        
         h_off_mod = w_h_team * sim_team_off.get(home, 1.0) + (1.0 - w_h_team) * 1.0
         h_pitch_mod = w_h_team * sim_team_pitch.get(home, 1.0) + (1.0 - w_h_team) * 1.0
         a_off_mod = w_a_team * sim_team_off.get(away, 1.0) + (1.0 - w_a_team) * 1.0
@@ -210,27 +254,31 @@ def run_backtest_engine(target_games=1600):
         h_p_mod = w_h_p * sim_pitcher_mod.get(home_p, 1.0) + (1.0 - w_h_p) * 1.0
         a_p_mod = w_a_p * sim_pitcher_mod.get(away_p, 1.0) + (1.0 - w_a_p) * 1.0
 
-        rho = STADIUM_RHO_BASELINES.get(home, 1.225)
         park_mult = DEFAULT_PARK_FACTORS.get(home, 1.00)
         air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
 
-        # Base runs with dynamic modifiers
         base_h = 4.45 * park_mult * air_drag_mult * h_off_mod * (0.55 * a_p_mod + 0.45 * sim_bullpen_fatigue.get(away, 1.0) * a_pitch_mod)
         base_a = 4.25 * park_mult * air_drag_mult * a_off_mod * (0.55 * h_p_mod + 0.45 * sim_bullpen_fatigue.get(home, 1.0) * h_pitch_mod)
 
         denom = (base_h ** 1.83) + (base_a ** 1.83)
         raw_home_prob = round((base_h ** 1.83) / denom, 4) if denom != 0 else 0.5
-        
-        # Features for ML Pipeline
+
         X_data.append([base_h, base_a, raw_home_prob])
         y_data.append(actual_home_win)
         run_errors.append(abs((home_score + away_score) - (base_h + base_a)))
 
-        # Chronological EWMA & Multi-Target Updates
+        # Update Forecasts Table to fuel the Correlation Sweeper
+        cursor.execute('''
+        INSERT OR REPLACE INTO Model_Forecasts 
+        (game_pk, home_team, away_team, home_prob, away_prob, predicted_edge, predicted_home_runs, predicted_away_runs, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (pk, home, away, raw_home_prob, 1.0 - raw_home_prob, round(raw_home_prob - 0.5, 4), round(base_h, 2), round(base_a, 2), now_ts))
+
+        # Decoupled Multi-Target Loss Updates with EWMA
         pred_home_f5, pred_away_f5 = base_h * 0.55, base_a * 0.55
         pred_home_late, pred_away_late = base_h * 0.45, base_a * 0.45
 
-        # 1. Pitcher F5 Updates
+        # 1. Starting Pitcher F5 Updates
         for p_name, pred_f5, act_f5 in [(home_p, pred_away_f5, a_f5), (away_p, pred_home_f5, h_f5)]:
             err = act_f5 - pred_f5
             alpha = min(0.30, 0.10 + (abs(err) * 0.02))
@@ -257,47 +305,28 @@ def run_backtest_engine(target_games=1600):
             old_fatigue = sim_bullpen_fatigue.get(t_name, 1.0)
             sim_bullpen_fatigue[t_name] = max(0.70, min(1.30, alpha * (old_fatigue + err * 0.15) + (1.0 - alpha) * old_fatigue))
 
-        cursor.execute('''
-        INSERT OR REPLACE INTO Post_Match_Analysis 
-        (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (pk, actual_winner, home_score, away_score, h_f5, a_f5, -1, now_ts))
-
-        processed_count += 1
-
     conn.commit()
 
-    if processed_count < 100:
-        print(f"[BYPASS] Not enough data for a valid Machine Learning hold-out validation (N={processed_count}). Needed 100+.")
-        conn.close()
-        return
-
-    print("Splitting dataset into 80% Training / 20% Hold-Out Testing...")
     X = np.array(X_data)
     y = np.array(y_data)
-    
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-    
-    print("Training SOTA Stacking Classifier (RF + XGB -> LogReg) on historical data...")
+
+    print("Fitting SOTA Level-1 Stacking Classifier...")
     stack = build_mlb_stacking_classifier()
     stack.fit(X_train, y_train)
 
-    print("Executing inferences on unseen validation set...")
     y_pred_proba = stack.predict_proba(X_test)[:, 1]
     y_pred_bin = stack.predict(X_test)
-    
-    final_brier = round(brier_score_loss(y_test, y_pred_proba), 4)
-    final_acc = round(accuracy_score(y_test, y_pred_bin), 4)
+
+    final_brier = round(float(brier_score_loss(y_test, y_pred_proba)), 4)
+    final_acc = round(float(accuracy_score(y_test, y_pred_bin)), 4)
     final_run_err = round(float(np.mean(run_errors)), 2)
 
     cursor.execute('''
     INSERT INTO Backtest_Ledger (games_evaluated, brier_score, win_accuracy, avg_run_error, executed_at)
     VALUES (?, ?, ?, ?, ?)
     ''', (len(y_test), final_brier, final_acc, final_run_err, now_ts))
-
     conn.commit()
-    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-    conn.close()
 
     print("\n" + "=" * 65)
     print("⚡ MACHINE LEARNING VALIDATION COMPLETED (80/20 SPLIT)")
@@ -307,5 +336,83 @@ def run_backtest_engine(target_games=1600):
     print(f"• Average Total Run Error      : {final_run_err:.2f} Runs/Game")
     print("=" * 65)
 
+def run_correlation_sweep(conn, cursor):
+    print("\n" + "=" * 65)
+    print(f"[{datetime.now()}] Sweeping Esoteric Feature Correlation Matrix...")
+    print("=" * 65)
+
+    query = '''
+    SELECT 
+        p.game_pk,
+        m.predicted_home_runs,
+        m.predicted_away_runs,
+        p.home_score as actual_home_runs,
+        p.away_score as actual_away_runs,
+        (p.home_score - m.predicted_home_runs) as home_error_delta,
+        (p.away_score - m.predicted_away_runs) as away_error_delta,
+        COALESCE(d.air_density, 1.225) as air_density,
+        COALESCE(d.uv_modifier, 1.0) as uv_modifier,
+        COALESCE(u.run_modifier, 1.0) as umpire_modifier,
+        COALESCE(e.geomagnetic_kp, 2.0) as geomagnetic_kp,
+        COALESCE(e.home_media_pressure, 0) as media_pressure,
+        COALESCE(e.home_media_tone, 0.0) as media_tone
+    FROM Post_Match_Analysis p
+    INNER JOIN Model_Forecasts m ON p.game_pk = m.game_pk
+    LEFT JOIN Daily_Lineups d ON p.game_pk = d.game_pk
+    LEFT JOIN Daily_Umpires u ON p.game_pk = u.game_pk
+    LEFT JOIN Esoteric_Signals e ON p.game_pk = e.game_pk
+    WHERE p.home_score IS NOT NULL AND m.predicted_home_runs IS NOT NULL
+    '''
+    df = pd.read_sql_query(query, conn)
+
+    if len(df) < 25:
+        print(f"[BYPASS] Insufficient matched pairs for correlation sweep (N = {len(df)} < 25).")
+        return
+
+    df['total_abs_error'] = (df['home_error_delta'].abs() + df['away_error_delta'].abs())
+    df['actual_total_runs'] = df['actual_home_runs'] + df['actual_away_runs']
+
+    feature_cols = [
+        'air_density', 'uv_modifier', 'umpire_modifier', 
+        'geomagnetic_kp', 'media_pressure', 'media_tone'
+    ]
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    for feat in feature_cols:
+        if df[feat].std() == 0:
+            continue
+
+        r_runs = float(df[feat].corr(df['actual_total_runs']))
+        r_error = float(df[feat].corr(df['total_abs_error']))
+        is_anomaly = 1 if (abs(r_runs) >= CORRELATION_SIGNIFICANCE_THRESHOLD or abs(r_error) >= CORRELATION_SIGNIFICANCE_THRESHOLD) else 0
+
+        cursor.execute('''
+        INSERT OR REPLACE INTO Feature_Correlations
+        (feature_name, corr_with_total_runs, corr_with_model_error, sample_size, anomaly_flagged, last_updated)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ''', (feat, round(r_runs, 4), round(r_error, 4), len(df), is_anomaly, now_str))
+
+        flag_str = "🚨 [HIGH ANOMALY]" if is_anomaly else "   [STABLE]"
+        print(f"{flag_str} {feat:<20} | r(Runs): {r_runs:+.3f} | r(Error): {r_error:+.3f}")
+
+    conn.commit()
+    print("[SUCCESS] Feature correlations updated.")
+
+def main():
+    conn = sqlite3.connect('mlb_engine.db', timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=10000;")
+    cursor = conn.cursor()
+
+    ensure_unified_schemas(cursor)
+    conn.commit()
+
+    sync_historical_schedule_if_needed(conn, cursor, min_required=200)
+    run_ml_backtest(conn, cursor, max_eval=1600)
+    run_correlation_sweep(conn, cursor)
+
+    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+    conn.close()
+
 if __name__ == "__main__":
-    run_backtest_engine(target_games=1600)
+    main()
