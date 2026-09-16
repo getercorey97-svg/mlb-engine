@@ -12,7 +12,6 @@ on:
 
 jobs:
   aider_execution:
-    # Run if triggered manually OR if triggered via PR comment by an owner/collaborator
     if: >
       github.event_name == 'workflow_dispatch' || 
       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/aider') && (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'COLLABORATOR'))
@@ -49,7 +48,7 @@ jobs:
       - name: Install Aider
         run: pip install aider-chat
 
-      - name: Execute Aider with OpenRouter
+      - name: Execute Aider with Auto-Fallback
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           COMMENT_BODY: ${{ github.event.comment.body }}
@@ -62,7 +61,36 @@ jobs:
             INSTRUCTION=$(echo "$COMMENT_BODY" | sed 's/^\/aider *//')
           fi
           
-          # Updated to use the valid current OpenRouter model slug
-          aider --model openrouter/anthropic/claude-sonnet-latest --yes --message "$INSTRUCTION"
+          # List of models to try in order of preference
+          # You can add or remove models from this list at any time
+          MODELS=(
+            "openrouter/openai/gpt-4o"
+            "openrouter/anthropic/claude-3.5-sonnet"
+            "openrouter/deepseek/deepseek-coder"
+            "openrouter/auto"
+          )
+          
+          SUCCESS=false
+          
+          for MODEL in "${MODELS[@]}"; do
+            echo "================================================="
+            echo "Trying Aider with model: $MODEL"
+            echo "================================================="
+            
+            # If the command executes successfully (exit code 0), break the loop
+            if aider --model "$MODEL" --yes --message "$INSTRUCTION"; then
+              echo "✅ Successfully executed task using $MODEL"
+              SUCCESS=true
+              break
+            else
+              echo "❌ Model $MODEL failed or crashed. Falling back to the next model..."
+            fi
+          done
+          
+          # If all models in the list fail, terminate the workflow
+          if [ "$SUCCESS" = false ]; then
+            echo "🚨 CRITICAL ERROR: All fallback models failed."
+            exit 1
+          fi
           
           git push
