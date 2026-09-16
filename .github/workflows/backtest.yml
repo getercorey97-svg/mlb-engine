@@ -1,13 +1,17 @@
-name: MLB Engine Backtest
+name: MLB Engine Backtest & Correlation Analysis
 
 on:
-  workflow_dispatch: # Allows manual trigger from the GitHub Actions tab
+  schedule:
+    # Optional weekly or daily sweep at 10:00 AM UTC
+    - cron: '0 10 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  run-backtest:
+  run-consolidated-backtest:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -20,24 +24,25 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests scikit-learn xgboost lightgbm pybaseball
+          pip install pandas numpy requests scikit-learn xgboost
 
-      - name: Run Backtest Framework
+      - name: Purge Bytecode Cache
+        run: |
+          find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          find . -name "*.pyc" -delete 2>/dev/null || true
+
+      - name: Run Unified Backtest & Correlation Pipeline
         run: python backtest_engine.py
 
-      - name: Commit and Push Updated Database (Logs/Analysis)
+      - name: Commit and Push Updated Database & Analytics
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Stage ALL modified or created files to prevent pull conflicts
-          git add -A
-          
-          # Commit the changes, bypassing if there is nothing new
-          git commit -m "Auto-update database with backtest analytics [skip ci]" || echo "No changes to commit"
-          
-          # Pull any remote changes using autostash to prevent overwrite conflicts
-          git pull --rebase --autostash
-          
-          # Push the final payload back to your repository
-          git push
+          [ -f mlb_engine.db ] && git add mlb_engine.db
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "Auto-update backtest ledger, models, and correlation matrix [skip ci]"
+            git pull --rebase --autostash
+            git push origin main
+          else
+            echo "No changes to commit."
+          fi
