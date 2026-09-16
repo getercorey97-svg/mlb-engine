@@ -124,7 +124,8 @@ def initialize_database_schemas():
         );
         CREATE TABLE IF NOT EXISTS Bullpen_Fatigue (
             team_name TEXT PRIMARY KEY,
-            fatigue_multiplier REAL DEFAULT 1.00
+            fatigue_multiplier REAL DEFAULT 1.00,
+            last_updated TEXT
         );
         CREATE TABLE IF NOT EXISTS Post_Match_Analysis (
             game_pk INTEGER PRIMARY KEY,
@@ -141,7 +142,8 @@ def initialize_database_schemas():
     for table, col in [("Pitcher_Modifiers", "appearance_count INTEGER DEFAULT 0"),
                        ("Dynamic_Modifiers", "appearance_count INTEGER DEFAULT 0"),
                        ("Daily_Lineups", "uv_modifier REAL DEFAULT 1.00"),
-                       ("Daily_Umpires", "umpire_locked INTEGER DEFAULT 0")]:
+                       ("Daily_Umpires", "umpire_locked INTEGER DEFAULT 0"),
+                       ("Bullpen_Fatigue", "last_updated TEXT")]:
         try:
             cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col};")
         except sqlite3.OperationalError:
@@ -162,10 +164,9 @@ def fetch_daily_matchups_and_lineups():
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
 
-    # Clear previous active lineup slate to prevent game stacking and repeats
+    # Clear active lineup table to ensure no game repeats
     cursor.execute("DELETE FROM Daily_Lineups;")
 
-    # Restrict ingestion strictly to today's date
     today_str = datetime.now().strftime('%Y-%m-%d')
     total_ingested = 0
 
@@ -188,7 +189,7 @@ def fetch_daily_matchups_and_lineups():
                 rho = STADIUM_RHO_BASELINES.get(home, 1.225)
 
                 cursor.execute('''
-                    INSERT OR REPLACE INTO Daily_Lineups 
+                    INSERT INTO Daily_Lineups 
                     (game_pk, game_date, away_team, home_team, away_pitcher, home_pitcher, lineup_status, air_density, uv_modifier, status)
                     VALUES (?, ?, ?, ?, ?, ?, 'Pending/TBD', ?, 1.00, ?)
                 ''', (pk, today_str, away, home, away_p, home_p, rho, status))
@@ -201,7 +202,7 @@ def fetch_daily_matchups_and_lineups():
     print(f"[PHASE 3 COMPLETE] Synchronized {total_ingested} matchups strictly for {today_str}.")
 
 def export_prediction_markdown():
-    """Generates PREDICTIONS_TODAY.md containing Full Game & F5 market values."""
+    """Generates PREDICTIONS_TODAY.md containing Full Game & F5 market projections."""
     print("[PHASE 6] Exporting Consolidated Prediction Markdown...")
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
@@ -269,7 +270,7 @@ def main():
     # 1. Schema Validation & Baseline Setup
     initialize_database_schemas()
 
-    # 2. Post-Match Learning Loop: Updates weights, modifiers & calibrations from completed games first
+    # 2. Post-Match Learning Loop: Empirical weights update from completed games
     try:
         import post_match_analysis
         print("[PHASE 2] Executing Post-Match Learning Loop...")
@@ -277,10 +278,18 @@ def main():
     except Exception as e:
         print(f"[BYPASS] Post-Match analysis skipped: {e}")
 
-    # 3. Ingest Strictly Today's Matchups & Probable Pitchers into Daily_Lineups
+    # 2.5 Calculate Rolling Reliever Fatigue Over the Past 3 Days
+    try:
+        import bullpen_fatigue
+        print("[PHASE 2.5] Calculating Rolling Bullpen Fatigue...")
+        bullpen_fatigue.calculate_bullpen_fatigue()
+    except Exception as e:
+        print(f"[BYPASS] Bullpen fatigue calculation skipped: {e}")
+
+    # 3. Ingest Today's Schedule & Probable Starters into Daily_Lineups
     fetch_daily_matchups_and_lineups()
 
-    # 3.5 Execute Lineup Verification natively into the Daily_Lineups table
+    # 3.5 Execute Lineup Verification natively into Daily_Lineups
     try:
         import lineup_verifier
         print("[PHASE 3.5] Verifying Starting Lineup Confirmations...")
@@ -288,7 +297,7 @@ def main():
     except Exception as e:
         print(f"[BYPASS] Lineup verifier skipped: {e}")
 
-    # 3.6 Override Baseline Stadium Rho with Live Thermodynamics
+    # 3.6 Ingest Live Weather & Thermodynamics
     try:
         import weather_thermodynamics
         print("[PHASE 3.6] Executing Live Weather Thermodynamics...")
@@ -296,7 +305,7 @@ def main():
     except Exception as e:
         print(f"[BYPASS] Weather thermodynamics skipped: {e}")
 
-    # 3.7 Ingest Umpire Assignments
+    # 3.7 Ingest Official Umpire Assignments
     try:
         import umpire_variance
         print("[PHASE 3.7] Executing Umpire Variance & Lock Pipeline...")
@@ -313,7 +322,7 @@ def main():
     except Exception as e:
         print(f"[BYPASS] Discovery ingestion skipped: {e}")
 
-    # 5. Core Full Game Monte Carlo Simulation (using updated weights)
+    # 5. Core Full Game Monte Carlo Simulation
     try:
         import engine
         print("[PHASE 5A] Executing Full Game Monte Carlo Engine...")
@@ -321,7 +330,7 @@ def main():
     except Exception as e:
         print(f"[ERROR] Engine failure: {e}")
 
-    # 6. Dedicated F5 & Props Engine (using updated weights and correct filename)
+    # 6. Dedicated F5 & Props Secondary Engine
     try:
         import engine_f5_props as engine_f5
         print("[PHASE 5B] Executing First 5 & Pitcher Props Engine...")
