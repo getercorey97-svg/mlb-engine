@@ -60,42 +60,7 @@ jobs:
             INSTRUCTION=$(echo "$COMMENT_BODY" | sed 's/^\/aider *//')
           fi
           
-          # Run Aider with strict exclusion parameters to protect all whitelisted scripts,
-          # Aider configs, Dependabot, Watchdog services, and AI Fixer tools.
-          aider --model gemini/gemini-3.5-flash \
-                --yes \
-                --exclude ".github/workflows/" \
-                --exclude "dependabot.yml" \
-                --exclude "aider" \
-                --exclude "aifixer" \
-                --exclude "ai_fixer.yml" \
-                --exclude "ai_universal_fixer.py" \
-                --exclude "watchdog_agent.py" \
-                --exclude "engine_watchdog.py" \
-                --exclude "View_predictions.py" \
-                --exclude "alv_database.py" \
-                --exclude "backtest_engine.py" \
-                --exclude "bullpen_fatigue.py" \
-                --exclude "bullpen_metrics.py" \
-                --exclude "correlation_engine.py" \
-                --exclude "engine.py" \
-                --exclude "evolve_engine.py" \
-                --exclude "export_and_odds.py" \
-                --exclude "ingest_stats.py" \
-                --exclude "lineup_verifier.py" \
-                --exclude "map_starters.py" \
-                --exclude "mlb_engine.db" \
-                --exclude "mlb_forecasts_2026.csv" \
-                --exclude "park_factors.py" \
-                --exclude "platoon_splits.py" \
-                --exclude "post_match_analysis.py" \
-                --exclude "run_pipeline.py" \
-                --exclude "sabermetrics.py" \
-                --exclude "statcast_metrics.py" \
-                --exclude "team_offense.py" \
-                --exclude "umpire_tendencies.py" \
-                --exclude "umpire_variance.py" \
-                --exclude "weather_factors.py" \
-                --message "$INSTRUCTION"
+          # Clean execution pointing to configuration file
+          aider --model gemini/gemini-3.5-flash --yes --message "$INSTRUCTION"
           
           git push
