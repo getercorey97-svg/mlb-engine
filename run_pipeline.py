@@ -288,6 +288,15 @@ def main():
     except Exception as e:
         print(f"[BYPASS] Lineup verifier skipped: {e}")
 
+    # 3.7 Ingest Umpire Assignments
+    try:
+        import umpire_variance
+        print("[PHASE 3.7] Executing Umpire Variance & Lock Pipeline...")
+        umpire_variance.init_umpire_tendencies()
+        umpire_variance.execute_umpire_variance_pipeline()
+    except Exception as e:
+        print(f"[BYPASS] Umpire ingestion skipped: {e}")
+
     # 4. Ingest Esoteric Signals (NOAA + GDELT)
     try:
         import open_source_discovery
