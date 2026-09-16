@@ -1,7 +1,7 @@
 import sqlite3
 import requests
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -138,7 +138,6 @@ def initialize_database_schemas():
         );
     ''')
 
-    # Apply column migrations safely
     for table, col in [("Pitcher_Modifiers", "appearance_count INTEGER DEFAULT 0"),
                        ("Dynamic_Modifiers", "appearance_count INTEGER DEFAULT 0"),
                        ("Daily_Lineups", "uv_modifier REAL DEFAULT 1.00"),
@@ -148,7 +147,6 @@ def initialize_database_schemas():
         except sqlite3.OperationalError:
             pass
 
-    # Seed default park factors if missing
     cursor.execute("SELECT COUNT(*) FROM Park_Factors")
     if cursor.fetchone()[0] == 0:
         for team, factor in DEFAULT_PARK_FACTORS.items():
@@ -159,54 +157,52 @@ def initialize_database_schemas():
     print("[PHASE 1] Schemas verified and base park factors seeded.")
 
 def fetch_daily_matchups_and_lineups():
-    """Ingests today's and upcoming unplayed games into Daily_Lineups."""
-    print("[PHASE 2] Ingesting Daily MLB Schedule & Probable Pitchers...")
+    """Wipes old unplayed slate and ingests strictly today's MLB schedule."""
+    print("[PHASE 3] Ingesting Today's MLB Schedule & Probable Pitchers...")
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
 
-    # Query today and tomorrow to account for late-night pipeline runs
-    dates_to_poll = [
-        (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),
-        datetime.now().strftime('%Y-%m-%d'),
-        (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
-    ]
+    # Clear previous active lineup slate to prevent game stacking and repeats
+    cursor.execute("DELETE FROM Daily_Lineups;")
 
+    # Restrict ingestion strictly to today's date
+    today_str = datetime.now().strftime('%Y-%m-%d')
     total_ingested = 0
-    for date_str in dates_to_poll:
-        url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={date_str}&endDate={date_str}&hydrate=probablePitcher,lineups,linescore"
-        try:
-            res = requests.get(url, timeout=15).json()
-            for date_item in res.get('dates', []):
-                for g in date_item.get('games', []):
-                    pk = g.get('gamePk')
-                    status = g.get('status', {}).get('abstractGameState', 'Scheduled')
-                    teams = g.get('teams', {})
-                    home = teams.get('home', {}).get('team', {}).get('name')
-                    away = teams.get('away', {}).get('team', {}).get('name')
 
-                    if not pk or not home or not away:
-                        continue
+    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today_str}&hydrate=probablePitcher,lineups,linescore"
+    try:
+        res = requests.get(url, timeout=15).json()
+        for date_item in res.get('dates', []):
+            for g in date_item.get('games', []):
+                pk = g.get('gamePk')
+                status = g.get('status', {}).get('abstractGameState', 'Scheduled')
+                teams = g.get('teams', {})
+                home = teams.get('home', {}).get('team', {}).get('name')
+                away = teams.get('away', {}).get('team', {}).get('name')
 
-                    home_p = teams.get('home', {}).get('probablePitcher', {}).get('fullName', 'TBD')
-                    away_p = teams.get('away', {}).get('probablePitcher', {}).get('fullName', 'TBD')
-                    rho = STADIUM_RHO_BASELINES.get(home, 1.225)
+                if not pk or not home or not away:
+                    continue
 
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO Daily_Lineups 
-                        (game_pk, game_date, away_team, home_team, away_pitcher, home_pitcher, lineup_status, air_density, uv_modifier, status)
-                        VALUES (?, ?, ?, ?, ?, ?, 'Official', ?, 1.00, ?)
-                    ''', (pk, date_str, away, home, away_p, home_p, rho, status))
-                    total_ingested += 1
-        except Exception as e:
-            print(f"Schedule pull error for {date_str}: {e}")
+                home_p = teams.get('home', {}).get('probablePitcher', {}).get('fullName', 'TBD')
+                away_p = teams.get('away', {}).get('probablePitcher', {}).get('fullName', 'TBD')
+                rho = STADIUM_RHO_BASELINES.get(home, 1.225)
+
+                cursor.execute('''
+                    INSERT OR REPLACE INTO Daily_Lineups 
+                    (game_pk, game_date, away_team, home_team, away_pitcher, home_pitcher, lineup_status, air_density, uv_modifier, status)
+                    VALUES (?, ?, ?, ?, ?, ?, 'Pending/TBD', ?, 1.00, ?)
+                ''', (pk, today_str, away, home, away_p, home_p, rho, status))
+                total_ingested += 1
+    except Exception as e:
+        print(f"Schedule pull error for {today_str}: {e}")
 
     conn.commit()
     conn.close()
-    print(f"[PHASE 2 COMPLETE] Synchronized {total_ingested} matchups across current slate.")
+    print(f"[PHASE 3 COMPLETE] Synchronized {total_ingested} matchups strictly for {today_str}.")
 
 def export_prediction_markdown():
     """Generates PREDICTIONS_TODAY.md containing Full Game & F5 market values."""
-    print("[PHASE 5] Exporting Consolidated Prediction Markdown...")
+    print("[PHASE 6] Exporting Consolidated Prediction Markdown...")
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
 
@@ -263,7 +259,7 @@ def export_prediction_markdown():
 
     with open("PREDICTIONS_TODAY.md", "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
-    print("[PHASE 5 COMPLETE] PREDICTIONS_TODAY.md successfully generated.")
+    print("[PHASE 6 COMPLETE] PREDICTIONS_TODAY.md successfully generated.")
 
 def main():
     print("=" * 65)
@@ -273,42 +269,50 @@ def main():
     # 1. Schema Validation & Baseline Setup
     initialize_database_schemas()
 
-    # 2. Ingest Matchups & Probable Pitchers into Daily_Lineups
-    fetch_daily_matchups_and_lineups()
-
-    # 3. Micro-Evolution / Post-Match Learning (Learns from completed games)
+    # 2. Post-Match Learning Loop: Updates weights, modifiers & calibrations from completed games first
     try:
         import post_match_analysis
-        print("[PHASE 3A] Executing Post-Match Learning Loop...")
+        print("[PHASE 2] Executing Post-Match Learning Loop...")
         post_match_analysis.run_post_match_analysis()
     except Exception as e:
         print(f"[BYPASS] Post-Match analysis skipped: {e}")
 
-    # 4. Esoteric Discovery Variables (NOAA + GDELT)
+    # 3. Ingest Strictly Today's Matchups & Probable Pitchers into Daily_Lineups
+    fetch_daily_matchups_and_lineups()
+
+    # 3.5 Execute Lineup Verification natively into the Daily_Lineups table
+    try:
+        import lineup_verifier
+        print("[PHASE 3.5] Verifying Starting Lineup Confirmations...")
+        lineup_verifier.verify_starting_lineups()
+    except Exception as e:
+        print(f"[BYPASS] Lineup verifier skipped: {e}")
+
+    # 4. Ingest Esoteric Signals (NOAA + GDELT)
     try:
         import open_source_discovery
-        print("[PHASE 3B] Executing Signal Discovery Sweep...")
+        print("[PHASE 4] Executing Signal Discovery Sweep...")
         open_source_discovery.execute_discovery_ingestion()
     except Exception as e:
         print(f"[BYPASS] Discovery ingestion skipped: {e}")
 
-    # 5. Execute Core Full Game Monte Carlo Engine
+    # 5. Core Full Game Monte Carlo Simulation (using updated weights)
     try:
         import engine
-        print("[PHASE 4A] Executing Full Game Monte Carlo Engine...")
+        print("[PHASE 5A] Executing Full Game Monte Carlo Engine...")
         engine.run_ultimate_monte_carlo()
     except Exception as e:
         print(f"[ERROR] Engine failure: {e}")
 
-    # 6. Execute F5 and Pitcher Props Engine
+    # 6. Dedicated F5 & Props Engine (using updated weights and correct filename)
     try:
-        import engine_f5
-        print("[PHASE 4B] Executing First 5 & Pitcher Props Engine...")
+        import engine_f5_props as engine_f5
+        print("[PHASE 5B] Executing First 5 & Pitcher Props Engine...")
         engine_f5.run_f5_and_props_engine()
     except Exception as e:
         print(f"[ERROR] Engine F5 failure: {e}")
 
-    # 7. Compile Markdown Report for Repository Publishing
+    # 7. Compile Markdown Projections for Today's Slate
     export_prediction_markdown()
 
     print("=" * 65)
