@@ -9,7 +9,7 @@ def run_f5_and_props_engine():
     conn.execute("PRAGMA busy_timeout=10000;")
     cursor = conn.cursor()
     
-    # Failsafe Schema Execution & Migrations
+    # Schema Verification & Migrations
     cursor.executescript('''
     CREATE TABLE IF NOT EXISTS F5_Forecasts (
         game_pk INTEGER PRIMARY KEY, away_team TEXT, home_team TEXT, away_starter TEXT, home_starter TEXT, 
@@ -45,8 +45,11 @@ def run_f5_and_props_engine():
 
     try:
         cursor.execute('''
-            SELECT d.game_pk, d.away_team, d.home_team, d.away_pitcher, d.home_pitcher, d.air_density, d.uv_modifier, COALESCE(u.run_modifier, 1.0)
-            FROM Daily_Lineups d LEFT JOIN Daily_Umpires u ON d.game_pk = u.game_pk
+            SELECT d.game_pk, d.away_team, d.home_team, d.away_pitcher, d.home_pitcher, 
+                   COALESCE(d.air_density, 1.225), COALESCE(d.uv_modifier, 1.0), 
+                   COALESCE(u.run_modifier, 1.0), COALESCE(u.home_plate_umpire, 'TBD'), COALESCE(u.umpire_locked, 0)
+            FROM Daily_Lineups d 
+            LEFT JOIN Daily_Umpires u ON d.game_pk = u.game_pk
             WHERE d.status != 'Final' AND d.game_pk NOT IN (SELECT game_pk FROM Post_Match_Analysis)
         ''')
         matchups = cursor.fetchall()
@@ -101,7 +104,7 @@ def run_f5_and_props_engine():
 
     print("-" * 60)
     for game in matchups:
-        pk, away, home, away_sp, home_sp, rho, uv, ump = game
+        pk, away, home, away_sp, home_sp, rho, uv, ump, ump_name, ump_locked = game
         
         away_sp = away_sp if away_sp else "TBD"
         home_sp = home_sp if home_sp else "TBD"
@@ -125,7 +128,7 @@ def run_f5_and_props_engine():
         a_off = get_team_shrunk_offense(away)
         h_off = get_team_shrunk_offense(home)
 
-        # 5-Inning Expected Runs (5/9 allocation)
+        # 5-Inning Expected Runs (5/9 game distribution)
         lam_a = max(0.05, (h_xera * a_off * env_mult) * (5.0 / 9.0))
         lam_h = max(0.05, (a_xera * h_off * env_mult) * (5.0 / 9.0))
 
@@ -146,9 +149,9 @@ def run_f5_and_props_engine():
             INSERT OR REPLACE INTO F5_Forecasts 
             (game_pk, away_team, home_team, away_starter, home_starter, f5_away_prob, f5_home_prob, f5_tie_prob, f5_exp_away_runs, f5_exp_home_runs, f5_total_runs)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (pk, away, home, away_sp, home_sp, p_a, p_h, p_t, lam_a, lam_h, lam_a + lam_h))
+        ''', (pk, away, home, away_sp, home_sp, p_a, p_h, p_t, round(lam_a, 2), round(lam_h, 2), round(lam_a + lam_h, 2)))
 
-        # Pitcher Props with Umpire and Bayesian-shrunk Strikeout Modifier
+        # Strikeout Props Simulation
         for sp, tm, xera, k_mod in [(away_sp, away, a_xera, a_k_mod), (home_sp, home, h_xera, h_k_mod)]:
             if sp == "TBD": 
                 continue
