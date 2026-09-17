@@ -93,6 +93,9 @@ def run_post_match_analysis():
     CREATE TABLE IF NOT EXISTS Dynamic_Modifiers (
         team_name TEXT PRIMARY KEY, offensive_modifier REAL DEFAULT 1.0, pitching_modifier REAL DEFAULT 1.0, appearance_count INTEGER DEFAULT 0, last_updated TEXT
     );
+    CREATE TABLE IF NOT EXISTS Bullpen_Fatigue (
+        team_name TEXT PRIMARY KEY, fatigue_multiplier REAL DEFAULT 1.0
+    );
     ''')
 
     for col in ["home_f5_score INTEGER", "away_f5_score INTEGER"]:
@@ -188,6 +191,31 @@ def run_post_match_analysis():
                     INSERT OR REPLACE INTO Post_Match_Analysis (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (game_pk, actual_winner, home_score, away_score, h_f5, a_f5, model_correct, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+
+    # Print learning & remembering summary
+    cursor.execute("SELECT COUNT(*), AVG(f5_run_modifier) FROM Pitcher_Modifiers")
+    p_count, p_avg = cursor.fetchone()
+    p_avg = p_avg if p_avg is not None else 1.0
+    
+    cursor.execute("SELECT COUNT(*), AVG(offensive_modifier), AVG(pitching_modifier) FROM Dynamic_Modifiers")
+    t_count, t_off_avg, t_pit_avg = cursor.fetchone()
+    t_off_avg = t_off_avg if t_off_avg is not None else 1.0
+    t_pit_avg = t_pit_avg if t_pit_avg is not None else 1.0
+    
+    cursor.execute("SELECT COUNT(*), AVG(fatigue_multiplier) FROM Bullpen_Fatigue")
+    b_count, b_avg = cursor.fetchone()
+    b_avg = b_avg if b_avg is not None else 1.0
+    
+    cursor.execute("SELECT COUNT(*), SUM(model_correct) FROM Post_Match_Analysis")
+    total_games, correct_games = cursor.fetchone()
+    accuracy = (correct_games / total_games * 100) if total_games and total_games > 0 else 0.0
+    
+    print("\n=== ENGINE LEARNING & MEMORY STATUS ===")
+    print(f"  Pitchers Remembered: {p_count or 0} (Avg F5 Modifier: {p_avg:.3f})")
+    print(f"  Teams Remembered:    {t_count or 0} (Avg Offense: {t_off_avg:.3f}, Avg Pitching: {t_pit_avg:.3f})")
+    print(f"  Bullpens Tracked:    {b_count or 0} (Avg Fatigue: {b_avg:.3f})")
+    print(f"  Historical Accuracy: {accuracy:.2f}% ({correct_games or 0}/{total_games or 0} games correct)")
+    print("=======================================\n")
 
     conn.commit()
     cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
