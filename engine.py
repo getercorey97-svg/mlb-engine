@@ -10,7 +10,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 def ensure_engine_schemas(cursor):
-    """Guarantees all reference tables exist with auto-migration for appearance tracking and umpire states."""
+    """Guarantees all reference tables exist with auto-migration for appearance tracking, platoon splits, and umpire states."""
     cursor.executescript('''
     CREATE TABLE IF NOT EXISTS Model_Forecasts (
         game_pk INTEGER PRIMARY KEY,
@@ -26,12 +26,16 @@ def ensure_engine_schemas(cursor):
     CREATE TABLE IF NOT EXISTS Team_Offense (
         team_name TEXT PRIMARY KEY,
         ops REAL DEFAULT 0.720,
+        ops_vs_rhp REAL DEFAULT 0.720,
+        ops_vs_lhp REAL DEFAULT 0.720,
         bsr_per_game REAL DEFAULT 4.50,
         updated_at TEXT
     );
     CREATE TABLE IF NOT EXISTS Pitcher_Stats (
         last_name TEXT PRIMARY KEY,
         est_era REAL DEFAULT 4.20,
+        xfip REAL DEFAULT 4.20,
+        throws TEXT DEFAULT 'R',
         updated_at TEXT
     );
     CREATE TABLE IF NOT EXISTS Park_Factors (
@@ -56,7 +60,7 @@ def ensure_engine_schemas(cursor):
         home_pitcher TEXT,
         lineup_status TEXT,
         air_density REAL DEFAULT 1.225,
-        uv_modifier REAL DEFAULT 1.00,
+        uv_modifier REAL DEFAULT 5.00,
         status TEXT
     );
     CREATE TABLE IF NOT EXISTS Daily_Umpires (
@@ -90,27 +94,31 @@ def ensure_engine_schemas(cursor):
         appearance_count INTEGER DEFAULT 0,
         last_updated TEXT
     );
+    CREATE TABLE IF NOT EXISTS Feature_Weights (
+        feature_name TEXT PRIMARY KEY,
+        r_runs REAL,
+        r_error REAL,
+        beta_weight REAL,
+        status TEXT,
+        last_calibrated TEXT
+    );
     ''')
 
-    cursor.execute("PRAGMA table_info(Daily_Umpires);")
-    cols = [c[1] for c in cursor.fetchall()]
-    if 'umpire_locked' not in cols:
-        cursor.execute("ALTER TABLE Daily_Umpires ADD COLUMN umpire_locked INTEGER DEFAULT 0;")
-
-    cursor.execute("PRAGMA table_info(Pitcher_Stats);")
-    cols_p = [c[1] for c in cursor.fetchall()]
-    if 'xfip' not in cols_p:
-        cursor.execute("ALTER TABLE Pitcher_Stats ADD COLUMN xfip REAL DEFAULT 4.20;")
-
-    cursor.execute("PRAGMA table_info(Pitcher_Modifiers);")
-    cols_pm = [c[1] for c in cursor.fetchall()]
-    if 'appearance_count' not in cols_pm:
-        cursor.execute("ALTER TABLE Pitcher_Modifiers ADD COLUMN appearance_count INTEGER DEFAULT 0;")
-
-    cursor.execute("PRAGMA table_info(Dynamic_Modifiers);")
-    cols_dm = [c[1] for c in cursor.fetchall()]
-    if 'appearance_count' not in cols_dm:
-        cursor.execute("ALTER TABLE Dynamic_Modifiers ADD COLUMN appearance_count INTEGER DEFAULT 0;")
+    # Column Migrations
+    migrations = [
+        ("Daily_Umpires", "umpire_locked", "INTEGER DEFAULT 0"),
+        ("Pitcher_Stats", "xfip", "REAL DEFAULT 4.20"),
+        ("Pitcher_Stats", "throws", "TEXT DEFAULT 'R'"),
+        ("Team_Offense", "ops_vs_rhp", "REAL DEFAULT 0.720"),
+        ("Team_Offense", "ops_vs_lhp", "REAL DEFAULT 0.720"),
+        ("Pitcher_Modifiers", "appearance_count", "INTEGER DEFAULT 0"),
+        ("Dynamic_Modifiers", "appearance_count", "INTEGER DEFAULT 0")
+    ]
+    for table, col, col_def in migrations:
+        cursor.execute(f"PRAGMA table_info({table});")
+        cols = [c[1] for c in cursor.fetchall()]
+        if col not in cols:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def};")
 
 def probability_to_american(prob: float) -> str:
     prob = max(0.01, min(0.99, prob))
@@ -193,24 +201,38 @@ def run_ultimate_monte_carlo():
     ensure_engine_schemas(cursor)
     conn.commit()
 
+    # Ingest feature caches
     team_bsr = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(bsr_per_game, 4.50) FROM Team_Offense").fetchall()}
     team_ops = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(ops, 0.720) FROM Team_Offense").fetchall()}
-    pitcher_metrics = {r[0]: r[1] for r in cursor.execute("SELECT last_name, COALESCE(xfip, est_era, 4.20) FROM Pitcher_Stats").fetchall()}
+    platoon_ops = {r[0]: (r[1], r[2]) for r in cursor.execute(
+        "SELECT team_name, COALESCE(ops_vs_rhp, 0.720), COALESCE(ops_vs_lhp, 0.720) FROM Team_Offense"
+    ).fetchall()}
+
+    pitcher_data = {r[0]: (r[1], r[2]) for r in cursor.execute(
+        "SELECT last_name, COALESCE(xfip, est_era, 4.20), COALESCE(throws, 'R') FROM Pitcher_Stats"
+    ).fetchall()}
+    
     park_mods = {r[0]: r[1] for r in cursor.execute("SELECT home_team, COALESCE(run_factor, 1.00) FROM Park_Factors").fetchall()}
     bullpen_fatigue = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(fatigue_multiplier, 1.00) FROM Bullpen_Fatigue").fetchall()}
     circadian_drag = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(jet_lag_runs_penalty, 0.00) FROM Biological_Modifiers").fetchall()}
     
-    dynamic_mods = {r[0]: (r[1], r[2], r[3]) for r in cursor.execute("SELECT team_name, COALESCE(offensive_modifier, 1.0), COALESCE(pitching_modifier, 1.0), COALESCE(appearance_count, 0) FROM Dynamic_Modifiers").fetchall()}
-    pitcher_mods = {r[0]: (r[1], r[2], r[3]) for r in cursor.execute("SELECT pitcher_name, COALESCE(k_modifier, 1.0), COALESCE(f5_run_modifier, 1.0), COALESCE(appearance_count, 0) FROM Pitcher_Modifiers").fetchall()}
+    dynamic_mods = {r[0]: (r[1], r[2], r[3]) for r in cursor.execute(
+        "SELECT team_name, COALESCE(offensive_modifier, 1.0), COALESCE(pitching_modifier, 1.0), COALESCE(appearance_count, 0) FROM Dynamic_Modifiers"
+    ).fetchall()}
+    pitcher_mods = {r[0]: (r[1], r[2], r[3]) for r in cursor.execute(
+        "SELECT pitcher_name, COALESCE(k_modifier, 1.0), COALESCE(f5_run_modifier, 1.0), COALESCE(appearance_count, 0) FROM Pitcher_Modifiers"
+    ).fetchall()}
 
     try:
-        umpire_mods = {r[0]: (r[1], r[2], r[3]) for r in cursor.execute("SELECT game_pk, COALESCE(run_modifier, 1.00), COALESCE(umpire_locked, 0), COALESCE(home_plate_umpire, 'TBD') FROM Daily_Umpires").fetchall()}
+        umpire_mods = {r[0]: (r[1], r[2], r[3]) for r in cursor.execute(
+            "SELECT game_pk, COALESCE(run_modifier, 1.00), COALESCE(umpire_locked, 0), COALESCE(home_plate_umpire, 'TBD') FROM Daily_Umpires"
+        ).fetchall()}
     except Exception:
         umpire_mods = {}
 
     cursor.execute('''
         SELECT game_pk, away_team, home_team, away_pitcher, home_pitcher, 
-               COALESCE(air_density, 1.225), COALESCE(uv_modifier, 1.00)
+               COALESCE(air_density, 1.225), COALESCE(uv_modifier, 5.00)
         FROM Daily_Lineups 
         WHERE status != "Final" AND game_pk NOT IN (SELECT game_pk FROM Post_Match_Analysis)
     ''')
@@ -249,17 +271,27 @@ def run_ultimate_monte_carlo():
     it = 50000
     dispersion = 1.35
 
-    for pk, away, home, away_p, home_p, rho, uv in games:
+    for pk, away, home, away_p, home_p, rho, uv_raw in games:
         rng = np.random.default_rng(seed=int(pk))
 
         a_sp_last = away_p.split(' ')[-1] if away_p and away_p != "TBD" else ""
         h_sp_last = home_p.split(' ')[-1] if home_p and home_p != "TBD" else ""
 
-        a_sp_metric = pitcher_metrics.get(a_sp_last, 4.20)
-        h_sp_metric = pitcher_metrics.get(h_sp_last, 4.20)
+        a_sp_metric, a_sp_throws = pitcher_data.get(a_sp_last, (4.20, 'R'))
+        h_sp_metric, h_sp_throws = pitcher_data.get(h_sp_last, (4.20, 'R'))
+
+        # Platoon-Adjusted Base Runs
+        away_rhp, away_lhp = platoon_ops.get(away, (0.720, 0.720))
+        home_rhp, home_lhp = platoon_ops.get(home, (0.720, 0.720))
+
+        a_platoon_ops = away_lhp if h_sp_throws == 'L' else away_rhp
+        h_platoon_ops = home_lhp if a_sp_throws == 'L' else home_rhp
 
         a_base_runs = team_bsr.get(away, (team_ops.get(away, 0.720) / 0.720) * 4.50)
         h_base_runs = team_bsr.get(home, (team_ops.get(home, 0.720) / 0.720) * 4.50)
+
+        a_sp_matchup_runs = a_base_runs * (a_platoon_ops / 0.720)
+        h_sp_matchup_runs = h_base_runs * (h_platoon_ops / 0.720)
 
         # Team Modifiers with Bayesian Shrinkage
         a_off_mod_raw, a_pitch_mod_raw, a_team_n = dynamic_mods.get(away, (1.0, 1.0, 0))
@@ -294,9 +326,13 @@ def run_ultimate_monte_carlo():
         w_h_p = min(1.0, h_p_n / 10.0)
         h_p_run_mod = w_h_p * h_p_run_mod_raw + (1.0 - w_h_p) * 1.0
 
+        # Environmental & Atmospheric Scaling
         park_mult = park_mods.get(home, 1.00)
         air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
-        uv_mult = uv or 1.00
+        
+        # Calibrated Visual Glare (Contrast Modifier Centered at 5.0 UV)
+        uv_glare_mult = 1.000 + (np.clip(uv_raw, 1.0, 11.0) - 5.0) * 0.005
+
         ump_mod, ump_locked, ump_name = umpire_mods.get(pk, (1.00, 0, 'TBD'))
         ump_badge = f"🔒 {ump_name}" if ump_locked == 1 and ump_name != "Unknown / TBD" else "⏳ TBD"
 
@@ -304,9 +340,19 @@ def run_ultimate_monte_carlo():
         h_pen_fatigue = bullpen_fatigue.get(home, 1.00)
         a_circadian_penalty = circadian_drag.get(away, 0.00)
 
-        # Expected Runs Formulation
-        exp_away_runs = max(0.2, ((a_base_runs * a_off_mod * 0.55 * (h_sp_metric / 4.20) * h_p_run_mod) + (a_base_runs * a_off_mod * 0.45 * h_pen_fatigue * h_pitch_mod)) * park_mult * air_drag_mult * uv_mult * ump_mod - a_circadian_penalty)
-        exp_home_runs = max(0.2, ((h_base_runs * h_off_mod * 0.55 * (a_sp_metric / 4.20) * a_p_run_mod) + (h_base_runs * h_off_mod * 0.45 * a_pen_fatigue * a_pitch_mod)) * park_mult * air_drag_mult * uv_mult * ump_mod)
+        # Expected Runs Formulation (55% Starter with Platoon / 45% Bullpen Fatigue)
+        exp_away_runs = max(
+            0.2, 
+            ((a_sp_matchup_runs * a_off_mod * 0.55 * (h_sp_metric / 4.20) * h_p_run_mod) + 
+             (a_base_runs * a_off_mod * 0.45 * h_pen_fatigue * h_pitch_mod)) 
+            * park_mult * air_drag_mult * uv_glare_mult * ump_mod - a_circadian_penalty
+        )
+        exp_home_runs = max(
+            0.2, 
+            ((h_sp_matchup_runs * h_off_mod * 0.55 * (a_sp_metric / 4.20) * a_p_run_mod) + 
+             (h_base_runs * h_off_mod * 0.45 * a_pen_fatigue * a_pitch_mod)) 
+            * park_mult * air_drag_mult * uv_glare_mult * ump_mod
+        )
 
         va, vh = max(exp_away_runs + 0.01, exp_away_runs * dispersion), max(exp_home_runs + 0.01, exp_home_runs * dispersion)
         pa, ph = max(0.01, min(0.99, exp_away_runs / va)), max(0.01, min(0.99, exp_home_runs / vh))
