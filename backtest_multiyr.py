@@ -112,12 +112,12 @@ def run_backtest_sweep(years_back=1):
             f5_run_modifier REAL DEFAULT 1.0, appearance_count INTEGER DEFAULT 0, last_updated TEXT
         );
         CREATE TABLE IF NOT EXISTS Bullpen_Fatigue (
-            team_name TEXT PRIMARY KEY, fatigue_multiplier REAL DEFAULT 1.00, last_updated TEXT
+            team_name TEXT PRIMARY KEY, fatigue_multiplier REAL DEFAULT 1.00, 
+            rolling_ip_3d REAL DEFAULT 8.0, last_updated TEXT
         );
     ''')
     conn.commit()
 
-    # Ingest baseline stats caches
     pitcher_stats = {r[0]: (r[1], r[2]) for r in cursor.execute(
         "SELECT last_name, COALESCE(xfip, est_era, 4.20), COALESCE(throws, 'R') FROM Pitcher_Stats"
     ).fetchall()}
@@ -130,9 +130,11 @@ def run_backtest_sweep(years_back=1):
     current_date = start_date
 
     total_games, correct_predictions = 0, 0
+    team_recent_workload = {}
 
     while current_date <= end_date:
         date_str = current_date.strftime('%Y-%m-%d')
+        curr_dt = current_date
         current_date += timedelta(days=1)
         
         day_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&gameType=R&hydrate=probablePitcher,linescore"
@@ -182,10 +184,20 @@ def run_backtest_sweep(years_back=1):
                 cursor.execute('SELECT f5_run_modifier, appearance_count FROM Pitcher_Modifiers WHERE pitcher_name = ?', (away_pitcher,))
                 a_p_row = cursor.fetchone() or (1.0, 0)
 
-                cursor.execute('SELECT fatigue_multiplier FROM Bullpen_Fatigue WHERE team_name = ?', (home_team,))
-                h_bp_fatigue = (cursor.fetchone() or (1.0,))[0]
-                cursor.execute('SELECT fatigue_multiplier FROM Bullpen_Fatigue WHERE team_name = ?', (away_team,))
-                a_bp_fatigue = (cursor.fetchone() or (1.0,))[0]
+                # Physical Bullpen Workload
+                def compute_sim_workload(team_name):
+                    recent = team_recent_workload.get(team_name, [])
+                    valid = [r for r in recent if 1 <= (curr_dt - r[0]).days <= 3]
+                    if not valid:
+                        return 1.00
+                    tot_ip = sum(r[1] for r in valid)
+                    played_yest = any((curr_dt - r[0]).days == 1 for r in valid)
+                    strain = (tot_ip - 8.0) * 0.025
+                    b2b = 0.03 if (played_yest and len(valid) >= 2) else 0.00
+                    return round(float(np.clip(1.00 + strain + b2b, 0.85, 1.25)), 4)
+
+                h_bp_fatigue = compute_sim_workload(home_team)
+                a_bp_fatigue = compute_sim_workload(away_team)
 
                 # Bayesian Shrinkage
                 w_h_t = min(1.0, h_team_row[2] / 15.0)
@@ -200,7 +212,7 @@ def run_backtest_sweep(years_back=1):
                 h_p_mod = w_h_p * h_p_row[0] + (1.0 - w_h_p) * 1.0
                 a_p_mod = w_a_p * a_p_row[0] + (1.0 - w_a_p) * 1.0
 
-                # Matchup & Environmental Adjustments
+                # Matchup adjustments
                 a_sp_ln = away_pitcher.split()[-1] if " " in away_pitcher else away_pitcher
                 h_sp_ln = home_pitcher.split()[-1] if " " in home_pitcher else home_pitcher
                 _, a_throws = pitcher_stats.get(a_sp_ln, (4.20, 'R'))
@@ -235,7 +247,11 @@ def run_backtest_sweep(years_back=1):
                 total_games += 1
                 correct_predictions += is_correct
 
-                # Error-based EWMA updates (Starter F5)
+                # Log physical bullpen workload
+                team_recent_workload.setdefault(home_team, []).append((curr_dt, 4.0 + max(0.0, (a_late - 2) * 0.25)))
+                team_recent_workload.setdefault(away_team, []).append((curr_dt, 4.0 + max(0.0, (h_late - 2) * 0.25)))
+
+                # Starting Pitcher F5 EWMA Updates
                 pred_h_f5, pred_a_f5 = pred_h_runs * 0.55, pred_a_runs * 0.55
                 for sp, p_pred, p_act, old_m, count in [(home_pitcher, pred_a_f5, a_f5, h_p_row[0], h_p_row[1]), 
                                                         (away_pitcher, pred_h_f5, h_f5, a_p_row[0], a_p_row[1])]:
@@ -247,7 +263,7 @@ def run_backtest_sweep(years_back=1):
                         VALUES (?, 1.0, ?, ?, ?)
                     ''', (sp, round(new_mod, 4), count + 1, date_str))
 
-                # Error-based EWMA updates (Late-Inning Team Modifiers)
+                # Team Offense & Pitching Late-Inning Updates
                 pred_h_late, pred_a_late = pred_h_runs * 0.45, pred_a_runs * 0.45
                 for tm, pred_l, act_l, is_off, old_off, old_pit, n_cnt in [
                     (home_team, pred_h_late, h_late, True, h_team_row[0], h_team_row[1], h_team_row[2]),
@@ -270,16 +286,6 @@ def run_backtest_sweep(years_back=1):
                             VALUES (?, ?, ?, ?, ?)
                         ''', (tm, round(old_off, 4), round(new_pit, 4), n_cnt + 1, date_str))
 
-                # Error-based EWMA updates (Bullpen Fatigue)
-                for tm, pred_l, act_l, old_fatigue in [(away_team, pred_h_late, h_late, a_bp_fatigue), (home_team, pred_a_late, a_late, h_bp_fatigue)]:
-                    err = act_l - pred_l
-                    alpha = min(0.10, 0.02 + (abs(err) * 0.008))
-                    new_fatigue = max(0.80, min(1.25, alpha * (old_fatigue + err * 0.04) + (1.0 - alpha) * old_fatigue))
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO Bullpen_Fatigue (team_name, fatigue_multiplier, last_updated)
-                        VALUES (?, ?, ?)
-                    ''', (tm, round(new_fatigue, 4), date_str))
-                
                 cursor.execute('''
                     INSERT OR REPLACE INTO Post_Match_Analysis (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
