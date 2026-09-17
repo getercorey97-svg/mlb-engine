@@ -1,226 +1,184 @@
 import sqlite3
 import requests
+import numpy as np
 from datetime import datetime, timedelta
 
-def update_bullpen_fatigue(cursor, team_name, predicted_late, actual_late):
-    """Updates bullpen fatigue strictly against late-inning errors using EWMA."""
-    if not team_name or team_name == 'Unknown':
-        return
-    error_delta = actual_late - predicted_late
-    cursor.execute('SELECT fatigue_multiplier FROM Bullpen_Fatigue WHERE team_name = ?', (team_name,))
-    res = cursor.fetchone()
-    fatigue = res[0] if res else 1.00
-    
-    alpha = min(0.30, 0.10 + (abs(error_delta) * 0.02))
-    target_fatigue = fatigue + (error_delta * 0.15)
-    new_fatigue = max(0.70, min(1.30, alpha * target_fatigue + (1.0 - alpha) * fatigue))
-    
-    cursor.execute('''
-        INSERT OR REPLACE INTO Bullpen_Fatigue (team_name, fatigue_multiplier)
-        VALUES (?, ?)
-    ''', (team_name, new_fatigue))
-    print(f"  [EWMA Bullpen] {team_name} Fatigue: {fatigue:.3f} -> {new_fatigue:.3f}")
+def ensure_post_match_schema(conn):
+    cursor = conn.cursor()
+    cursor.executescript('''
+        CREATE TABLE IF NOT EXISTS Post_Match_Analysis (
+            game_pk INTEGER PRIMARY KEY,
+            actual_winner TEXT,
+            home_score INTEGER,
+            away_score INTEGER,
+            home_f5_score INTEGER,
+            away_f5_score INTEGER,
+            model_correct INTEGER,
+            processed_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS Dynamic_Modifiers (
+            team_name TEXT PRIMARY KEY,
+            offensive_modifier REAL DEFAULT 1.0,
+            pitching_modifier REAL DEFAULT 1.0,
+            sample_count INTEGER DEFAULT 1,
+            last_updated TEXT
+        );
+        CREATE TABLE IF NOT EXISTS Pitcher_Modifiers (
+            pitcher_name TEXT PRIMARY KEY,
+            k_modifier REAL DEFAULT 1.0,
+            f5_run_modifier REAL DEFAULT 1.0,
+            sample_count INTEGER DEFAULT 1,
+            last_updated TEXT
+        );
+        CREATE TABLE IF NOT EXISTS Bullpen_Modifiers (
+            team_name TEXT PRIMARY KEY,
+            fatigue_modifier REAL DEFAULT 1.0,
+            last_updated TEXT
+        );
+    ''')
+    conn.commit()
 
-def update_dynamic_weights(cursor, name, predicted_runs, actual_runs, is_offense=True, is_pitcher=False):
-    """Calculates Error Delta and applies an Adaptive EWMA Learning Rate with Bayesian Shrinkage tracking."""
-    if not name or name == 'Unknown':
-        return
-
-    error_delta = actual_runs - predicted_runs
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    # EWMA smoothing factor alpha (higher error delta increases responsiveness)
-    alpha = min(0.30, 0.10 + (abs(error_delta) * 0.02))
-    
-    if is_pitcher:
-        cursor.execute('SELECT f5_run_modifier, k_modifier, appearance_count FROM Pitcher_Modifiers WHERE pitcher_name = ?', (name,))
-        result = cursor.fetchone()
-        mod = result[0] if result else 1.0
-        k_mod = result[1] if result else 1.0
-        count = result[2] if result else 0
-        
-        target_mod = mod + (error_delta * 0.15)
-        new_mod = max(0.60, min(1.40, alpha * target_mod + (1.0 - alpha) * mod))
-        new_count = count + 1
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO Pitcher_Modifiers (pitcher_name, k_modifier, f5_run_modifier, appearance_count, last_updated) 
-            VALUES (?, ?, ?, ?, ?)
-        ''', (name, k_mod, new_mod, new_count, current_time))
-        print(f"  [EWMA Pitcher] {name} F5 SP Modifier: {mod:.3f} -> {new_mod:.3f} (N={new_count}, alpha={alpha:.3f})")
-        return
-
-    cursor.execute('SELECT offensive_modifier, pitching_modifier, appearance_count FROM Dynamic_Modifiers WHERE team_name = ?', (name,))
-    result = cursor.fetchone()
-    if not result:
-        off_mod, pitch_mod, count = 1.0, 1.0, 0
-        cursor.execute('''
-            INSERT OR IGNORE INTO Dynamic_Modifiers (team_name, offensive_modifier, pitching_modifier, appearance_count, last_updated)
-            VALUES (?, 1.0, 1.0, 0, ?)
-        ''', (name, current_time))
-    else:
-        off_mod, pitch_mod, count = result
-    
-    new_count = count + 1
-    if is_offense:
-        target_mod = off_mod + (error_delta * 0.15)
-        new_off_mod = max(0.60, min(1.40, alpha * target_mod + (1.0 - alpha) * off_mod))
-        cursor.execute('UPDATE Dynamic_Modifiers SET offensive_modifier = ?, appearance_count = ?, last_updated = ? WHERE team_name = ?', (new_off_mod, new_count, current_time, name))
-        print(f"  [EWMA Team] {name} Offense: {off_mod:.3f} -> {new_off_mod:.3f} (N={new_count}, alpha={alpha:.3f})")
-    else:
-        target_mod = pitch_mod + (error_delta * 0.15)
-        new_pitch_mod = max(0.60, min(1.40, alpha * target_mod + (1.0 - alpha) * pitch_mod))
-        cursor.execute('UPDATE Dynamic_Modifiers SET pitching_modifier = ?, appearance_count = ?, last_updated = ? WHERE team_name = ?', (new_pitch_mod, new_count, current_time, name))
-        print(f"  [EWMA Team] {name} Pitching: {pitch_mod:.3f} -> {new_pitch_mod:.3f} (N={new_count}, alpha={alpha:.3f})")
+def calculate_ewma(current_val, target_val, n_games, base_alpha=0.10):
+    # Dynamic alpha based on sample size and error delta
+    alpha = min(0.20, max(base_alpha, 2.0 / (n_games + 1) + 0.05))
+    updated_val = (alpha * target_val) + ((1.0 - alpha) * current_val)
+    return round(float(np.clip(updated_val, 0.50, 1.50)), 3), round(alpha, 3)
 
 def run_post_match_analysis():
     print("Executing Factual Post-Mortem (Full Game & F5 Linescores)...")
-    dates_to_check = [(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'), datetime.now().strftime('%Y-%m-%d')]
-    
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL;")
-    cursor.execute("PRAGMA busy_timeout=10000;")
-    
-    cursor.executescript('''
-    CREATE TABLE IF NOT EXISTS Post_Match_Analysis (
-        game_pk INTEGER PRIMARY KEY, actual_winner TEXT, home_score INTEGER, away_score INTEGER, 
-        home_f5_score INTEGER, away_f5_score INTEGER, model_correct INTEGER, processed_at TEXT
-    );
-    CREATE TABLE IF NOT EXISTS Pitcher_Modifiers (
-        pitcher_name TEXT PRIMARY KEY, k_modifier REAL DEFAULT 1.0, f5_run_modifier REAL DEFAULT 1.0, appearance_count INTEGER DEFAULT 0, last_updated TEXT
-    );
-    CREATE TABLE IF NOT EXISTS Dynamic_Modifiers (
-        team_name TEXT PRIMARY KEY, offensive_modifier REAL DEFAULT 1.0, pitching_modifier REAL DEFAULT 1.0, appearance_count INTEGER DEFAULT 0, last_updated TEXT
-    );
-    CREATE TABLE IF NOT EXISTS Bullpen_Fatigue (
-        team_name TEXT PRIMARY KEY, fatigue_multiplier REAL DEFAULT 1.0
-    );
-    ''')
+    ensure_post_match_schema(conn)
 
-    for col in ["home_f5_score INTEGER", "away_f5_score INTEGER"]:
+    # Inspect games from the last 48 hours to capture completed linescores
+    target_dates = [
+        (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),
+        datetime.now().strftime('%Y-%m-%d')
+    ]
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    for date_str in target_dates:
+        url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&hydrate=probablePitcher,linescore"
         try:
-            cursor.execute(f"ALTER TABLE Post_Match_Analysis ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
-    
-    for date_str in dates_to_check:
-        url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}&hydrate=linescore,probablePitcher"
-        try:
-            res = requests.get(url, timeout=10)
-            res.raise_for_status()
-            response = res.json()
+            res = requests.get(url, timeout=15).json()
         except Exception:
             continue
 
-        for date_data in response.get('dates', []):
+        for date_data in res.get('dates', []):
             for game in date_data.get('games', []):
-                game_pk = game['gamePk']
                 if game.get('status', {}).get('abstractGameState') != 'Final':
                     continue
-                
-                cursor.execute("SELECT game_pk FROM Post_Match_Analysis WHERE game_pk = ?", (game_pk,))
-                if cursor.fetchone():
-                    continue
 
-                teams = game.get('teams', {})
-                home_team = teams.get('home', {}).get('team', {}).get('name', 'Unknown Home Team')
-                away_team = teams.get('away', {}).get('team', {}).get('name', 'Unknown Away Team')
-                home_score = teams.get('home', {}).get('score', 0)
-                away_score = teams.get('away', {}).get('score', 0)
-                home_p = teams.get('home', {}).get('probablePitcher', {}).get('fullName', 'Unknown')
-                away_p = teams.get('away', {}).get('probablePitcher', {}).get('fullName', 'Unknown')
-                
+                game_pk = game['gamePk']
+                home_team = game['teams']['home']['team']['name']
+                away_team = game['teams']['away']['team']['name']
+                home_score = game['teams']['home'].get('score', 0)
+                away_score = game['teams']['away'].get('score', 0)
+
                 actual_winner = home_team if home_score > away_score else away_team
+
+                # Calculate F5 scores from linescore innings
+                innings = game.get('linescore', {}).get('innings', [])
+                h_f5 = sum(inn.get('home', {}).get('runs', 0) for inn in innings[:5])
+                a_f5 = sum(inn.get('away', {}).get('runs', 0) for inn in innings[:5])
+
+                home_sp = game['teams']['home'].get('probablePitcher', {}).get('fullName', 'Unknown Pitcher')
+                away_sp = game['teams']['away'].get('probablePitcher', {}).get('fullName', 'Unknown Pitcher')
+
+                # Winner Resolution with String Normalization
+                cursor.execute("SELECT home_prob, away_prob, home_team, away_team FROM Model_Forecasts WHERE game_pk = ?", (game_pk,))
+                forecast = cursor.fetchone()
                 
-                # F5 Linescore Extraction
-                linescore = game.get('linescore', {}).get('innings', [])
-                h_f5, a_f5 = 0, 0
-                for inning in linescore[:5]:
-                    h_f5 += inning.get('home', {}).get('runs') or 0
-                    a_f5 += inning.get('away', {}).get('runs') or 0
-                
-                # Late Inning (6th through 9th) Extraction
-                h_late, a_late = 0, 0
-                for inning in linescore[5:9]:
-                    h_late += inning.get('home', {}).get('runs') or 0
-                    a_late += inning.get('away', {}).get('runs') or 0
-                
-                try:
-                    cursor.execute('SELECT home_prob, away_prob, predicted_home_runs, predicted_away_runs FROM Model_Forecasts WHERE game_pk = ?', (game_pk,))
-                    fg_fc = cursor.fetchone()
-                except sqlite3.OperationalError:
-                    fg_fc = None
-                
-                try:
-                    cursor.execute('SELECT f5_exp_home_runs, f5_exp_away_runs FROM F5_Forecasts WHERE game_pk = ?', (game_pk,))
-                    f5_fc = cursor.fetchone()
-                except sqlite3.OperationalError:
-                    f5_fc = None
-                
-                model_correct = 0
-                if fg_fc:
-                    predicted_winner = home_team if fg_fc[0] > fg_fc[1] else away_team
-                    model_correct = 1 if predicted_winner == actual_winner else 0
-                    
-                    # Decoupled Multi-Target Loss Optimization:
-                    # Team offensive modifiers and bullpen fatigue weights optimize strictly against late-inning (6th through 9th) errors.
-                    pred_home_late = fg_fc[2] * 0.45
-                    pred_away_late = fg_fc[3] * 0.45
-                    
-                    update_dynamic_weights(cursor, home_team, pred_home_late, h_late, is_offense=True)
-                    update_dynamic_weights(cursor, away_team, pred_home_late, h_late, is_offense=False)
-                    update_dynamic_weights(cursor, away_team, pred_away_late, a_late, is_offense=True)
-                    update_dynamic_weights(cursor, home_team, pred_away_late, a_late, is_offense=False)
-                    
-                    update_bullpen_fatigue(cursor, away_team, pred_home_late, h_late)
-                    update_bullpen_fatigue(cursor, home_team, pred_away_late, a_late)
-                
-                if f5_fc:
-                    # Starting pitcher run modifiers strictly optimize against First 5 (F5) inning scoring errors
-                    update_dynamic_weights(cursor, home_p, f5_fc[1], a_f5, is_pitcher=True)
-                    update_dynamic_weights(cursor, away_p, f5_fc[0], h_f5, is_pitcher=True)
-                else:
-                    if fg_fc:
-                        pred_home_f5 = fg_fc[2] * 0.55
-                        pred_away_f5 = fg_fc[3] * 0.55
-                        update_dynamic_weights(cursor, home_p, pred_away_f5, a_f5, is_pitcher=True)
-                        update_dynamic_weights(cursor, away_p, pred_home_f5, h_f5, is_pitcher=True)
+                is_correct = 0
+                if forecast and forecast[0] is not None:
+                    h_prob, a_prob, f_home, f_away = forecast
+                    pred_winner = f_home if h_prob >= a_prob else f_away
+                    is_correct = 1 if pred_winner.strip().lower() == actual_winner.strip().lower() else 0
 
                 cursor.execute('''
-                    INSERT OR REPLACE INTO Post_Match_Analysis (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
+                    INSERT OR REPLACE INTO Post_Match_Analysis 
+                    (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (game_pk, actual_winner, home_score, away_score, h_f5, a_f5, model_correct, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                ''', (game_pk, actual_winner, home_score, away_score, h_f5, a_f5, is_correct, now_str))
 
-    # Print learning & remembering summary
-    cursor.execute("SELECT COUNT(*), AVG(f5_run_modifier) FROM Pitcher_Modifiers")
-    p_count, p_avg = cursor.fetchone()
-    p_avg = p_avg if p_avg is not None else 1.0
-    
-    cursor.execute("SELECT COUNT(*), AVG(offensive_modifier), AVG(pitching_modifier) FROM Dynamic_Modifiers")
-    t_count, t_off_avg, t_pit_avg = cursor.fetchone()
-    t_off_avg = t_off_avg if t_off_avg is not None else 1.0
-    t_pit_avg = t_pit_avg if t_pit_avg is not None else 1.0
-    
-    cursor.execute("SELECT COUNT(*), AVG(fatigue_multiplier) FROM Bullpen_Fatigue")
-    b_count, b_avg = cursor.fetchone()
-    b_avg = b_avg if b_avg is not None else 1.0
-    
-    cursor.execute("SELECT COUNT(*), SUM(model_correct) FROM Post_Match_Analysis")
-    total_games, correct_games = cursor.fetchone()
-    accuracy = (correct_games / total_games * 100) if total_games and total_games > 0 else 0.0
-    
-    print("\n=== ENGINE LEARNING & MEMORY STATUS ===")
-    print(f"  Pitchers Remembered: {p_count or 0} (Avg F5 Modifier: {p_avg:.3f})")
-    print(f"  Teams Remembered:    {t_count or 0} (Avg Offense: {t_off_avg:.3f}, Avg Pitching: {t_pit_avg:.3f})")
-    print(f"  Bullpens Tracked:    {b_count or 0} (Avg Fatigue: {b_avg:.3f})")
-    print(f"  Historical Accuracy: {accuracy:.2f}% ({correct_games or 0}/{total_games or 0} games correct)")
-    print("=======================================\n")
+                # Team Offense & Pitching EWMA Evolution
+                for team, scored, allowed in [(home_team, home_score, away_score), (away_team, away_score, home_score)]:
+                    cursor.execute("SELECT offensive_modifier, pitching_modifier, sample_count FROM Dynamic_Modifiers WHERE team_name = ?", (team,))
+                    row = cursor.fetchone()
+                    off_mod, pitch_mod, n_count = row if row else (1.000, 1.000, 1)
+                    n_count += 1
+
+                    target_off = 1.0 + ((scored - 4.3) * 0.04)
+                    target_pitch = 1.0 + ((allowed - 4.3) * 0.04)
+
+                    new_off, a_off = calculate_ewma(off_mod, target_off, n_count)
+                    new_pitch, a_pitch = calculate_ewma(pitch_mod, target_pitch, n_count)
+
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO Dynamic_Modifiers 
+                        (team_name, offensive_modifier, pitching_modifier, sample_count, last_updated)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (team, new_off, new_pitch, n_count, now_str))
+
+                    print(f"  [EWMA Team] {team} Offense: {off_mod:.3f} -> {new_off:.3f} (N={n_count}, alpha={a_off})")
+                    print(f"  [EWMA Team] {team} Pitching: {pitch_mod:.3f} -> {new_pitch:.3f} (N={n_count}, alpha={a_pitch})")
+
+                # Pitcher F5 SP Modifier Evolution
+                for pitcher, runs_allowed in [(home_sp, a_f5), (away_sp, h_f5)]:
+                    if pitcher == 'Unknown Pitcher':
+                        continue
+                    cursor.execute("SELECT f5_run_modifier, sample_count FROM Pitcher_Modifiers WHERE pitcher_name = ?", (pitcher,))
+                    p_row = cursor.fetchone()
+                    sp_mod, p_count = p_row if p_row else (1.000, 1)
+                    p_count += 1
+
+                    target_sp = 1.0 + ((runs_allowed - 2.2) * 0.06)
+                    new_sp, sp_alpha = calculate_ewma(sp_mod, target_sp, p_count)
+
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO Pitcher_Modifiers 
+                        (pitcher_name, k_modifier, f5_run_modifier, sample_count, last_updated)
+                        VALUES (?, 1.0, ?, ?, ?)
+                    ''', (pitcher, new_sp, p_count, now_str))
+                    print(f"  [EWMA Pitcher] {pitcher} F5 SP Modifier: {sp_mod:.3f} -> {new_sp:.3f} (N={p_count}, alpha={sp_alpha})")
 
     conn.commit()
-    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+
+    # --- Aggregation and Status Output ---
+    cursor.execute("SELECT COUNT(*), AVG(f5_run_modifier) FROM Pitcher_Modifiers")
+    pitchers_count, avg_f5_mod = cursor.fetchone()
+    avg_f5_mod = avg_f5_mod or 1.000
+
+    cursor.execute("SELECT COUNT(*), AVG(offensive_modifier), AVG(pitching_modifier) FROM Dynamic_Modifiers")
+    teams_count, avg_off, avg_pitch = cursor.fetchone()
+    avg_off, avg_pitch = avg_off or 1.000, avg_pitch or 1.000
+
+    cursor.execute("SELECT COUNT(*), AVG(fatigue_modifier) FROM Bullpen_Modifiers")
+    bp_row = cursor.fetchone()
+    bullpens_count = bp_row[0] if bp_row else 30
+    avg_bp = bp_row[1] if bp_row and bp_row[1] else 1.000
+
+    # Strict non-negative accuracy calculation
+    cursor.execute('''
+        SELECT 
+            SUM(CASE WHEN model_correct = 1 THEN 1 ELSE 0 END),
+            COUNT(*)
+        FROM Post_Match_Analysis
+        WHERE actual_winner IS NOT NULL
+    ''')
+    correct_row = cursor.fetchone()
+    correct_games = correct_row[0] if correct_row and correct_row[0] is not None else 0
+    total_games = correct_row[1] if correct_row and correct_row[1] is not None else 0
+    accuracy = (correct_games / total_games) if total_games > 0 else 0.0
+
+    print("\n=== ENGINE LEARNING & MEMORY STATUS ===")
+    print(f"  Pitchers Remembered: {pitchers_count} (Avg F5 Modifier: {avg_f5_mod:.3f})")
+    print(f"  Teams Remembered:    {teams_count} (Avg Offense: {avg_off:.3f}, Avg Pitching: {avg_pitch:.3f})")
+    print(f"  Bullpens Tracked:    {bullpens_count} (Avg Fatigue: {avg_bp:.3f})")
+    print(f"  Historical Accuracy: {accuracy:.2%} ({correct_games}/{total_games} games correct)")
+    print("=======================================\n")
+
     conn.close()
-    print("Post-match analysis & F5 micro-evolution completed.")
 
 if __name__ == "__main__":
     run_post_match_analysis()
