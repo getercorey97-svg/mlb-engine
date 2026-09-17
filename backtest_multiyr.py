@@ -1,11 +1,39 @@
 import sqlite3
 import requests
 import warnings
+import numpy as np
 from datetime import datetime, timedelta
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-STADIUMS = {
+STADIUM_RHO_BASELINES = {
+    "Colorado Rockies": 1.050, "Arizona Diamondbacks": 1.075, "Texas Rangers": 1.135,
+    "Atlanta Braves": 1.145, "Minnesota Twins": 1.150, "Cincinnati Reds": 1.160,
+    "Detroit Tigers": 1.162, "Milwaukee Brewers": 1.163, "Chicago Cubs": 1.166,
+    "Chicago White Sox": 1.167, "St. Louis Cardinals": 1.168, "Washington Nationals": 1.172,
+    "Tampa Bay Rays": 1.175, "Miami Marlins": 1.185, "New York Yankees": 1.188,
+    "Boston Red Sox": 1.195, "Baltimore Orioles": 1.198, "San Francisco Giants": 1.205,
+    "Los Angeles Dodgers": 1.210, "Los Angeles Angels": 1.212, "New York Mets": 1.215,
+    "Philadelphia Phillies": 1.218, "San Diego Padres": 1.225, "Seattle Mariners": 1.225,
+    "Oakland Athletics": 1.220, "Athletics": 1.220, "Houston Astros": 1.180,
+    "Kansas City Royals": 1.155, "Pittsburgh Pirates": 1.170, "Cleveland Guardians": 1.165,
+    "Toronto Blue Jays": 1.190, "Default": 1.225
+}
+
+DEFAULT_PARK_FACTORS = {
+    "Colorado Rockies": 1.38, "Boston Red Sox": 1.09, "Cincinnati Reds": 1.08,
+    "Kansas City Royals": 1.05, "Texas Rangers": 1.04, "Arizona Diamondbacks": 1.04,
+    "Philadelphia Phillies": 1.03, "Washington Nationals": 1.02, "Atlanta Braves": 1.01,
+    "Baltimore Orioles": 1.01, "Chicago Cubs": 1.01, "Los Angeles Angels": 1.00,
+    "Milwaukee Brewers": 1.00, "Minnesota Twins": 1.00, "Toronto Blue Jays": 1.00,
+    "Chicago White Sox": 0.99, "Houston Astros": 0.99, "Pittsburgh Pirates": 0.98,
+    "St. Louis Cardinals": 0.98, "Detroit Tigers": 0.97, "New York Yankees": 0.97,
+    "Cleveland Guardians": 0.96, "Miami Marlins": 0.95, "Oakland Athletics": 0.95,
+    "San Francisco Giants": 0.95, "Tampa Bay Rays": 0.94, "New York Mets": 0.94,
+    "Los Angeles Dodgers": 0.93, "San Diego Padres": 0.92, "Seattle Mariners": 0.91
+}
+
+STADIUM_COORDS = {
     "Arizona Diamondbacks": (33.4453, -112.0667), "Atlanta Braves": (33.8907, -84.4677),
     "Baltimore Orioles": (39.2839, -76.6216), "Boston Red Sox": (42.3467, -71.0972),
     "Chicago Cubs": (41.9484, -87.6553), "Chicago White Sox": (41.8299, -87.6338),
@@ -25,7 +53,7 @@ STADIUMS = {
 }
 
 def get_historical_atmosphere(team_name, date_str):
-    coords = STADIUMS.get(team_name, STADIUMS["Default"])
+    coords = STADIUM_COORDS.get(team_name, STADIUM_COORDS["Default"])
     url = "https://archive-api.open-meteo.com/v1/archive"
     params = {
         "latitude": coords[0], "longitude": coords[1],
@@ -47,26 +75,10 @@ def get_historical_atmosphere(team_name, date_str):
         temp_k = temp_c + 273.15
         pressure_pa = pressure_hpa * 100
         density = round(pressure_pa / (287.05 * temp_k), 4)
-        uv_modifier = 1.03 if cloud_cover > 70 else 1.00
-        return density, uv_modifier
+        uv_raw = 3.0 if cloud_cover > 70 else 7.0
+        return density, uv_raw
     except Exception:
-        return 1.225, 1.00
-
-def update_dynamic_weights(cursor, name, predicted_runs, actual_runs, is_offense=True):
-    error_delta = actual_runs - predicted_runs
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    adaptive_lr = min(0.15, 0.03 + (abs(error_delta) * 0.015))
-    
-    cursor.execute('SELECT offensive_modifier, pitching_modifier FROM Dynamic_Modifiers WHERE team_name = ?', (name,))
-    result = cursor.fetchone()
-    off_mod, pitch_mod = result if result else (1.0, 1.0)
-    
-    if is_offense:
-        new_off_mod = max(0.53, min(1.47, off_mod + (error_delta * adaptive_lr)))
-        cursor.execute('INSERT OR REPLACE INTO Dynamic_Modifiers (team_name, offensive_modifier, pitching_modifier, last_updated) VALUES (?, ?, ?, ?)', (name, new_off_mod, pitch_mod, current_time))
-    else:
-        new_pitch_mod = max(0.53, min(1.47, pitch_mod + (error_delta * adaptive_lr)))
-        cursor.execute('INSERT OR REPLACE INTO Dynamic_Modifiers (team_name, offensive_modifier, pitching_modifier, last_updated) VALUES (?, ?, ?, ?)', (name, off_mod, new_pitch_mod, current_time))
+        return STADIUM_RHO_BASELINES.get(team_name, 1.225), 5.0
 
 def run_backtest_sweep(years_back=1):
     print(f"Initializing SOTA Multi-Year Backtest Engine ({years_back}-Year Historical Sweep)...")
@@ -84,22 +96,39 @@ def run_backtest_sweep(years_back=1):
         );
         CREATE TABLE IF NOT EXISTS Post_Match_Analysis (
             game_pk INTEGER PRIMARY KEY, actual_winner TEXT, home_score INTEGER, 
-            away_score INTEGER, model_correct INTEGER, processed_at TEXT
+            away_score INTEGER, home_f5_score INTEGER, away_f5_score INTEGER,
+            model_correct INTEGER, processed_at TEXT
         );
         CREATE TABLE IF NOT EXISTS Daily_Lineups (
             game_pk INTEGER PRIMARY KEY, game_date TEXT, away_team TEXT, home_team TEXT, 
             away_pitcher TEXT, home_pitcher TEXT, air_density REAL, uv_modifier REAL, status TEXT
         );
         CREATE TABLE IF NOT EXISTS Dynamic_Modifiers (
-            team_name TEXT PRIMARY KEY, offensive_modifier REAL DEFAULT 1.0, pitching_modifier REAL DEFAULT 1.0, last_updated TEXT
+            team_name TEXT PRIMARY KEY, offensive_modifier REAL DEFAULT 1.0, 
+            pitching_modifier REAL DEFAULT 1.0, appearance_count INTEGER DEFAULT 0, last_updated TEXT
+        );
+        CREATE TABLE IF NOT EXISTS Pitcher_Modifiers (
+            pitcher_name TEXT PRIMARY KEY, k_modifier REAL DEFAULT 1.0, 
+            f5_run_modifier REAL DEFAULT 1.0, appearance_count INTEGER DEFAULT 0, last_updated TEXT
+        );
+        CREATE TABLE IF NOT EXISTS Bullpen_Fatigue (
+            team_name TEXT PRIMARY KEY, fatigue_multiplier REAL DEFAULT 1.00, last_updated TEXT
         );
     ''')
     conn.commit()
 
+    # Ingest baseline stats caches
+    pitcher_stats = {r[0]: (r[1], r[2]) for r in cursor.execute(
+        "SELECT last_name, COALESCE(xfip, est_era, 4.20), COALESCE(throws, 'R') FROM Pitcher_Stats"
+    ).fetchall()}
+    platoon_ops = {r[0]: (r[1], r[2]) for r in cursor.execute(
+        "SELECT team_name, COALESCE(ops_vs_rhp, 0.720), COALESCE(ops_vs_lhp, 0.720) FROM Team_Offense"
+    ).fetchall()}
+
     end_date = datetime.now() - timedelta(days=1)
     start_date = end_date - timedelta(days=365 * years_back)
-    
     current_date = start_date
+
     total_games, correct_predictions = 0, 0
 
     while current_date <= end_date:
@@ -129,45 +158,132 @@ def run_backtest_sweep(years_back=1):
                 home_pitcher = game['teams']['home'].get('probablePitcher', {}).get('fullName', 'Unknown')
                 away_pitcher = game['teams']['away'].get('probablePitcher', {}).get('fullName', 'Unknown')
                 
-                air_density, uv_modifier = get_historical_atmosphere(home_team, date_str)
+                innings = game.get('linescore', {}).get('innings', [])
+                h_f5 = sum(inn.get('home', {}).get('runs') or 0 for inn in innings[:5])
+                a_f5 = sum(inn.get('away', {}).get('runs') or 0 for inn in innings[:5])
+                h_late = max(0, home_score - h_f5)
+                a_late = max(0, away_score - a_f5)
+
+                air_density, uv_raw = get_historical_atmosphere(home_team, date_str)
                 
                 cursor.execute('''
                     INSERT OR REPLACE INTO Daily_Lineups (game_pk, game_date, away_team, home_team, away_pitcher, home_pitcher, air_density, uv_modifier, status)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (game_pk, date_str, away_team, home_team, away_pitcher, home_pitcher, air_density, uv_modifier, 'Final'))
+                ''', (game_pk, date_str, away_team, home_team, away_pitcher, home_pitcher, air_density, uv_raw, 'Final'))
                 
-                cursor.execute('SELECT offensive_modifier, pitching_modifier FROM Dynamic_Modifiers WHERE team_name = ?', (home_team,))
-                h_mod = cursor.fetchone() or (1.0, 1.0)
-                cursor.execute('SELECT offensive_modifier, pitching_modifier FROM Dynamic_Modifiers WHERE team_name = ?', (away_team,))
-                a_mod = cursor.fetchone() or (1.0, 1.0)
-                
-                pred_h_runs = round(4.2 * h_mod[0] * a_mod[1] * (1.225 / air_density) * uv_modifier, 2)
-                pred_a_runs = round(4.0 * a_mod[0] * h_mod[1] * (1.225 / air_density) * uv_modifier, 2)
-                
-                home_prob = 0.52 if pred_h_runs > pred_a_runs else 0.48
-                away_prob = round(1.0 - home_prob, 2)
-                
+                # Fetch learning states
+                cursor.execute('SELECT offensive_modifier, pitching_modifier, appearance_count FROM Dynamic_Modifiers WHERE team_name = ?', (home_team,))
+                h_team_row = cursor.fetchone() or (1.0, 1.0, 0)
+                cursor.execute('SELECT offensive_modifier, pitching_modifier, appearance_count FROM Dynamic_Modifiers WHERE team_name = ?', (away_team,))
+                a_team_row = cursor.fetchone() or (1.0, 1.0, 0)
+
+                cursor.execute('SELECT f5_run_modifier, appearance_count FROM Pitcher_Modifiers WHERE pitcher_name = ?', (home_pitcher,))
+                h_p_row = cursor.fetchone() or (1.0, 0)
+                cursor.execute('SELECT f5_run_modifier, appearance_count FROM Pitcher_Modifiers WHERE pitcher_name = ?', (away_pitcher,))
+                a_p_row = cursor.fetchone() or (1.0, 0)
+
+                cursor.execute('SELECT fatigue_multiplier FROM Bullpen_Fatigue WHERE team_name = ?', (home_team,))
+                h_bp_fatigue = (cursor.fetchone() or (1.0,))[0]
+                cursor.execute('SELECT fatigue_multiplier FROM Bullpen_Fatigue WHERE team_name = ?', (away_team,))
+                a_bp_fatigue = (cursor.fetchone() or (1.0,))[0]
+
+                # Bayesian Shrinkage
+                w_h_t = min(1.0, h_team_row[2] / 15.0)
+                w_a_t = min(1.0, a_team_row[2] / 15.0)
+                h_off = w_h_t * h_team_row[0] + (1.0 - w_h_t) * 1.0
+                h_pitch = w_h_t * h_team_row[1] + (1.0 - w_h_t) * 1.0
+                a_off = w_a_t * a_team_row[0] + (1.0 - w_a_t) * 1.0
+                a_pitch = w_a_t * a_team_row[1] + (1.0 - w_a_t) * 1.0
+
+                w_h_p = min(1.0, h_p_row[1] / 10.0)
+                w_a_p = min(1.0, a_p_row[1] / 10.0)
+                h_p_mod = w_h_p * h_p_row[0] + (1.0 - w_h_p) * 1.0
+                a_p_mod = w_a_p * a_p_row[0] + (1.0 - w_a_p) * 1.0
+
+                # Matchup & Environmental Adjustments
+                a_sp_ln = away_pitcher.split()[-1] if " " in away_pitcher else away_pitcher
+                h_sp_ln = home_pitcher.split()[-1] if " " in home_pitcher else home_pitcher
+                _, a_throws = pitcher_stats.get(a_sp_ln, (4.20, 'R'))
+                _, h_throws = pitcher_stats.get(h_sp_ln, (4.20, 'R'))
+
+                away_ops_rhp, away_ops_lhp = platoon_ops.get(away_team, (0.720, 0.720))
+                home_ops_rhp, home_ops_lhp = platoon_ops.get(home_team, (0.720, 0.720))
+                a_plat = away_ops_lhp if h_throws == 'L' else away_ops_rhp
+                h_plat = home_ops_lhp if a_throws == 'L' else home_ops_rhp
+
+                park_mult = DEFAULT_PARK_FACTORS.get(home_team, 1.00)
+                air_drag = 1.000 + ((1.225 - air_density) * 1.5)
+                uv_glare = 1.000 + (np.clip(uv_raw, 1.0, 11.0) - 5.0) * 0.005
+                env_mult = park_mult * air_drag * uv_glare
+
+                pred_h_runs = round(4.45 * (h_plat / 0.720) * h_off * (0.55 * a_p_mod + 0.45 * a_bp_fatigue * a_pitch) * env_mult, 2)
+                pred_a_runs = round(4.25 * (a_plat / 0.720) * a_off * (0.55 * h_p_mod + 0.45 * h_bp_fatigue * h_pitch) * env_mult, 2)
+
+                denom = (pred_h_runs ** 1.83) + (pred_a_runs ** 1.83)
+                home_prob = round((pred_h_runs ** 1.83) / denom, 4) if denom > 0 else 0.50
+                away_prob = round(1.0 - home_prob, 4)
+
                 cursor.execute('''
                     INSERT OR REPLACE INTO Model_Forecasts (game_pk, home_team, away_team, home_prob, away_prob, predicted_edge, predicted_home_runs, predicted_away_runs, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (game_pk, home_team, away_team, home_prob, away_prob, round(abs(home_prob - away_prob), 2), pred_h_runs, pred_a_runs, date_str))
+                ''', (game_pk, home_team, away_team, home_prob, away_prob, round(abs(home_prob - away_prob), 4), pred_h_runs, pred_a_runs, date_str))
 
                 actual_winner = home_team if home_score > away_score else away_team
-                predicted_winner = home_team if home_prob > away_prob else away_team
+                predicted_winner = home_team if home_prob >= away_prob else away_team
                 is_correct = 1 if predicted_winner == actual_winner else 0
                 
                 total_games += 1
                 correct_predictions += is_correct
-                
-                update_dynamic_weights(cursor, home_team, pred_h_runs, home_score, is_offense=True)
-                update_dynamic_weights(cursor, away_team, pred_h_runs, home_score, is_offense=False)
-                update_dynamic_weights(cursor, away_team, pred_a_runs, away_score, is_offense=True)
-                update_dynamic_weights(cursor, home_team, pred_a_runs, away_score, is_offense=False)
+
+                # Error-based EWMA updates (Starter F5)
+                pred_h_f5, pred_a_f5 = pred_h_runs * 0.55, pred_a_runs * 0.55
+                for sp, p_pred, p_act, old_m, count in [(home_pitcher, pred_a_f5, a_f5, h_p_row[0], h_p_row[1]), 
+                                                        (away_pitcher, pred_h_f5, h_f5, a_p_row[0], a_p_row[1])]:
+                    err = p_act - p_pred
+                    alpha = min(0.12, 0.03 + (abs(err) * 0.01))
+                    new_mod = max(0.70, min(1.30, alpha * (old_m + err * 0.05) + (1.0 - alpha) * old_m))
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO Pitcher_Modifiers (pitcher_name, k_modifier, f5_run_modifier, appearance_count, last_updated)
+                        VALUES (?, 1.0, ?, ?, ?)
+                    ''', (sp, round(new_mod, 4), count + 1, date_str))
+
+                # Error-based EWMA updates (Late-Inning Team Modifiers)
+                pred_h_late, pred_a_late = pred_h_runs * 0.45, pred_a_runs * 0.45
+                for tm, pred_l, act_l, is_off, old_off, old_pit, n_cnt in [
+                    (home_team, pred_h_late, h_late, True, h_team_row[0], h_team_row[1], h_team_row[2]),
+                    (away_team, pred_h_late, h_late, False, a_team_row[0], a_team_row[1], a_team_row[2]),
+                    (away_team, pred_a_late, a_late, True, a_team_row[0], a_team_row[1], a_team_row[2]),
+                    (home_team, pred_a_late, a_late, False, h_team_row[0], h_team_row[1], h_team_row[2])
+                ]:
+                    err = act_l - pred_l
+                    alpha = min(0.10, 0.02 + (abs(err) * 0.008))
+                    if is_off:
+                        new_off = max(0.70, min(1.30, alpha * (old_off + err * 0.04) + (1.0 - alpha) * old_off))
+                        cursor.execute('''
+                            INSERT OR REPLACE INTO Dynamic_Modifiers (team_name, offensive_modifier, pitching_modifier, appearance_count, last_updated)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', (tm, round(new_off, 4), round(old_pit, 4), n_cnt + 1, date_str))
+                    else:
+                        new_pit = max(0.70, min(1.30, alpha * (old_pit + err * 0.04) + (1.0 - alpha) * old_pit))
+                        cursor.execute('''
+                            INSERT OR REPLACE INTO Dynamic_Modifiers (team_name, offensive_modifier, pitching_modifier, appearance_count, last_updated)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', (tm, round(old_off, 4), round(new_pit, 4), n_cnt + 1, date_str))
+
+                # Error-based EWMA updates (Bullpen Fatigue)
+                for tm, pred_l, act_l, old_fatigue in [(away_team, pred_h_late, h_late, a_bp_fatigue), (home_team, pred_a_late, a_late, h_bp_fatigue)]:
+                    err = act_l - pred_l
+                    alpha = min(0.10, 0.02 + (abs(err) * 0.008))
+                    new_fatigue = max(0.80, min(1.25, alpha * (old_fatigue + err * 0.04) + (1.0 - alpha) * old_fatigue))
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO Bullpen_Fatigue (team_name, fatigue_multiplier, last_updated)
+                        VALUES (?, ?, ?)
+                    ''', (tm, round(new_fatigue, 4), date_str))
                 
                 cursor.execute('''
-                    INSERT OR REPLACE INTO Post_Match_Analysis (game_pk, actual_winner, home_score, away_score, model_correct, processed_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (game_pk, actual_winner, home_score, away_score, is_correct, 'BACKTEST'))
+                    INSERT OR REPLACE INTO Post_Match_Analysis (game_pk, actual_winner, home_score, away_score, home_f5_score, away_f5_score, model_correct, processed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (game_pk, actual_winner, home_score, away_score, h_f5, a_f5, is_correct, date_str))
         
         conn.commit()
 
