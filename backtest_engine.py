@@ -115,6 +115,7 @@ def ensure_unified_schemas(cursor):
     CREATE TABLE IF NOT EXISTS Bullpen_Fatigue (
         team_name TEXT PRIMARY KEY,
         fatigue_multiplier REAL DEFAULT 1.00,
+        rolling_ip_3d REAL DEFAULT 8.0,
         last_updated TEXT
     );
     CREATE TABLE IF NOT EXISTS Backtest_Ledger (
@@ -148,6 +149,7 @@ def ensure_unified_schemas(cursor):
         ("Pitcher_Stats", "xfip", "REAL DEFAULT 4.20"),
         ("Team_Offense", "ops_vs_rhp", "REAL DEFAULT 0.720"),
         ("Team_Offense", "ops_vs_lhp", "REAL DEFAULT 0.720"),
+        ("Bullpen_Fatigue", "rolling_ip_3d", "REAL DEFAULT 8.0"),
         ("Pitcher_Modifiers", "appearance_count", "INTEGER DEFAULT 0"),
         ("Dynamic_Modifiers", "appearance_count", "INTEGER DEFAULT 0"),
         ("Daily_Umpires", "umpire_locked", "INTEGER DEFAULT 0")
@@ -195,7 +197,6 @@ def sync_historical_schedule_if_needed(conn, cursor, min_required=200):
                     h_score = teams.get('home', {}).get('score')
                     a_score = teams.get('away', {}).get('score')
                     
-                    # Skip suspended or tied games
                     if not home or not away or h_score is None or a_score is None or h_score == a_score:
                         continue
 
@@ -263,7 +264,8 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
         COALESCE(t_home.ops_vs_rhp, 0.720),
         COALESCE(t_home.ops_vs_lhp, 0.720),
         COALESCE(t_away.ops_vs_rhp, 0.720),
-        COALESCE(t_away.ops_vs_lhp, 0.720)
+        COALESCE(t_away.ops_vs_lhp, 0.720),
+        COALESCE(d.game_date, '2025-04-01')
     FROM Post_Match_Analysis p
     LEFT JOIN Daily_Lineups d ON p.game_pk = d.game_pk
     LEFT JOIN Model_Forecasts m ON p.game_pk = m.game_pk
@@ -290,7 +292,7 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
 
     sim_team_off, sim_team_pitch, sim_team_count = {}, {}, {}
     sim_pitcher_mod, sim_pitcher_count = {}, {}
-    sim_bullpen_fatigue = {}
+    team_recent_workload = {}
 
     X_data, y_data, run_errors = [], [], []
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -298,11 +300,33 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
     for row in records:
         (pk, home_score, away_score, h_f5, a_f5, home, away, 
          home_p, away_p, rho, uv, ump_run, h_sp_throws, a_sp_throws,
-         h_ops_rhp, h_ops_lhp, a_ops_rhp, a_ops_lhp) = row
+         h_ops_rhp, h_ops_lhp, a_ops_rhp, a_ops_lhp, g_date) = row
          
         h_late = max(0, home_score - h_f5)
         a_late = max(0, away_score - a_f5)
         actual_home_win = 1.0 if home_score > away_score else 0.0
+
+        # Fast In-Memory 3-Day Physical Bullpen Workload
+        try:
+            curr_dt = datetime.strptime(g_date, "%Y-%m-%d")
+        except Exception:
+            curr_dt = datetime.now()
+
+        def compute_sim_pen_workload(team_name):
+            recent_games = team_recent_workload.get(team_name, [])
+            # Filter games in [curr_dt - 3 days, curr_dt - 1 day]
+            valid = [r for r in recent_games if 1 <= (curr_dt - r[0]).days <= 3]
+            if not valid:
+                return 1.00, 8.0
+            tot_ip = sum(r[1] for r in valid)
+            played_yest = any((curr_dt - r[0]).days == 1 for r in valid)
+            strain = (tot_ip - 8.0) * 0.025
+            b2b_tax = 0.03 if (played_yest and len(valid) >= 2) else 0.00
+            mult = round(float(np.clip(1.00 + strain + b2b_tax, 0.85, 1.25)), 4)
+            return mult, tot_ip
+
+        h_pen_fatigue, h_ip_3d = compute_sim_pen_workload(home)
+        a_pen_fatigue, a_ip_3d = compute_sim_pen_workload(away)
 
         # Bayesian Shrinkage towards neutral 1.00
         w_h_team = min(1.0, sim_team_count.get(home, 0) / 15.0)
@@ -328,19 +352,19 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
 
         env_scalar = park_mult * air_drag_mult * uv_glare_mult * ump_run
 
-        base_h = 4.45 * (h_platoon_ops / 0.720) * h_off_mod * (0.55 * a_p_mod + 0.45 * sim_bullpen_fatigue.get(away, 1.0) * a_pitch_mod) * env_scalar
-        base_a = 4.25 * (a_platoon_ops / 0.720) * a_off_mod * (0.55 * h_p_mod + 0.45 * sim_bullpen_fatigue.get(home, 1.0) * h_pitch_mod) * env_scalar
+        base_h = 4.45 * (h_platoon_ops / 0.720) * h_off_mod * (0.55 * a_p_mod + 0.45 * a_pen_fatigue * a_pitch_mod) * env_scalar
+        base_a = 4.25 * (a_platoon_ops / 0.720) * a_off_mod * (0.55 * h_p_mod + 0.45 * h_pen_fatigue * h_pitch_mod) * env_scalar
 
         denom = (base_h ** 1.83) + (base_a ** 1.83)
         raw_home_prob = round((base_h ** 1.83) / denom, 4) if denom != 0 else 0.50
 
-        # Multi-factor Feature Vector
         feature_vector = [
             base_h, base_a, base_h - base_a,
             base_h / max(0.5, (base_h + base_a)),
             raw_home_prob, park_mult, air_drag_mult, uv_glare_mult,
             ump_run, net_platoon_diff, h_off_mod, a_off_mod,
-            h_pitch_mod, a_pitch_mod, h_p_mod, a_p_mod
+            h_pitch_mod, a_pitch_mod, h_p_mod, a_p_mod,
+            h_pen_fatigue, a_pen_fatigue
         ]
 
         X_data.append(feature_vector)
@@ -353,11 +377,12 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (pk, home, away, raw_home_prob, 1.0 - raw_home_prob, round(raw_home_prob - 0.5, 4), round(base_h, 2), round(base_a, 2), now_ts))
 
-        # Aligned EWMA Updates
-        pred_home_f5, pred_away_f5 = base_h * 0.55, base_a * 0.55
-        pred_home_late, pred_away_late = base_h * 0.45, base_a * 0.45
+        # Append workload for future games in chronological sweep
+        team_recent_workload.setdefault(home, []).append((curr_dt, 4.0 + max(0.0, (a_late - 2) * 0.25)))
+        team_recent_workload.setdefault(away, []).append((curr_dt, 4.0 + max(0.0, (h_late - 2) * 0.25)))
 
-        # 1. Starting Pitcher F5 EWMA
+        # Starting Pitcher F5 EWMA Updates
+        pred_home_f5, pred_away_f5 = base_h * 0.55, base_a * 0.55
         for p_name, pred_f5, act_f5 in [(home_p, pred_away_f5, a_f5), (away_p, pred_home_f5, h_f5)]:
             err = act_f5 - pred_f5
             alpha = min(0.12, 0.03 + (abs(err) * 0.01))
@@ -365,7 +390,8 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
             sim_pitcher_mod[p_name] = max(0.70, min(1.30, alpha * (old_mod + err * 0.05) + (1.0 - alpha) * old_mod))
             sim_pitcher_count[p_name] = sim_pitcher_count.get(p_name, 0) + 1
 
-        # 2. Team Offense & Pitching Late-Inning
+        # Team Offense & Pitching Late-Inning Updates
+        pred_home_late, pred_away_late = base_h * 0.45, base_a * 0.45
         for t_name, pred_late, act_late, is_off in [(home, pred_home_late, h_late, True), (away, pred_home_late, h_late, False), (away, pred_away_late, a_late, True), (home, pred_away_late, a_late, False)]:
             err = act_late - pred_late
             alpha = min(0.10, 0.02 + (abs(err) * 0.008))
@@ -376,13 +402,6 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
                 old_mod = sim_team_pitch.get(t_name, 1.0)
                 sim_team_pitch[t_name] = max(0.70, min(1.30, alpha * (old_mod + err * 0.04) + (1.0 - alpha) * old_mod))
             sim_team_count[t_name] = sim_team_count.get(t_name, 0) + 1
-
-        # 3. Bullpen Fatigue Workload
-        for t_name, pred_late, act_late in [(away, pred_home_late, h_late), (home, pred_away_late, a_late)]:
-            err = act_late - pred_late
-            alpha = min(0.10, 0.02 + (abs(err) * 0.008))
-            old_fatigue = sim_bullpen_fatigue.get(t_name, 1.0)
-            sim_bullpen_fatigue[t_name] = max(0.80, min(1.25, alpha * (old_fatigue + err * 0.04) + (1.0 - alpha) * old_fatigue))
 
     print(f"Committing {len(sim_pitcher_mod)} pitcher weights and {len(sim_team_off)} team weights to operational memory for live pipeline consumption...")
     for p_name, mod in sim_pitcher_mod.items():
@@ -401,12 +420,6 @@ def run_ml_backtest(conn, cursor, max_eval=1600):
         INSERT OR REPLACE INTO Dynamic_Modifiers (team_name, offensive_modifier, pitching_modifier, appearance_count, last_updated)
         VALUES (?, ?, ?, ?, ?)
         ''', (t_name, round(off_mod, 4), round(pitch_mod, 4), count, now_ts))
-
-    for t_name, fatigue in sim_bullpen_fatigue.items():
-        cursor.execute('''
-        INSERT OR REPLACE INTO Bullpen_Fatigue (team_name, fatigue_multiplier, last_updated)
-        VALUES (?, ?, ?)
-        ''', (t_name, round(fatigue, 4), now_ts))
 
     conn.commit()
 
@@ -461,7 +474,9 @@ def run_correlation_sweep(conn, cursor):
         COALESCE(t_home.ops_vs_rhp, 0.720) as home_ops_rhp,
         COALESCE(t_home.ops_vs_lhp, 0.720) as home_ops_lhp,
         COALESCE(t_away.ops_vs_rhp, 0.720) as away_ops_rhp,
-        COALESCE(t_away.ops_vs_lhp, 0.720) as away_ops_lhp
+        COALESCE(t_away.ops_vs_lhp, 0.720) as away_ops_lhp,
+        COALESCE(bf_h.fatigue_multiplier, 1.00) as home_pen_fatigue,
+        COALESCE(bf_a.fatigue_multiplier, 1.00) as away_pen_fatigue
     FROM Post_Match_Analysis p
     INNER JOIN Model_Forecasts m ON p.game_pk = m.game_pk
     LEFT JOIN Daily_Lineups d ON p.game_pk = d.game_pk
@@ -470,6 +485,8 @@ def run_correlation_sweep(conn, cursor):
     LEFT JOIN Pitcher_Stats ps_away ON d.away_pitcher LIKE '%' || ps_away.last_name
     LEFT JOIN Team_Offense t_home ON d.home_team = t_home.team_name
     LEFT JOIN Team_Offense t_away ON d.away_team = t_away.team_name
+    LEFT JOIN Bullpen_Fatigue bf_h ON d.home_team = bf_h.team_name
+    LEFT JOIN Bullpen_Fatigue bf_a ON d.away_team = bf_a.team_name
     WHERE p.home_score IS NOT NULL AND m.predicted_home_runs IS NOT NULL
     '''
     df = pd.read_sql_query(query, conn)
@@ -481,20 +498,16 @@ def run_correlation_sweep(conn, cursor):
     df['total_abs_error'] = (df['home_error_delta'].abs() + df['away_error_delta'].abs())
     df['actual_total_runs'] = df['actual_home_runs'] + df['actual_away_runs']
     
-    # Feature transformations
     df['uv_glare'] = (df['uv_modifier'].clip(1.0, 11.0) - 5.0) * 0.005
     df['umpire_k_zone'] = 1.000 - ((df['umpire_modifier'] - 1.000) * 1.6)
-    
-    away_platoon = np.where(df['home_sp_throws'] == 'L', df['away_ops_lhp'], df['away_ops_rhp'])
-    home_platoon = np.where(df['away_sp_throws'] == 'L', df['home_ops_lhp'], df['home_ops_rhp'])
-    df['net_platoon_edge'] = (home_platoon + away_platoon) - 1.440
+    df['net_bullpen_fatigue'] = (df['home_pen_fatigue'] + df['away_pen_fatigue']) - 2.000
 
     features = {
         'air_density': df['air_density'],
         'uv_glare': df['uv_glare'],
         'umpire_run_mod': df['umpire_modifier'],
         'umpire_k_zone': df['umpire_k_zone'],
-        'net_platoon_edge': df['net_platoon_edge']
+        'net_bullpen_fatigue': df['net_bullpen_fatigue']
     }
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
