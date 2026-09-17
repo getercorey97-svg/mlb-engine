@@ -20,29 +20,23 @@ def ensure_post_match_schema(conn):
             team_name TEXT PRIMARY KEY,
             offensive_modifier REAL DEFAULT 1.0,
             pitching_modifier REAL DEFAULT 1.0,
-            sample_count INTEGER DEFAULT 1,
+            appearance_count INTEGER DEFAULT 0,
             last_updated TEXT
         );
         CREATE TABLE IF NOT EXISTS Pitcher_Modifiers (
             pitcher_name TEXT PRIMARY KEY,
             k_modifier REAL DEFAULT 1.0,
             f5_run_modifier REAL DEFAULT 1.0,
-            sample_count INTEGER DEFAULT 1,
+            appearance_count INTEGER DEFAULT 0,
             last_updated TEXT
         );
-        CREATE TABLE IF NOT EXISTS Bullpen_Modifiers (
+        CREATE TABLE IF NOT EXISTS Bullpen_Fatigue (
             team_name TEXT PRIMARY KEY,
-            fatigue_modifier REAL DEFAULT 1.0,
+            fatigue_multiplier REAL DEFAULT 1.00,
             last_updated TEXT
         );
     ''')
     conn.commit()
-
-def calculate_ewma(current_val, target_val, n_games, base_alpha=0.10):
-    # Dynamic alpha based on sample size and error delta
-    alpha = min(0.20, max(base_alpha, 2.0 / (n_games + 1) + 0.05))
-    updated_val = (alpha * target_val) + ((1.0 - alpha) * current_val)
-    return round(float(np.clip(updated_val, 0.50, 1.50)), 3), round(alpha, 3)
 
 def run_post_match_analysis():
     print("Executing Factual Post-Mortem (Full Game & F5 Linescores)...")
@@ -84,18 +78,36 @@ def run_post_match_analysis():
                 innings = game.get('linescore', {}).get('innings', [])
                 h_f5 = sum(inn.get('home', {}).get('runs', 0) for inn in innings[:5])
                 a_f5 = sum(inn.get('away', {}).get('runs', 0) for inn in innings[:5])
+                h_late = max(0, home_score - h_f5)
+                a_late = max(0, away_score - a_f5)
 
                 home_sp = game['teams']['home'].get('probablePitcher', {}).get('fullName', 'Unknown Pitcher')
                 away_sp = game['teams']['away'].get('probablePitcher', {}).get('fullName', 'Unknown Pitcher')
 
-                # Winner Resolution with String Normalization
-                cursor.execute("SELECT home_prob, away_prob, home_team, away_team FROM Model_Forecasts WHERE game_pk = ?", (game_pk,))
+                # Fetch Forecasts for error-based EWMA updates
+                cursor.execute("""
+                    SELECT home_prob, away_prob, predicted_home_runs, predicted_away_runs 
+                    FROM Model_Forecasts WHERE game_pk = ?
+                """, (game_pk,))
                 forecast = cursor.fetchone()
-                
+
+                cursor.execute("""
+                    SELECT f5_exp_home_runs, f5_exp_away_runs 
+                    FROM F5_Forecasts WHERE game_pk = ?
+                """, (game_pk,))
+                f5_forecast = cursor.fetchone()
+
+                pred_h_runs = forecast[2] if (forecast and forecast[2] is not None) else 4.45
+                pred_a_runs = forecast[3] if (forecast and forecast[3] is not None) else 4.25
+                pred_h_f5 = f5_forecast[0] if (f5_forecast and f5_forecast[0] is not None) else pred_h_runs * 0.55
+                pred_a_f5 = f5_forecast[1] if (f5_forecast and f5_forecast[1] is not None) else pred_a_runs * 0.55
+                pred_h_late = pred_h_runs * 0.45
+                pred_a_late = pred_a_runs * 0.45
+
                 is_correct = None
                 if forecast and forecast[0] is not None:
-                    h_prob, a_prob, f_home, f_away = forecast
-                    pred_winner = f_home if h_prob >= a_prob else f_away
+                    h_prob, a_prob = forecast[0], forecast[1]
+                    pred_winner = home_team if h_prob >= a_prob else away_team
                     is_correct = 1 if pred_winner.strip().lower() == actual_winner.strip().lower() else 0
 
                 cursor.execute('''
@@ -104,46 +116,69 @@ def run_post_match_analysis():
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (game_pk, actual_winner, home_score, away_score, h_f5, a_f5, is_correct, now_str))
 
-                # Team Offense & Pitching EWMA Evolution
-                for team, scored, allowed in [(home_team, home_score, away_score), (away_team, away_score, home_score)]:
-                    cursor.execute("SELECT offensive_modifier, pitching_modifier, sample_count FROM Dynamic_Modifiers WHERE team_name = ?", (team,))
-                    row = cursor.fetchone()
-                    off_mod, pitch_mod, n_count = row if row else (1.000, 1.000, 1)
-                    n_count += 1
-
-                    target_off = 1.0 + ((scored - 4.3) * 0.04)
-                    target_pitch = 1.0 + ((allowed - 4.3) * 0.04)
-
-                    new_off, a_off = calculate_ewma(off_mod, target_off, n_count)
-                    new_pitch, a_pitch = calculate_ewma(pitch_mod, target_pitch, n_count)
-
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO Dynamic_Modifiers 
-                        (team_name, offensive_modifier, pitching_modifier, sample_count, last_updated)
-                        VALUES (?, ?, ?, ?, ?)
-                    ''', (team, new_off, new_pitch, n_count, now_str))
-
-                    print(f"  [EWMA Team] {team} Offense: {off_mod:.3f} -> {new_off:.3f} (N={n_count}, alpha={a_off})")
-                    print(f"  [EWMA Team] {team} Pitching: {pitch_mod:.3f} -> {new_pitch:.3f} (N={n_count}, alpha={a_pitch})")
-
-                # Pitcher F5 SP Modifier Evolution
-                for pitcher, runs_allowed in [(home_sp, a_f5), (away_sp, h_f5)]:
+                # 1. Starting Pitcher F5 EWMA Updates (Aligned with backtest_engine.py)
+                for pitcher, pred_f5, act_f5 in [(home_sp, pred_a_f5, a_f5), (away_sp, pred_h_f5, h_f5)]:
                     if pitcher == 'Unknown Pitcher':
                         continue
-                    cursor.execute("SELECT f5_run_modifier, sample_count FROM Pitcher_Modifiers WHERE pitcher_name = ?", (pitcher,))
+                    cursor.execute("SELECT f5_run_modifier, appearance_count FROM Pitcher_Modifiers WHERE pitcher_name = ?", (pitcher,))
                     p_row = cursor.fetchone()
-                    sp_mod, p_count = p_row if p_row else (1.000, 1)
+                    old_mod, p_count = p_row if p_row else (1.000, 0)
                     p_count += 1
 
-                    target_sp = 1.0 + ((runs_allowed - 2.2) * 0.06)
-                    new_sp, sp_alpha = calculate_ewma(sp_mod, target_sp, p_count)
+                    err = act_f5 - pred_f5
+                    alpha = min(0.12, 0.03 + (abs(err) * 0.01))
+                    new_mod = max(0.70, min(1.30, alpha * (old_mod + err * 0.05) + (1.0 - alpha) * old_mod))
 
                     cursor.execute('''
                         INSERT OR REPLACE INTO Pitcher_Modifiers 
-                        (pitcher_name, k_modifier, f5_run_modifier, sample_count, last_updated)
+                        (pitcher_name, k_modifier, f5_run_modifier, appearance_count, last_updated)
                         VALUES (?, 1.0, ?, ?, ?)
-                    ''', (pitcher, new_sp, p_count, now_str))
-                    print(f"  [EWMA Pitcher] {pitcher} F5 SP Modifier: {sp_mod:.3f} -> {new_sp:.3f} (N={p_count}, alpha={sp_alpha})")
+                    ''', (pitcher, round(new_mod, 4), p_count, now_str))
+                    print(f"  [EWMA Pitcher] {pitcher} F5 SP Modifier: {old_mod:.3f} -> {new_mod:.3f} (N={p_count}, alpha={alpha:.3f})")
+
+                # 2. Team Offense & Pitching Late-Inning Updates (Aligned with backtest_engine.py)
+                for team, pred_late, act_late, is_off in [
+                    (home_team, pred_h_late, h_late, True),
+                    (away_team, pred_h_late, h_late, False),
+                    (away_team, pred_a_late, a_late, True),
+                    (home_team, pred_a_late, a_late, False)
+                ]:
+                    cursor.execute("SELECT offensive_modifier, pitching_modifier, appearance_count FROM Dynamic_Modifiers WHERE team_name = ?", (team,))
+                    row = cursor.fetchone()
+                    off_mod, pitch_mod, n_count = row if row else (1.000, 1.000, 0)
+                    n_count += 1
+
+                    err = act_late - pred_late
+                    alpha = min(0.10, 0.02 + (abs(err) * 0.008))
+
+                    if is_off:
+                        new_off = max(0.70, min(1.30, alpha * (off_mod + err * 0.04) + (1.0 - alpha) * off_mod))
+                        new_pitch = pitch_mod
+                    else:
+                        new_off = off_mod
+                        new_pitch = max(0.70, min(1.30, alpha * (pitch_mod + err * 0.04) + (1.0 - alpha) * pitch_mod))
+
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO Dynamic_Modifiers 
+                        (team_name, offensive_modifier, pitching_modifier, appearance_count, last_updated)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (team, round(new_off, 4), round(new_pitch, 4), n_count, now_str))
+                    print(f"  [EWMA Team] {team} {'Offense' if is_off else 'Pitching'}: {(off_mod if is_off else pitch_mod):.3f} -> {(new_off if is_off else new_pitch):.3f} (N={n_count}, alpha={alpha:.3f})")
+
+                # 3. Bullpen Fatigue Workload Updates (Aligned with backtest_engine.py)
+                for team, pred_late, act_late in [(away_team, pred_h_late, h_late), (home_team, pred_a_late, a_late)]:
+                    cursor.execute("SELECT fatigue_multiplier FROM Bullpen_Fatigue WHERE team_name = ?", (team,))
+                    f_row = cursor.fetchone()
+                    old_fatigue = f_row[0] if f_row else 1.000
+
+                    err = act_late - pred_late
+                    alpha = min(0.10, 0.02 + (abs(err) * 0.008))
+                    new_fatigue = max(0.80, min(1.25, alpha * (old_fatigue + err * 0.04) + (1.0 - alpha) * old_fatigue))
+
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO Bullpen_Fatigue (team_name, fatigue_multiplier, last_updated)
+                        VALUES (?, ?, ?)
+                    ''', (team, round(new_fatigue, 4), now_str))
 
     conn.commit()
 
@@ -156,7 +191,7 @@ def run_post_match_analysis():
     teams_count, avg_off, avg_pitch = cursor.fetchone()
     avg_off, avg_pitch = avg_off or 1.000, avg_pitch or 1.000
 
-    cursor.execute("SELECT COUNT(*), AVG(fatigue_modifier) FROM Bullpen_Modifiers")
+    cursor.execute("SELECT COUNT(*), AVG(fatigue_multiplier) FROM Bullpen_Fatigue")
     bp_row = cursor.fetchone()
     bullpens_count = bp_row[0] if bp_row else 30
     avg_bp = bp_row[1] if bp_row and bp_row[1] else 1.000
