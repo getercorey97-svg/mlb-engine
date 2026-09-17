@@ -123,6 +123,9 @@ def run_backtest_sweep(years_back=1):
                 home_score = game['teams']['home'].get('score', 0)
                 away_score = game['teams']['away'].get('score', 0)
                 
+                if home_score == away_score:
+                    continue
+                
                 home_pitcher = game['teams']['home'].get('probablePitcher', {}).get('fullName', 'Unknown')
                 away_pitcher = game['teams']['away'].get('probablePitcher', {}).get('fullName', 'Unknown')
                 

@@ -75,6 +75,9 @@ def run_post_match_analysis():
                 home_score = game['teams']['home'].get('score', 0)
                 away_score = game['teams']['away'].get('score', 0)
 
+                if home_score == away_score:
+                    continue
+
                 actual_winner = home_team if home_score > away_score else away_team
 
                 # Calculate F5 scores from linescore innings
@@ -89,7 +92,7 @@ def run_post_match_analysis():
                 cursor.execute("SELECT home_prob, away_prob, home_team, away_team FROM Model_Forecasts WHERE game_pk = ?", (game_pk,))
                 forecast = cursor.fetchone()
                 
-                is_correct = 0
+                is_correct = None
                 if forecast and forecast[0] is not None:
                     h_prob, a_prob, f_home, f_away = forecast
                     pred_winner = f_home if h_prob >= a_prob else f_away
@@ -162,7 +165,7 @@ def run_post_match_analysis():
     cursor.execute('''
         SELECT 
             SUM(CASE WHEN model_correct = 1 THEN 1 ELSE 0 END),
-            COUNT(*)
+            COUNT(model_correct)
         FROM Post_Match_Analysis
         WHERE actual_winner IS NOT NULL
     ''')
