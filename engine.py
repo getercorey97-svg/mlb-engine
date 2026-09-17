@@ -1,6 +1,6 @@
 import sqlite3
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, StackingClassifier
 from sklearn.model_selection import StratifiedKFold
@@ -45,6 +45,7 @@ def ensure_engine_schemas(cursor):
     CREATE TABLE IF NOT EXISTS Bullpen_Fatigue (
         team_name TEXT PRIMARY KEY,
         fatigue_multiplier REAL DEFAULT 1.00,
+        rolling_ip_3d REAL DEFAULT 8.0,
         last_updated TEXT
     );
     CREATE TABLE IF NOT EXISTS Biological_Modifiers (
@@ -104,13 +105,13 @@ def ensure_engine_schemas(cursor):
     );
     ''')
 
-    # Column Migrations
     migrations = [
         ("Daily_Umpires", "umpire_locked", "INTEGER DEFAULT 0"),
         ("Pitcher_Stats", "xfip", "REAL DEFAULT 4.20"),
         ("Pitcher_Stats", "throws", "TEXT DEFAULT 'R'"),
         ("Team_Offense", "ops_vs_rhp", "REAL DEFAULT 0.720"),
         ("Team_Offense", "ops_vs_lhp", "REAL DEFAULT 0.720"),
+        ("Bullpen_Fatigue", "rolling_ip_3d", "REAL DEFAULT 8.0"),
         ("Pitcher_Modifiers", "appearance_count", "INTEGER DEFAULT 0"),
         ("Dynamic_Modifiers", "appearance_count", "INTEGER DEFAULT 0")
     ]
@@ -119,6 +120,44 @@ def ensure_engine_schemas(cursor):
         cols = [c[1] for c in cursor.fetchall()]
         if col not in cols:
             cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def};")
+
+def get_rolling_bullpen_workload(cursor, team_name, ref_date_str):
+    """Calculates physical 3-day rolling reliever innings and congestion penalty."""
+    try:
+        cursor.execute('''
+            SELECT d.game_date, p.home_score, p.away_score, p.home_f5_score, p.away_f5_score
+            FROM Daily_Lineups d
+            JOIN Post_Match_Analysis p ON d.game_pk = p.game_pk
+            WHERE (d.home_team = ? OR d.away_team = ?)
+              AND d.game_date BETWEEN date(?, '-3 days') AND date(?, '-1 day')
+              AND p.actual_winner IS NOT NULL
+        ''', (team_name, team_name, ref_date_str, ref_date_str))
+        rows = cursor.fetchall()
+        if not rows:
+            return 1.00, 8.0
+
+        ref_dt = datetime.strptime(ref_date_str, "%Y-%m-%d")
+        yesterday_str = (ref_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        total_reliever_ip = 0.0
+        played_yesterday = False
+
+        for g_date, h_score, a_score, h_f5, a_f5 in rows:
+            if g_date == yesterday_str:
+                played_yesterday = True
+            late_runs = max(0, (h_score - (h_f5 or 0))) + max(0, (a_score - (a_f5 or 0)))
+            # Reliever base workload: 4.0 innings + stress multiplier for high-traffic frames
+            total_reliever_ip += 4.0 + max(0.0, (late_runs - 3) * 0.25)
+
+        # Baselines: 8.0 IP over 3 days is standard workload
+        ip_strain = (total_reliever_ip - 8.0) * 0.025
+        back_to_back_tax = 0.03 if (played_yesterday and len(rows) >= 2) else 0.00
+        three_day_tax = 0.05 if len(rows) >= 3 else 0.00
+
+        multiplier = round(float(np.clip(1.00 + ip_strain + back_to_back_tax + three_day_tax, 0.85, 1.25)), 4)
+        return multiplier, round(total_reliever_ip, 1)
+    except Exception:
+        return 1.00, 8.0
 
 def probability_to_american(prob: float) -> str:
     prob = max(0.01, min(0.99, prob))
@@ -173,7 +212,6 @@ def update_readme(cursor):
         f.write("\n".join(lines))
 
 def build_mlb_stacking_classifier():
-    """Builds a regularized Stacking Calibrator to prevent over-fitting probabilities."""
     rf_base = RandomForestClassifier(n_estimators=100, max_depth=3, min_samples_leaf=10, random_state=42, n_jobs=-1)
     xgb_base = XGBClassifier(n_estimators=80, learning_rate=0.03, max_depth=3, subsample=0.8, eval_metric='logloss', random_state=42, n_jobs=-1)
     level_1_meta = LogisticRegression(penalty='l2', C=0.5, solver='lbfgs', max_iter=1000)
@@ -190,7 +228,7 @@ def build_mlb_stacking_classifier():
 
 def run_ultimate_monte_carlo():
     print("=" * 65)
-    print(f"[{datetime.now()}] Running Deterministic Dual-Engine Monte Carlo (BsR 1.8 + NegBinomial)")
+    print(f"[{datetime.now()}] Running Deterministic Dual-Engine Monte Carlo (Physical Bullpen + NegBinomial)")
     print("=" * 65)
 
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
@@ -201,7 +239,8 @@ def run_ultimate_monte_carlo():
     ensure_engine_schemas(cursor)
     conn.commit()
 
-    # Ingest feature caches
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
     team_bsr = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(bsr_per_game, 4.50) FROM Team_Offense").fetchall()}
     team_ops = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(ops, 0.720) FROM Team_Offense").fetchall()}
     platoon_ops = {r[0]: (r[1], r[2]) for r in cursor.execute(
@@ -213,7 +252,6 @@ def run_ultimate_monte_carlo():
     ).fetchall()}
     
     park_mods = {r[0]: r[1] for r in cursor.execute("SELECT home_team, COALESCE(run_factor, 1.00) FROM Park_Factors").fetchall()}
-    bullpen_fatigue = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(fatigue_multiplier, 1.00) FROM Bullpen_Fatigue").fetchall()}
     circadian_drag = {r[0]: r[1] for r in cursor.execute("SELECT team_name, COALESCE(jet_lag_runs_penalty, 0.00) FROM Biological_Modifiers").fetchall()}
     
     dynamic_mods = {r[0]: (r[1], r[2], r[3]) for r in cursor.execute(
@@ -232,7 +270,7 @@ def run_ultimate_monte_carlo():
 
     cursor.execute('''
         SELECT game_pk, away_team, home_team, away_pitcher, home_pitcher, 
-               COALESCE(air_density, 1.225), COALESCE(uv_modifier, 5.00)
+               COALESCE(air_density, 1.225), COALESCE(uv_modifier, 5.00), game_date
         FROM Daily_Lineups 
         WHERE status != "Final" AND game_pk NOT IN (SELECT game_pk FROM Post_Match_Analysis)
     ''')
@@ -271,8 +309,9 @@ def run_ultimate_monte_carlo():
     it = 50000
     dispersion = 1.35
 
-    for pk, away, home, away_p, home_p, rho, uv_raw in games:
+    for pk, away, home, away_p, home_p, rho, uv_raw, g_date in games:
         rng = np.random.default_rng(seed=int(pk))
+        ref_date = g_date if g_date else today_str
 
         a_sp_last = away_p.split(' ')[-1] if away_p and away_p != "TBD" else ""
         h_sp_last = home_p.split(' ')[-1] if home_p and home_p != "TBD" else ""
@@ -280,7 +319,7 @@ def run_ultimate_monte_carlo():
         a_sp_metric, a_sp_throws = pitcher_data.get(a_sp_last, (4.20, 'R'))
         h_sp_metric, h_sp_throws = pitcher_data.get(h_sp_last, (4.20, 'R'))
 
-        # Platoon-Adjusted Base Runs
+        # Platoon Splits
         away_rhp, away_lhp = platoon_ops.get(away, (0.720, 0.720))
         home_rhp, home_lhp = platoon_ops.get(home, (0.720, 0.720))
 
@@ -293,7 +332,7 @@ def run_ultimate_monte_carlo():
         a_sp_matchup_runs = a_base_runs * (a_platoon_ops / 0.720)
         h_sp_matchup_runs = h_base_runs * (h_platoon_ops / 0.720)
 
-        # Team Modifiers with Bayesian Shrinkage
+        # Team Modifiers (Bayesian Shrinkage)
         a_off_mod_raw, a_pitch_mod_raw, a_team_n = dynamic_mods.get(away, (1.0, 1.0, 0))
         h_off_mod_raw, h_pitch_mod_raw, h_team_n = dynamic_mods.get(home, (1.0, 1.0, 0))
         
@@ -305,7 +344,7 @@ def run_ultimate_monte_carlo():
         h_off_mod = w_h_team * h_off_mod_raw + (1.0 - w_h_team) * 1.0
         h_pitch_mod = w_h_team * h_pitch_mod_raw + (1.0 - w_h_team) * 1.0
 
-        # Pitcher Modifiers with Bayesian Shrinkage
+        # Pitcher Modifiers (Bayesian Shrinkage)
         a_p_k_mod, a_p_run_mod_raw, a_p_n = pitcher_mods.get(away_p, (1.0, 1.0, 0))
         if a_p_run_mod_raw == 1.0 and a_sp_last:
             for name, mods in pitcher_mods.items():
@@ -326,21 +365,23 @@ def run_ultimate_monte_carlo():
         w_h_p = min(1.0, h_p_n / 10.0)
         h_p_run_mod = w_h_p * h_p_run_mod_raw + (1.0 - w_h_p) * 1.0
 
-        # Environmental & Atmospheric Scaling
+        # Physical 3-Day Bullpen Workload
+        a_pen_fatigue, a_ip_3d = get_rolling_bullpen_workload(cursor, away, ref_date)
+        h_pen_fatigue, h_ip_3d = get_rolling_bullpen_workload(cursor, home, ref_date)
+
+        cursor.execute("INSERT OR REPLACE INTO Bullpen_Fatigue (team_name, fatigue_multiplier, rolling_ip_3d, last_updated) VALUES (?, ?, ?, ?)", (away, a_pen_fatigue, a_ip_3d, today_str))
+        cursor.execute("INSERT OR REPLACE INTO Bullpen_Fatigue (team_name, fatigue_multiplier, rolling_ip_3d, last_updated) VALUES (?, ?, ?, ?)", (home, h_pen_fatigue, h_ip_3d, today_str))
+
+        # Atmospheric, Visual & Umpire Scaling
         park_mult = park_mods.get(home, 1.00)
         air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
-        
-        # Calibrated Visual Glare (Contrast Modifier Centered at 5.0 UV)
         uv_glare_mult = 1.000 + (np.clip(uv_raw, 1.0, 11.0) - 5.0) * 0.005
 
         ump_mod, ump_locked, ump_name = umpire_mods.get(pk, (1.00, 0, 'TBD'))
         ump_badge = f"🔒 {ump_name}" if ump_locked == 1 and ump_name != "Unknown / TBD" else "⏳ TBD"
-
-        a_pen_fatigue = bullpen_fatigue.get(away, 1.00)
-        h_pen_fatigue = bullpen_fatigue.get(home, 1.00)
         a_circadian_penalty = circadian_drag.get(away, 0.00)
 
-        # Expected Runs Formulation (55% Starter with Platoon / 45% Bullpen Fatigue)
+        # Expected Runs Formulation (55% Starter Platoon / 45% Physical Bullpen Workload)
         exp_away_runs = max(
             0.2, 
             ((a_sp_matchup_runs * a_off_mod * 0.55 * (h_sp_metric / 4.20) * h_p_run_mod) + 
@@ -363,8 +404,6 @@ def run_ultimate_monte_carlo():
 
         p_home_reg = float(np.mean(home_sim > away_sim))
         p_tie_reg = float(np.mean(home_sim == away_sim))
-        
-        # Extra-Innings Ghost Runner Tie Allocation (53% empirical home edge in extras)
         raw_home_prob = p_home_reg + (0.53 * p_tie_reg)
 
         if calibrator:
@@ -388,7 +427,7 @@ def run_ultimate_monte_carlo():
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (pk, home, away, final_home_prob, final_away_prob, edge, round(exp_home_runs, 2), round(exp_away_runs, 2), now_ts))
 
-        print(f"Game {pk}: {away} ({exp_away_runs:.2f} r) @ {home} ({exp_home_runs:.2f} r) | H: {final_home_prob:.1%} | A: {final_away_prob:.1%} | Edge: {edge:.1%} | Umpire: {ump_badge}")
+        print(f"Game {pk}: {away} ({exp_away_runs:.2f} r) @ {home} ({exp_home_runs:.2f} r) | H: {final_home_prob:.1%} | A: {final_away_prob:.1%} | Edge: {edge:.1%} | Pen(A/H): {a_pen_fatigue:.2f}/{h_pen_fatigue:.2f} | Umpire: {ump_badge}")
 
     update_readme(cursor)
     conn.commit()
