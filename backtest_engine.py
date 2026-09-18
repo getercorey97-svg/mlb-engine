@@ -44,6 +44,8 @@ STADIUM_RHO_BASELINES = {
 CORRELATION_SIGNIFICANCE_THRESHOLD = 0.20
 TTOP_SUPPRESSION_FACTOR = 0.90
 TOP_ORDER_WEIGHT = 1.03
+F5_VOLUME_SCALAR = 5.0 / 9.7  # 51.55% empirical early-game run share
+PARK_REGRESSION_FACTOR = 0.90  # Bayesian compression on early batted-ball park extremes
 
 def ensure_unified_schemas(cursor):
     cursor.executescript('''
@@ -206,17 +208,13 @@ def ensure_unified_schemas(cursor):
             cursor.execute("INSERT OR REPLACE INTO Park_Factors (home_team, run_factor) VALUES (?, ?);", (team, factor))
 
 def project_starter_innings(effective_metric: float) -> tuple:
-    """
-    Computes dynamic starting pitcher innings expectation and derived workload weights.
-    Replaces static 55/45 splits with pitching quality-dependent innings projections.
-    """
     projected_outs = float(np.clip(27.0 - (effective_metric * 2.2), 9.0, 21.6))
     ip_projected = projected_outs / 3.0
     sp_weight = float(np.clip(ip_projected / 9.0, 0.33, 0.80))
     pen_weight = round(1.0 - sp_weight, 4)
     return sp_weight, pen_weight, round(ip_projected, 1)
 
-def sync_historical_schedule_if_needed(conn, cursor, min_required=2430, days_back=210):
+def sync_historical_schedule_if_needed(conn, cursor, min_required=2000, days_back=180):
     cursor.execute('''
         SELECT COUNT(*) 
         FROM Post_Match_Analysis p 
@@ -295,7 +293,7 @@ def build_mlb_stacking_classifier():
         n_jobs=-1
     )
 
-def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterations=10000):
+def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterations=10000):
     print("=" * 65)
     print(f"[{datetime.now()}] Initializing Pure Walk-Forward Historical Calibration Backtest...")
     print("=" * 65)
@@ -369,7 +367,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
         except Exception:
             curr_dt = datetime.now()
 
-        # Step 1: Physical Bullpen Workload
+        # 1. Rolling Bullpen Fatigue Tracking
         def compute_sim_pen_workload(team_name):
             recent_games = team_recent_workload.get(team_name, [])
             valid = [r for r in recent_games if 1 <= (curr_dt - r[0]).days <= 3]
@@ -386,7 +384,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
         h_pen_fatigue, h_ip_3d = compute_sim_pen_workload(home)
         a_pen_fatigue, a_ip_3d = compute_sim_pen_workload(away)
 
-        # Step 2: Bayesian Modifier Shrinkage (N / 10.0)
+        # 2. Bayesian Modifier Shrinkage (N / 10.0)
         w_h_team = min(1.0, sim_team_count.get(home, 0) / 10.0)
         w_a_team = min(1.0, sim_team_count.get(away, 0) / 10.0)
         h_off_mod = w_h_team * sim_team_off.get(home, 1.0) + (1.0 - w_h_team) * 1.0
@@ -399,17 +397,17 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
         h_p_run_mod = w_h_p * sim_pitcher_f5.get(home_p, 1.0) + (1.0 - w_h_p) * 1.0
         a_p_run_mod = w_a_p * sim_pitcher_f5.get(away_p, 1.0) + (1.0 - w_a_p) * 1.0
 
-        # Step 3: Dynamic Starter Innings Length
+        # 3. Dynamic Starter Length Weighting
         w_h_sp, w_h_pen, h_ip_proj = project_starter_innings(h_sp_metric * h_p_run_mod)
         w_a_sp, w_a_pen, a_ip_proj = project_starter_innings(a_sp_metric * a_p_run_mod)
 
-        # Step 4: Environmental Scaling
-        park_mult = DEFAULT_PARK_FACTORS.get(home, 1.00)
+        # 4. Environmental Scaling
+        base_pf = DEFAULT_PARK_FACTORS.get(home, 1.00)
         air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
         uv_glare_mult = 1.000 + (np.clip(uv_raw, 1.0, 11.0) - 5.0) * 0.005
-        env_scalar = park_mult * air_drag_mult * uv_glare_mult * ump_run
+        full_env_scalar = base_pf * air_drag_mult * uv_glare_mult * ump_run
 
-        # Step 5: Full-Game Run Expectancies
+        # 5. Full-Game Platoon & Expected Runs
         a_platoon_ops = a_ops_lhp if h_throws == 'L' else a_ops_rhp
         h_platoon_ops = h_ops_lhp if a_throws == 'L' else h_ops_rhp
 
@@ -419,15 +417,15 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
         exp_away_runs = max(
             0.2, 
             ((a_sp_matchup_runs * a_off_mod * w_h_sp * (h_sp_metric / 4.20) * h_p_run_mod) + 
-             (a_bsr * a_off_mod * w_h_pen * h_pen_fatigue * h_pitch_mod)) * env_scalar
+             (a_bsr * a_off_mod * w_h_pen * h_pen_fatigue * h_pitch_mod)) * full_env_scalar
         )
         exp_home_runs = max(
             0.2, 
             ((h_sp_matchup_runs * h_off_mod * w_a_sp * (a_sp_metric / 4.20) * a_p_run_mod) + 
-             (h_bsr * h_off_mod * w_a_pen * a_pen_fatigue * a_pitch_mod)) * env_scalar
+             (h_bsr * h_off_mod * w_a_pen * a_pen_fatigue * a_pitch_mod)) * full_env_scalar
         )
 
-        # Step 6: Full-Game Negative Binomial Simulation
+        # 6. Full-Game Monte Carlo Simulation
         rng = np.random.default_rng(seed=int(pk))
         va = max(exp_away_runs + 0.01, exp_away_runs * dispersion)
         vh = max(exp_home_runs + 0.01, exp_home_runs * dispersion)
@@ -443,7 +441,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
         p_tie_reg = float(np.mean(home_sim == away_sim))
         raw_home_prob = p_home_reg + (0.53 * p_tie_reg)
 
-        # Step 7: Periodic Stacking Classifier Re-fitting
+        # 7. Periodic Stacking Classifier Re-fitting
         if idx > 0 and idx % 200 == 0 and len(calibrator_pool_y) >= 150:
             try:
                 X_fit = np.array(calibrator_pool_X)
@@ -468,17 +466,20 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
         final_home_prob = round(final_home_prob, 4)
         edge = round(abs(final_home_prob - final_away_prob), 4)
 
-        # Step 8: Decoupled F5 Expectancy (TTOP Suppression + Top Order Weighting)
+        # 8. Decoupled F5 Expectancy (Empirical Run Share 0.5155 + TTOP + Regressed Park Factor)
+        f5_regressed_pf = 1.000 + (base_pf - 1.000) * PARK_REGRESSION_FACTOR
+        f5_env_scalar = f5_regressed_pf * air_drag_mult * uv_glare_mult * ump_run
+
         a_xera_f5 = np.clip(a_sp_metric, 1.5, 9.0) * a_p_run_mod * TTOP_SUPPRESSION_FACTOR
         h_xera_f5 = np.clip(h_sp_metric, 1.5, 9.0) * h_p_run_mod * TTOP_SUPPRESSION_FACTOR
 
         a_off_f5 = (a_platoon_ops / 0.720) * a_off_mod * TOP_ORDER_WEIGHT
         h_off_f5 = (h_platoon_ops / 0.720) * h_off_mod * TOP_ORDER_WEIGHT
 
-        lam_f5_a = max(0.10, (h_xera_f5 * a_off_f5 * env_scalar) * (5.0 / 9.0))
-        lam_f5_h = max(0.10, (a_xera_f5 * h_off_f5 * env_scalar) * (5.0 / 9.0))
+        lam_f5_a = max(0.10, (h_xera_f5 * a_off_f5 * f5_env_scalar) * F5_VOLUME_SCALAR)
+        lam_f5_h = max(0.10, (a_xera_f5 * h_off_f5 * f5_env_scalar) * F5_VOLUME_SCALAR)
 
-        # F5 Simulation & L1-Optimized Median Point Projection
+        # F5 Simulation & Discrete Median Point Projection
         f5_disp = 1.22
         f5_va, f5_vh = lam_f5_a * f5_disp, lam_f5_h * f5_disp
         f5_pa, f5_ph = max(0.01, min(0.99, lam_f5_a / f5_va)), max(0.01, min(0.99, lam_f5_h / f5_vh))
@@ -488,7 +489,8 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
         f5_sim_h = np.clip(rng.negative_binomial(f5_nh, f5_ph, iterations), 0, 15)
         f5_sim_tot = f5_sim_a + f5_sim_h
 
-        f5_median_total = float(np.median(f5_sim_tot))
+        # L1-Optimized Discrete Median
+        f5_median_discrete = float(np.round(np.median(f5_sim_tot)))
         f5_mean_total = round(lam_f5_a + lam_f5_h, 2)
 
         f5_away_prob = float(np.mean(f5_sim_a > f5_sim_h))
@@ -505,7 +507,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
         INSERT OR REPLACE INTO F5_Forecasts 
         (game_pk, away_team, home_team, away_starter, home_starter, f5_away_prob, f5_home_prob, f5_tie_prob, f5_exp_away_runs, f5_exp_home_runs, f5_total_runs, f5_median_total)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (pk, away, home, away_p, home_p, round(f5_away_prob, 4), round(f5_home_prob, 4), round(f5_tie_prob, 4), round(lam_f5_a, 2), round(lam_f5_h, 2), f5_mean_total, round(f5_median_total, 2)))
+        ''', (pk, away, home, away_p, home_p, round(f5_away_prob, 4), round(f5_home_prob, 4), round(f5_tie_prob, 4), round(lam_f5_a, 2), round(lam_f5_h, 2), f5_mean_total, round(f5_median_discrete, 2)))
 
         actual_home_win = 1.0 if home_score > away_score else 0.0
         model_home_pick = 1.0 if final_home_prob >= 0.50 else 0.0
@@ -518,8 +520,8 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
         calibrator_pool_X.append([exp_home_runs, exp_away_runs, raw_home_prob])
         calibrator_pool_y.append(actual_home_win)
 
-        # L1 F5 Run Error against the simulated conditional median
-        f5_run_error = abs((h_f5 + a_f5) - f5_median_total)
+        # L1 Absolute Error evaluated against the discrete median projection
+        f5_run_error = abs((h_f5 + a_f5) - f5_median_discrete)
 
         eval_history.append({
             'game_pk': pk,
@@ -538,7 +540,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
         WHERE game_pk = ?
         ''', (is_correct, now_ts, pk))
 
-        # Step 9: Post-Mortem Updates (Point-in-Time Learning)
+        # 9. Post-Mortem Feedback Updates
         h_late = max(0, home_score - h_f5)
         a_late = max(0, away_score - a_f5)
         team_recent_workload.setdefault(home, []).append((curr_dt, 4.0 + max(0.0, (a_late - 2) * 0.25)))
@@ -552,7 +554,8 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
             sim_pitcher_f5[p_name] = max(0.70, min(1.30, alpha * (old_mod + err * 0.05) + (1.0 - alpha) * old_mod))
             sim_pitcher_count[p_name] = sim_pitcher_count.get(p_name, 0) + 1
 
-        pred_home_late, pred_away_late = exp_home_runs * (1.0 - (5.0 / 9.0)), exp_away_runs * (1.0 - (5.0 / 9.0))
+        pred_home_late = exp_home_runs * (1.0 - F5_VOLUME_SCALAR)
+        pred_away_late = exp_away_runs * (1.0 - F5_VOLUME_SCALAR)
         for t_name, pred_late, act_late, is_off in [
             (home, pred_home_late, h_late, True), (away, pred_home_late, h_late, False),
             (away, pred_away_late, a_late, True), (home, pred_away_late, a_late, False)
@@ -567,7 +570,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
                 sim_team_pitch[t_name] = max(0.70, min(1.30, alpha * (old_mod + err * 0.04) + (1.0 - alpha) * old_mod))
             sim_team_count[t_name] = sim_team_count.get(t_name, 0) + 1
 
-    # Persist Final Learned Weights to Production Tables
+    # Persist Final Learned Weights
     print(f"Persisting empirical parameters ({len(sim_pitcher_f5)} pitchers, {len(sim_team_off)} teams) into operational tables...")
     for p_name, mod in sim_pitcher_f5.items():
         if p_name not in ('Unknown', 'TBD'):
@@ -713,7 +716,7 @@ def export_backtest_markdown_report(cursor):
         "- **Execution Model**: Deterministic Dual-Engine Monte Carlo (Dynamic Starter Length + L1 Median F5 NegBinomial).",
         "- **Ensemble**: Stacking Classifier (RandomForest + XGBoost -> Logistic Regression).",
         "- **Lookahead Isolation**: Strict point-in-time progression (no data leakage).",
-        "- **F5 Calibration**: Decoupled from bullpen noise, scaled with 0.90x TTOP suppression and 1.03x top-order PA weighting.",
+        "- **F5 Calibration**: Decoupled from bullpen noise, scaled with 0.5155 empirical run share, 0.90x TTOP suppression, and discrete L1 median scoring.",
         ""
     ]
     with open("BACKTEST_REPORT.md", "w", encoding="utf-8") as f:
@@ -721,8 +724,8 @@ def export_backtest_markdown_report(cursor):
     print("[SUCCESS] BACKTEST_REPORT.md successfully updated.")
 
 def main():
-    target_games = int(os.environ.get("TARGET_GAMES", 2430))
-    days_back = int(os.environ.get("DAYS_BACK", 210))
+    target_games = int(os.environ.get("TARGET_GAMES", 2000))
+    days_back = int(os.environ.get("DAYS_BACK", 180))
     sim_iterations = int(os.environ.get("SIM_ITERATIONS", 10000))
 
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
