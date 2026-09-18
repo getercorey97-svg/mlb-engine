@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import requests
 import numpy as np
@@ -34,7 +35,7 @@ STADIUM_RHO_BASELINES = {
 }
 
 def initialize_database_schemas():
-    """Guarantees every table and column exists with auto-migrations for telemetry, props, and batter hit forecasts."""
+    """Guarantees table and column integrity with migrations for telemetry and batter forecasts."""
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
@@ -237,7 +238,7 @@ def initialize_database_schemas():
     print("[PHASE 1] Schemas verified and base park factors seeded.")
 
 def fetch_daily_matchups_and_lineups():
-    """Wipes old unplayed slate and ingests strictly today's MLB schedule."""
+    """Wipes old unplayed slate and ingests today's MLB schedule."""
     print("[PHASE 3] Ingesting Today's MLB Schedule & Probable Pitchers...")
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
@@ -363,6 +364,54 @@ def export_prediction_markdown():
         f.write("\n".join(lines) + "\n")
     print("[PHASE 6 COMPLETE] PREDICTIONS_TODAY.md successfully generated.")
 
+def send_ntfy_batter_props():
+    """Extracts top Over 0.5 Hit props and pushes an alert to the configured ntfy topic."""
+    topic = os.environ.get("NTFY_TOPIC")
+    if not topic:
+        print("[NTFY] No NTFY_TOPIC environment variable configured. Skipping notification.")
+        return
+
+    conn = sqlite3.connect('mlb_engine.db', timeout=30)
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT player_name, team_name, batting_order, expected_hits, over_0_5_hit_prob
+        FROM Batter_Hit_Forecasts
+        WHERE over_0_5_hit_prob >= 0.65
+        ORDER BY over_0_5_hit_prob DESC, expected_hits DESC
+        LIMIT 8;
+    ''')
+    top_props = cursor.fetchall()
+    conn.close()
+
+    if not top_props:
+        print("[NTFY] No batter hit props met the 65% threshold today.")
+        return
+
+    lines = ["🎯 Top Batter Hit Props (Over 0.5 Hits):", ""]
+    for name, team, order, exp_hits, prob in top_props:
+        lines.append(f"• {name} ({team} #{order}): {prob:.1%} prob | {exp_hits:.2f} exp hits")
+
+    message_body = "\n".join(lines)
+
+    try:
+        res = requests.post(
+            f"https://ntfy.sh/{topic}",
+            data=message_body.encode('utf-8'),
+            headers={
+                "Title": f"MLB Batter Hit Props ({datetime.now().strftime('%m/%d')})",
+                "Priority": "default",
+                "Tags": "baseball,dart"
+            },
+            timeout=10
+        )
+        if res.status_code == 200:
+            print("[NTFY] Batter hit props successfully pushed to ntfy.")
+        else:
+            print(f"[NTFY] Alert push failed with status code {res.status_code}.")
+    except Exception as e:
+        print(f"[NTFY] Error dispatching alert: {e}")
+
 def main():
     print("=" * 65)
     print(f"[{datetime.now()}] Starting Unified Self-Optimizing MLB Pipeline (50,000 Iterations)")
@@ -460,6 +509,9 @@ def main():
 
     # 6. Compile Consolidated Markdown Projections
     export_prediction_markdown()
+
+    # 7. Dispatch High-Confidence Props to ntfy
+    send_ntfy_batter_props()
 
     print("=" * 65)
     print(f"[{datetime.now()}] Pipeline Complete. 50,000-Iteration Forecasts Synchronized.")
