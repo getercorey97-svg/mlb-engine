@@ -1,22 +1,31 @@
-name: MLB Engine Backtest & Correlation Analysis
+name: MLB Engine Walk-Forward Backtest
 
 on:
   schedule:
-    # Optional weekly or daily sweep at 10:00 AM UTC
-    - cron: '0 10 * * 0'
+    # Weekly calibration sweep at 06:00 UTC on Sunday
+    - cron: '0 6 * * 0'
   workflow_dispatch:
+    inputs:
+      target_games:
+        description: 'Target games to evaluate'
+        required: true
+        default: '2000'
+      days_back:
+        description: 'Days of historical schedule to sync'
+        required: true
+        default: '180'
 
 permissions:
   contents: write
 
 jobs:
-  run-consolidated-backtest:
+  run-engine-backtest:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set Up Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -24,23 +33,35 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests scikit-learn xgboost
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pandas numpy requests scikit-learn xgboost scipy
+          fi
 
       - name: Purge Bytecode Cache
         run: |
           find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
           find . -name "*.pyc" -delete 2>/dev/null || true
 
-      - name: Run Unified Backtest & Correlation Pipeline
+      - name: Execute Chronological Walk-Forward Backtest
+        env:
+          TARGET_GAMES: ${{ github.event.inputs.target_games || '2000' }}
+          DAYS_BACK: ${{ github.event.inputs.days_back || '180' }}
         run: python backtest_engine.py
 
-      - name: Commit and Push Updated Database & Analytics
+      - name: Commit Backtest Ledger, Calibrated Modifiers, and Report
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          find . -name "*.pyc" -delete 2>/dev/null || true
+
+          [ -f BACKTEST_REPORT.md ] && git add BACKTEST_REPORT.md
           [ -f mlb_engine.db ] && git add mlb_engine.db
+
           if ! git diff-index --quiet HEAD; then
-            git commit -m "Auto-update backtest ledger, models, and correlation matrix [skip ci]"
+            git commit -m "Auto-update backtest ledger, calibrated weights, and report [skip ci]"
             git pull --rebase --autostash
             git push origin main
           else
