@@ -44,7 +44,7 @@ STADIUM_RHO_BASELINES = {
 CORRELATION_SIGNIFICANCE_THRESHOLD = 0.20
 TTOP_SUPPRESSION_FACTOR = 0.90
 TOP_ORDER_WEIGHT = 1.03
-F5_VOLUME_SCALAR = 5.0 / 10.0  # Normalized 50% volume scalar offsetting top-order concentration
+F5_VOLUME_SCALAR = 5.0 / 10.0
 PARK_REGRESSION_FACTOR = 0.90
 
 LEAGUE_AVG_BA = 0.245
@@ -254,6 +254,20 @@ def ensure_unified_schemas(cursor):
         for team, factor in DEFAULT_PARK_FACTORS.items():
             cursor.execute("INSERT OR REPLACE INTO Park_Factors (home_team, run_factor) VALUES (?, ?);", (team, factor))
 
+def apply_bayesian_hit_shrinkage(raw_prob_over_0_5: float, ab_sample: int = 120) -> float:
+    """
+    Applies empirical Bayes log-odds shrinkage to compress extreme over/under
+    hit probabilities toward the baseline 60.5% starter hit rate.
+    """
+    p_clipped = float(np.clip(raw_prob_over_0_5, 0.05, 0.95))
+    logit_raw = np.log(p_clipped / (1.0 - p_clipped))
+    prior_p = 0.605
+    logit_prior = np.log(prior_p / (1.0 - prior_p))
+    w = float(np.clip(ab_sample / (ab_sample + 80), 0.70, 0.85))
+    shrunk_logit = (w * logit_raw) + ((1.0 - w) * logit_prior)
+    shrunk_p = 1.0 / (1.0 + np.exp(-shrunk_logit))
+    return float(np.clip(shrunk_p, 0.20, 0.82))
+
 def log5_matchup_odds(p_batter: float, p_pitcher: float, p_league: float) -> float:
     p_b = float(np.clip(p_batter, 0.05, 0.95))
     p_p = float(np.clip(p_pitcher, 0.05, 0.95))
@@ -344,7 +358,7 @@ def sync_historical_schedule_if_needed(conn, cursor, min_required=2000, days_bac
         except Exception as e:
             print(f"Schedule chunk ingestion error: {e}")
 
-def sync_sample_historical_boxscores(conn, cursor, game_pks, max_games=120):
+def sync_sample_historical_boxscores(conn, cursor, game_pks, max_games=150):
     """Caches actual starter batter boxscores for precision hit MAE/Brier backtesting."""
     cursor.execute("SELECT DISTINCT game_pk FROM Historical_Batter_Boxscores;")
     cached = set(r[0] for r in cursor.fetchall())
@@ -452,7 +466,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
     all_pks = [r[0] for r in records]
     sync_sample_historical_boxscores(conn, cursor, all_pks, max_games=150)
 
-    # Ingest cached boxscores into lookup table: game_pk -> list of (player_name, batting_order, hits, ab)
     cursor.execute("SELECT game_pk, player_name, team_name, batting_order, hits, ab FROM Historical_Batter_Boxscores;")
     box_lookup = {}
     for r in cursor.fetchall():
@@ -582,7 +595,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         final_home_prob = round(final_home_prob, 4)
         edge = round(abs(final_home_prob - final_away_prob), 4)
 
-        # 8. Decoupled F5 Expectancy (0.5000 Empirical Share + TTOP + Regressed Park Factor)
+        # 8. Decoupled F5 Expectancy
         f5_regressed_pf = 1.000 + (base_pf - 1.000) * PARK_REGRESSION_FACTOR
         f5_env_scalar = f5_regressed_pf * air_drag_mult * uv_glare_mult * ump_run
 
@@ -604,7 +617,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         f5_sim_h = np.clip(rng.negative_binomial(f5_nh, f5_ph, iterations), 0, 15)
         f5_sim_tot = f5_sim_a + f5_sim_h
 
-        # Continuous Median Projection Eliminates Discretization Penalties
         f5_median_continuous = float(np.median(f5_sim_tot))
         f5_mean_total = round(lam_f5_a + lam_f5_h, 2)
 
@@ -612,7 +624,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         f5_home_prob = float(np.mean(f5_sim_h > f5_sim_a))
         f5_tie_prob = float(np.mean(f5_sim_a == f5_sim_h))
 
-        # 9. Individual Batter Hit Evaluation (When Boxscore Matches)
+        # 9. Individual Batter Hit Evaluation with Empirical Bayes Shrinkage
         box_batters = box_lookup.get(pk, [])
         if box_batters:
             env_hit_scalar = (1.000 + (base_pf - 1.000) * 0.70) * (1.000 + ((1.225 - rho) * 0.8))
@@ -637,7 +649,10 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
 
                 b_sim_hits = rng.binomial(int(np.round(proj_ab)), p_hit_ab, 5000)
                 pred_hits_exp = float(proj_ab * p_hit_ab)
-                pred_over_0_5 = float(np.mean(b_sim_hits >= 1))
+                raw_over_0_5 = float(np.mean(b_sim_hits >= 1))
+                
+                # Calibrated through Empirical Bayes Log-Odds Shrinkage
+                pred_over_0_5 = apply_bayesian_hit_shrinkage(raw_over_0_5, ab_sample=120)
 
                 batter_eval_history.append({
                     'hit_err': abs(b_act_hits - pred_hits_exp),
@@ -667,7 +682,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         calibrator_pool_X.append([exp_home_runs, exp_away_runs, raw_home_prob])
         calibrator_pool_y.append(actual_home_win)
 
-        # L1 Absolute Error against continuous median
         f5_run_error = abs((h_f5 + a_f5) - f5_median_continuous)
 
         eval_history.append({
@@ -717,7 +731,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
                 sim_team_pitch[t_name] = max(0.70, min(1.30, alpha * (old_mod + err * 0.04) + (1.0 - alpha) * old_mod))
             sim_team_count[t_name] = sim_team_count.get(t_name, 0) + 1
 
-    # Persist Final Learned Weights
     print(f"Persisting empirical parameters ({len(sim_pitcher_f5)} pitchers, {len(sim_team_off)} teams) into operational tables...")
     for p_name, mod in sim_pitcher_f5.items():
         if p_name not in ('Unknown', 'TBD'):
@@ -872,7 +885,7 @@ def export_backtest_markdown_report(cursor):
         "- **Ensemble**: Stacking Classifier (RandomForest + XGBoost -> Logistic Regression).",
         "- **Lookahead Isolation**: Strict point-in-time progression (zero data leakage).",
         "- **F5 Scoring**: Evaluated against continuous median with 0.5000 volume scalar.",
-        "- **Player Hit Props**: Endogenous plate appearance simulation with Log5 batter-vs-pitcher contact mixture.",
+        "- **Player Hit Calibration**: Empirical Bayes log-odds shrinkage toward 60.5% starter hit rate.",
         ""
     ]
     with open("BACKTEST_REPORT.md", "w", encoding="utf-8") as f:
