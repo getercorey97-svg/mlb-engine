@@ -199,6 +199,17 @@ def ensure_unified_schemas(cursor):
         for team, factor in DEFAULT_PARK_FACTORS.items():
             cursor.execute("INSERT OR REPLACE INTO Park_Factors (home_team, run_factor) VALUES (?, ?);", (team, factor))
 
+def project_starter_innings(effective_metric: float) -> tuple:
+    """
+    Computes dynamic starting pitcher innings expectation and derived workload weights.
+    Replaces static 55/45 splits with pitching quality-dependent innings projections.
+    """
+    projected_outs = float(np.clip(27.0 - (effective_metric * 2.2), 9.0, 21.6))
+    ip_projected = projected_outs / 3.0
+    sp_weight = float(np.clip(ip_projected / 9.0, 0.33, 0.80))
+    pen_weight = round(1.0 - sp_weight, 4)
+    return sp_weight, pen_weight, round(ip_projected, 1)
+
 def sync_historical_schedule_if_needed(conn, cursor, min_required=2430, days_back=210):
     cursor.execute('''
         SELECT COUNT(*) 
@@ -382,33 +393,37 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
         h_p_run_mod = w_h_p * sim_pitcher_f5.get(home_p, 1.0) + (1.0 - w_h_p) * 1.0
         a_p_run_mod = w_a_p * sim_pitcher_f5.get(away_p, 1.0) + (1.0 - w_a_p) * 1.0
 
-        # Step 3: Environmental Scaling
+        # Step 3: Compute dynamic starter innings expectation
+        w_h_sp, w_h_pen, h_ip_proj = project_starter_innings(h_sp_metric * h_p_run_mod)
+        w_a_sp, w_a_pen, a_ip_proj = project_starter_innings(a_sp_metric * a_p_run_mod)
+
+        # Step 4: Environmental Scaling
         park_mult = DEFAULT_PARK_FACTORS.get(home, 1.00)
         air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
         uv_glare_mult = 1.000 + (np.clip(uv_raw, 1.0, 11.0) - 5.0) * 0.005
 
-        # Step 4: Platoon Expectancy
+        # Step 5: Platoon Expectancy
         a_platoon_ops = a_ops_lhp if h_throws == 'L' else a_ops_rhp
         h_platoon_ops = h_ops_lhp if a_throws == 'L' else h_ops_rhp
 
         a_sp_matchup_runs = a_bsr * (a_platoon_ops / 0.720)
         h_sp_matchup_runs = h_bsr * (h_platoon_ops / 0.720)
 
-        # Step 5: Full Expected Runs Equation
+        # Step 6: Full Dynamic Expected Runs Formulation
         exp_away_runs = max(
             0.2, 
-            ((a_sp_matchup_runs * a_off_mod * 0.55 * (h_sp_metric / 4.20) * h_p_run_mod) + 
-             (a_bsr * a_off_mod * 0.45 * h_pen_fatigue * h_pitch_mod)) 
+            ((a_sp_matchup_runs * a_off_mod * w_h_sp * (h_sp_metric / 4.20) * h_p_run_mod) + 
+             (a_bsr * a_off_mod * w_h_pen * h_pen_fatigue * h_pitch_mod)) 
             * park_mult * air_drag_mult * uv_glare_mult * ump_run
         )
         exp_home_runs = max(
             0.2, 
-            ((h_sp_matchup_runs * h_off_mod * 0.55 * (a_sp_metric / 4.20) * a_p_run_mod) + 
-             (h_bsr * h_off_mod * 0.45 * a_pen_fatigue * a_pitch_mod)) 
+            ((h_sp_matchup_runs * h_off_mod * w_a_sp * (a_sp_metric / 4.20) * a_p_run_mod) + 
+             (h_bsr * h_off_mod * w_a_pen * a_pen_fatigue * a_pitch_mod)) 
             * park_mult * air_drag_mult * uv_glare_mult * ump_run
         )
 
-        # Step 6: Deterministic Negative Binomial Simulation
+        # Step 7: Deterministic Negative Binomial Simulation
         rng = np.random.default_rng(seed=int(pk))
         va = max(exp_away_runs + 0.01, exp_away_runs * dispersion)
         vh = max(exp_home_runs + 0.01, exp_home_runs * dispersion)
@@ -424,7 +439,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
         p_tie_reg = float(np.mean(home_sim == away_sim))
         raw_home_prob = p_home_reg + (0.53 * p_tie_reg)
 
-        # Step 7: Periodic Stacking Classifier Re-fitting
+        # Step 8: Periodic Stacking Classifier Re-fitting
         if idx > 0 and idx % 200 == 0 and len(calibrator_pool_y) >= 150:
             try:
                 X_fit = np.array(calibrator_pool_X)
@@ -449,7 +464,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
         final_home_prob = round(final_home_prob, 4)
         edge = round(abs(final_home_prob - final_away_prob), 4)
 
-        # Step 8: First 5 Simulation
+        # Step 9: First 5 Simulation
         f5_exp_a = exp_away_runs * (5.0 / 9.0)
         f5_exp_h = exp_home_runs * (5.0 / 9.0)
         f5_va, f5_vh = f5_exp_a * 1.22, f5_exp_h * 1.22
@@ -501,7 +516,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2430, iterati
         WHERE game_pk = ?
         ''', (is_correct, now_ts, pk))
 
-        # Step 9: Post-Mortem Updates (Point-in-Time Revealed Data)
+        # Step 10: Post-Mortem Updates (Point-in-Time Revealed Data)
         h_late = max(0, home_score - h_f5)
         a_late = max(0, away_score - a_f5)
         team_recent_workload.setdefault(home, []).append((curr_dt, 4.0 + max(0.0, (a_late - 2) * 0.25)))
@@ -670,7 +685,7 @@ def export_backtest_markdown_report(cursor):
         f"| **Mean Absolute Run Error** | `{run_err:.2f} runs` | < 3.20 |",
         "",
         "### ⚙️ Engine State",
-        "- **Execution Model**: Deterministic Dual-Engine Monte Carlo (Physical Bullpen + Negative Binomial).",
+        "- **Execution Model**: Deterministic Dual-Engine Monte Carlo (Dynamic Starter Length + NegBinomial).",
         "- **Ensemble**: Stacking Classifier (RandomForest + XGBoost -> Logistic Regression).",
         "- **Lookahead Isolation**: Strict point-in-time progression (no data leakage).",
         ""
