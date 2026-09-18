@@ -37,6 +37,8 @@ jobs:
           git rm -r --cached __pycache__ 2>/dev/null || true
 
       - name: Run Unified Orchestration Pipeline
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python run_pipeline.py
 
       - name: Run Dedicated F5 & Pitcher Props Engine
