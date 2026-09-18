@@ -103,6 +103,15 @@ def ensure_engine_schemas(cursor):
         status TEXT,
         last_calibrated TEXT
     );
+    CREATE TABLE IF NOT EXISTS Backtest_Ledger (
+        run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        games_evaluated INTEGER,
+        brier_score REAL,
+        win_accuracy REAL,
+        f5_win_accuracy REAL DEFAULT 0.0,
+        avg_run_error REAL,
+        executed_at TEXT
+    );
     ''')
 
     migrations = [
@@ -111,15 +120,28 @@ def ensure_engine_schemas(cursor):
         ("Pitcher_Stats", "throws", "TEXT DEFAULT 'R'"),
         ("Team_Offense", "ops_vs_rhp", "REAL DEFAULT 0.720"),
         ("Team_Offense", "ops_vs_lhp", "REAL DEFAULT 0.720"),
+        ("Team_Offense", "bsr_per_game", "REAL DEFAULT 4.50"),
         ("Bullpen_Fatigue", "rolling_ip_3d", "REAL DEFAULT 8.0"),
         ("Pitcher_Modifiers", "appearance_count", "INTEGER DEFAULT 0"),
-        ("Dynamic_Modifiers", "appearance_count", "INTEGER DEFAULT 0")
+        ("Dynamic_Modifiers", "appearance_count", "INTEGER DEFAULT 0"),
+        ("Backtest_Ledger", "f5_win_accuracy", "REAL DEFAULT 0.0")
     ]
     for table, col, col_def in migrations:
         cursor.execute(f"PRAGMA table_info({table});")
         cols = [c[1] for c in cursor.fetchall()]
         if col not in cols:
             cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def};")
+
+def project_starter_innings(effective_metric: float) -> tuple:
+    """
+    Computes dynamic starting pitcher innings expectation and derived workload weights.
+    Replaces static 55/45 splits with pitching quality-dependent innings projections.
+    """
+    projected_outs = float(np.clip(27.0 - (effective_metric * 2.2), 9.0, 21.6))
+    ip_projected = projected_outs / 3.0
+    sp_weight = float(np.clip(ip_projected / 9.0, 0.33, 0.80))
+    pen_weight = round(1.0 - sp_weight, 4)
+    return sp_weight, pen_weight, round(ip_projected, 1)
 
 def get_rolling_bullpen_workload(cursor, team_name, ref_date_str):
     """Calculates physical 3-day rolling reliever innings and congestion penalty."""
@@ -146,10 +168,8 @@ def get_rolling_bullpen_workload(cursor, team_name, ref_date_str):
             if g_date == yesterday_str:
                 played_yesterday = True
             late_runs = max(0, (h_score - (h_f5 or 0))) + max(0, (a_score - (a_f5 or 0)))
-            # Reliever base workload: 4.0 innings + stress multiplier for high-traffic frames
             total_reliever_ip += 4.0 + max(0.0, (late_runs - 3) * 0.25)
 
-        # Baselines: 8.0 IP over 3 days is standard workload
         ip_strain = (total_reliever_ip - 8.0) * 0.025
         back_to_back_tax = 0.03 if (played_yesterday and len(rows) >= 2) else 0.00
         three_day_tax = 0.05 if len(rows) >= 3 else 0.00
@@ -228,7 +248,7 @@ def build_mlb_stacking_classifier():
 
 def run_ultimate_monte_carlo():
     print("=" * 65)
-    print(f"[{datetime.now()}] Running Deterministic Dual-Engine Monte Carlo (Physical Bullpen + NegBinomial)")
+    print(f"[{datetime.now()}] Running Deterministic Dual-Engine Monte Carlo (Dynamic Starter IP + NegBinomial)")
     print("=" * 65)
 
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
@@ -282,7 +302,6 @@ def run_ultimate_monte_carlo():
         conn.close()
         return
 
-    # Train Calibrator on Empirical Matchups
     cursor.execute('''
         SELECT m.predicted_home_runs, m.predicted_away_runs, m.home_prob, 
                (CASE WHEN p.home_score > p.away_score THEN 1.0 ELSE 0.0 END)
@@ -319,7 +338,6 @@ def run_ultimate_monte_carlo():
         a_sp_metric, a_sp_throws = pitcher_data.get(a_sp_last, (4.20, 'R'))
         h_sp_metric, h_sp_throws = pitcher_data.get(h_sp_last, (4.20, 'R'))
 
-        # Platoon Splits
         away_rhp, away_lhp = platoon_ops.get(away, (0.720, 0.720))
         home_rhp, home_lhp = platoon_ops.get(home, (0.720, 0.720))
 
@@ -332,7 +350,6 @@ def run_ultimate_monte_carlo():
         a_sp_matchup_runs = a_base_runs * (a_platoon_ops / 0.720)
         h_sp_matchup_runs = h_base_runs * (h_platoon_ops / 0.720)
 
-        # Team Modifiers (Bayesian Shrinkage)
         a_off_mod_raw, a_pitch_mod_raw, a_team_n = dynamic_mods.get(away, (1.0, 1.0, 0))
         h_off_mod_raw, h_pitch_mod_raw, h_team_n = dynamic_mods.get(home, (1.0, 1.0, 0))
         
@@ -344,7 +361,6 @@ def run_ultimate_monte_carlo():
         h_off_mod = w_h_team * h_off_mod_raw + (1.0 - w_h_team) * 1.0
         h_pitch_mod = w_h_team * h_pitch_mod_raw + (1.0 - w_h_team) * 1.0
 
-        # Pitcher Modifiers (Bayesian Shrinkage)
         a_p_k_mod, a_p_run_mod_raw, a_p_n = pitcher_mods.get(away_p, (1.0, 1.0, 0))
         if a_p_run_mod_raw == 1.0 and a_sp_last:
             for name, mods in pitcher_mods.items():
@@ -365,6 +381,10 @@ def run_ultimate_monte_carlo():
         w_h_p = min(1.0, h_p_n / 10.0)
         h_p_run_mod = w_h_p * h_p_run_mod_raw + (1.0 - w_h_p) * 1.0
 
+        # Compute dynamic starter length based on effective expected performance
+        w_h_sp, w_h_pen, h_ip_proj = project_starter_innings(h_sp_metric * h_p_run_mod)
+        w_a_sp, w_a_pen, a_ip_proj = project_starter_innings(a_sp_metric * a_p_run_mod)
+
         # Physical 3-Day Bullpen Workload
         a_pen_fatigue, a_ip_3d = get_rolling_bullpen_workload(cursor, away, ref_date)
         h_pen_fatigue, h_ip_3d = get_rolling_bullpen_workload(cursor, home, ref_date)
@@ -372,7 +392,6 @@ def run_ultimate_monte_carlo():
         cursor.execute("INSERT OR REPLACE INTO Bullpen_Fatigue (team_name, fatigue_multiplier, rolling_ip_3d, last_updated) VALUES (?, ?, ?, ?)", (away, a_pen_fatigue, a_ip_3d, today_str))
         cursor.execute("INSERT OR REPLACE INTO Bullpen_Fatigue (team_name, fatigue_multiplier, rolling_ip_3d, last_updated) VALUES (?, ?, ?, ?)", (home, h_pen_fatigue, h_ip_3d, today_str))
 
-        # Atmospheric, Visual & Umpire Scaling
         park_mult = park_mods.get(home, 1.00)
         air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
         uv_glare_mult = 1.000 + (np.clip(uv_raw, 1.0, 11.0) - 5.0) * 0.005
@@ -381,17 +400,17 @@ def run_ultimate_monte_carlo():
         ump_badge = f"🔒 {ump_name}" if ump_locked == 1 and ump_name != "Unknown / TBD" else "⏳ TBD"
         a_circadian_penalty = circadian_drag.get(away, 0.00)
 
-        # Expected Runs Formulation (55% Starter Platoon / 45% Physical Bullpen Workload)
+        # Dynamic starter innings weighted run expectancies
         exp_away_runs = max(
             0.2, 
-            ((a_sp_matchup_runs * a_off_mod * 0.55 * (h_sp_metric / 4.20) * h_p_run_mod) + 
-             (a_base_runs * a_off_mod * 0.45 * h_pen_fatigue * h_pitch_mod)) 
+            ((a_sp_matchup_runs * a_off_mod * w_h_sp * (h_sp_metric / 4.20) * h_p_run_mod) + 
+             (a_base_runs * a_off_mod * w_h_pen * h_pen_fatigue * h_pitch_mod)) 
             * park_mult * air_drag_mult * uv_glare_mult * ump_mod - a_circadian_penalty
         )
         exp_home_runs = max(
             0.2, 
-            ((h_sp_matchup_runs * h_off_mod * 0.55 * (a_sp_metric / 4.20) * a_p_run_mod) + 
-             (h_base_runs * h_off_mod * 0.45 * a_pen_fatigue * a_pitch_mod)) 
+            ((h_sp_matchup_runs * h_off_mod * w_a_sp * (a_sp_metric / 4.20) * a_p_run_mod) + 
+             (h_base_runs * h_off_mod * w_a_pen * a_pen_fatigue * a_pitch_mod)) 
             * park_mult * air_drag_mult * uv_glare_mult * ump_mod
         )
 
@@ -427,7 +446,7 @@ def run_ultimate_monte_carlo():
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (pk, home, away, final_home_prob, final_away_prob, edge, round(exp_home_runs, 2), round(exp_away_runs, 2), now_ts))
 
-        print(f"Game {pk}: {away} ({exp_away_runs:.2f} r) @ {home} ({exp_home_runs:.2f} r) | H: {final_home_prob:.1%} | A: {final_away_prob:.1%} | Edge: {edge:.1%} | Pen(A/H): {a_pen_fatigue:.2f}/{h_pen_fatigue:.2f} | Umpire: {ump_badge}")
+        print(f"Game {pk}: {away} ({exp_away_runs:.2f} r, SP {a_ip_proj} IP) @ {home} ({exp_home_runs:.2f} r, SP {h_ip_proj} IP) | H: {final_home_prob:.1%} | A: {final_away_prob:.1%} | Edge: {edge:.1%} | Pen(A/H): {a_pen_fatigue:.2f}/{h_pen_fatigue:.2f} | Umpire: {ump_badge}")
 
     update_readme(cursor)
     conn.commit()
