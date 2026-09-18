@@ -118,7 +118,7 @@ def ensure_unified_schemas(cursor):
         PRIMARY KEY (game_pk, player_name)
     );
     CREATE TABLE IF NOT EXISTS Batter_Stats (
-        player_name TEXT PRIMARY KEY,
+        player_name TEXT,
         team_name TEXT,
         avg REAL DEFAULT 0.250,
         avg_vs_rhp REAL DEFAULT 0.250,
@@ -126,7 +126,14 @@ def ensure_unified_schemas(cursor):
         bb_rate REAL DEFAULT 0.085,
         k_rate REAL DEFAULT 0.220,
         babip REAL DEFAULT 0.295,
-        updated_at TEXT
+        updated_at TEXT,
+        PRIMARY KEY (player_name, team_name)
+    );
+    CREATE TABLE IF NOT EXISTS Batter_Modifiers (
+        player_name TEXT PRIMARY KEY,
+        contact_modifier REAL DEFAULT 1.0,
+        appearance_count INTEGER DEFAULT 0,
+        last_updated TEXT
     );
     CREATE TABLE IF NOT EXISTS Pitcher_Props (
         game_pk INTEGER,
@@ -227,39 +234,12 @@ def ensure_unified_schemas(cursor):
     );
     ''')
 
-    migrations = [
-        ("Pitcher_Stats", "throws", "TEXT DEFAULT 'R'"),
-        ("Pitcher_Stats", "xfip", "REAL DEFAULT 4.20"),
-        ("Team_Offense", "ops_vs_rhp", "REAL DEFAULT 0.720"),
-        ("Team_Offense", "ops_vs_lhp", "REAL DEFAULT 0.720"),
-        ("Team_Offense", "bsr_per_game", "REAL DEFAULT 4.50"),
-        ("Bullpen_Fatigue", "rolling_ip_3d", "REAL DEFAULT 8.0"),
-        ("Pitcher_Modifiers", "appearance_count", "INTEGER DEFAULT 0"),
-        ("Dynamic_Modifiers", "appearance_count", "INTEGER DEFAULT 0"),
-        ("Daily_Lineups", "uv_modifier", "REAL DEFAULT 5.0"),
-        ("Daily_Umpires", "umpire_locked", "INTEGER DEFAULT 0"),
-        ("Backtest_Ledger", "f5_win_accuracy", "REAL DEFAULT 0.0"),
-        ("Backtest_Ledger", "f5_avg_run_error", "REAL DEFAULT 0.0"),
-        ("Backtest_Ledger", "batter_hit_mae", "REAL DEFAULT 0.0"),
-        ("Backtest_Ledger", "batter_hit_brier", "REAL DEFAULT 0.0"),
-        ("F5_Forecasts", "f5_median_total", "REAL DEFAULT 0.0")
-    ]
-    for table, col, col_def in migrations:
-        cursor.execute(f"PRAGMA table_info({table});")
-        cols = [c[1] for c in cursor.fetchall()]
-        if col not in cols:
-            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def};")
-
     cursor.execute("SELECT COUNT(*) FROM Park_Factors;")
     if cursor.fetchone()[0] == 0:
         for team, factor in DEFAULT_PARK_FACTORS.items():
             cursor.execute("INSERT OR REPLACE INTO Park_Factors (home_team, run_factor) VALUES (?, ?);", (team, factor))
 
 def apply_bayesian_hit_shrinkage(raw_prob_over_0_5: float, ab_sample: int = 120) -> float:
-    """
-    Applies empirical Bayes log-odds shrinkage to compress extreme over/under
-    hit probabilities toward the baseline 60.5% starter hit rate.
-    """
     p_clipped = float(np.clip(raw_prob_over_0_5, 0.05, 0.95))
     logit_raw = np.log(p_clipped / (1.0 - p_clipped))
     prior_p = 0.605
@@ -360,7 +340,6 @@ def sync_historical_schedule_if_needed(conn, cursor, min_required=2000, days_bac
             print(f"Schedule chunk ingestion error: {e}")
 
 def sync_sample_historical_boxscores(conn, cursor, game_pks, max_games=150):
-    """Caches actual starter batter boxscores for precision hit MAE/Brier backtesting."""
     cursor.execute("SELECT DISTINCT game_pk FROM Historical_Batter_Boxscores;")
     cached = set(r[0] for r in cursor.fetchall())
     to_fetch = [pk for pk in game_pks if pk not in cached][-max_games:]
@@ -472,10 +451,17 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
     for r in cursor.fetchall():
         box_lookup.setdefault(r[0], []).append((r[1], r[2], r[3], r[4], r[5]))
 
+    # Pre-cache seeded Batter Stats for fast lookup
+    cursor.execute("SELECT player_name, team_name, avg, avg_vs_rhp, avg_vs_lhp, k_rate, bb_rate FROM Batter_Stats;")
+    batter_stats_lookup = {}
+    for r in cursor.fetchall():
+        batter_stats_lookup[(r[0], r[1])] = (r[2], r[3], r[4], r[5], r[6])
+
     print(f"Replaying chronological slate progression across {len(records)} empirical matchups at {iterations} Monte Carlo iterations...")
 
     sim_team_off, sim_team_pitch, sim_team_count = {}, {}, {}
-    sim_pitcher_f5, sim_pitcher_k, sim_pitcher_count = {}, {}, {}
+    sim_pitcher_f5, sim_pitcher_count = {}, {}
+    sim_batter_mod, sim_batter_count = {}, {}
     team_recent_workload = {}
 
     eval_history = []
@@ -626,7 +612,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         f5_home_prob = float(np.mean(f5_sim_h > f5_sim_a))
         f5_tie_prob = float(np.mean(f5_sim_a == f5_sim_h))
 
-        # 9. Individual Batter Hit Evaluation with Empirical Bayes Shrinkage
+        # 9. Individual Batter Hit Evaluation with Empirical Baselines & Shrinkage
         box_batters = box_lookup.get(pk, [])
         if box_batters:
             env_hit_scalar = (1.000 + (base_pf - 1.000) * 0.70) * (1.000 + ((1.225 - rho) * 0.8))
@@ -637,12 +623,21 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
                 opp_era = a_sp_metric if is_h else h_sp_metric
                 w_sp = w_a_sp if is_h else w_h_sp
 
+                # Retrieve seeded batter baseline or generic team slot prior
+                b_stats = batter_stats_lookup.get((b_name, b_team))
+                if not b_stats:
+                    b_stats = batter_stats_lookup.get((f"Batter {b_order}", b_team), (0.250, 0.250, 0.250, 0.220, 0.085))
+
+                b_avg, b_rhp, b_lhp, b_k, b_bb = b_stats
+                b_mod = sim_batter_mod.get(b_name, 1.000)
+                base_contact = (b_lhp if opp_throws == 'L' else b_rhp) * b_mod
+
                 proj_pa, proj_ab = project_endogenous_plate_appearances(b_order, tm_runs, is_h, final_home_prob if is_h else final_away_prob)
                 
                 # Log5 Matchup Synthesis
-                matchup_k = log5_matchup_odds(0.220, 0.220, LEAGUE_AVG_K_RATE)
-                p_in_play = max(0.40, 1.0 - matchup_k - 0.085)
-                matchup_ba_sp = log5_matchup_odds(0.250, float(np.clip(opp_era / 17.5, 0.18, 0.32)), LEAGUE_AVG_BA) * env_hit_scalar
+                matchup_k = log5_matchup_odds(b_k, 0.220, LEAGUE_AVG_K_RATE)
+                p_in_play = max(0.40, 1.0 - matchup_k - b_bb)
+                matchup_ba_sp = log5_matchup_odds(base_contact, float(np.clip(opp_era / 17.5, 0.18, 0.32)), LEAGUE_AVG_BA) * env_hit_scalar
                 p_hit_pa_sp = p_in_play * (matchup_ba_sp / max(0.01, 1.0 - LEAGUE_AVG_K_RATE - LEAGUE_AVG_BB_RATE))
                 p_hit_pa_pen = (1.0 - 0.220 - 0.085) * (0.250 * env_hit_scalar / max(0.01, 1.0 - LEAGUE_AVG_K_RATE - LEAGUE_AVG_BB_RATE))
 
@@ -653,13 +648,19 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
                 pred_hits_exp = float(proj_ab * p_hit_ab)
                 raw_over_0_5 = float(np.mean(b_sim_hits >= 1))
                 
-                # Calibrated through Empirical Bayes Log-Odds Shrinkage
                 pred_over_0_5 = apply_bayesian_hit_shrinkage(raw_over_0_5, ab_sample=120)
 
                 batter_eval_history.append({
                     'hit_err': abs(b_act_hits - pred_hits_exp),
                     'hit_brier': (pred_over_0_5 - (1.0 if b_act_hits >= 1 else 0.0)) ** 2
                 })
+
+                # Sequential Walk-Forward Batter Memory Update
+                b_err = b_act_hits - pred_hits_exp
+                b_alpha = min(0.08, 0.02 + (abs(b_err) * 0.015))
+                old_b_mod = sim_batter_mod.get(b_name, 1.000)
+                sim_batter_mod[b_name] = max(0.75, min(1.25, b_alpha * (old_b_mod + b_err * 0.04) + (1.0 - b_alpha) * old_b_mod))
+                sim_batter_count[b_name] = sim_batter_count.get(b_name, 0) + 1
 
         cursor.execute('''
         INSERT OR REPLACE INTO Model_Forecasts 
@@ -733,7 +734,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
                 sim_team_pitch[t_name] = max(0.70, min(1.30, alpha * (old_mod + err * 0.04) + (1.0 - alpha) * old_mod))
             sim_team_count[t_name] = sim_team_count.get(t_name, 0) + 1
 
-    print(f"Persisting empirical parameters ({len(sim_pitcher_f5)} pitchers, {len(sim_team_off)} teams) into operational tables...")
+    print(f"Persisting empirical parameters ({len(sim_pitcher_f5)} pitchers, {len(sim_team_off)} teams, {len(sim_batter_mod)} batters) into operational tables...")
     for p_name, mod in sim_pitcher_f5.items():
         if p_name not in ('Unknown', 'TBD'):
             cursor.execute('''
@@ -749,6 +750,13 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         INSERT OR REPLACE INTO Dynamic_Modifiers (team_name, offensive_modifier, pitching_modifier, appearance_count, last_updated)
         VALUES (?, ?, ?, ?, ?)
         ''', (t_name, round(off_mod, 4), round(pitch_mod, 4), count, now_ts))
+
+    for b_name, b_mod in sim_batter_mod.items():
+        count = sim_batter_count.get(b_name, 0)
+        cursor.execute('''
+        INSERT OR REPLACE INTO Batter_Modifiers (player_name, contact_modifier, appearance_count, last_updated)
+        VALUES (?, ?, ?, ?)
+        ''', (b_name, round(b_mod, 4), count, now_ts))
 
     conn.commit()
 
@@ -888,6 +896,7 @@ def export_backtest_markdown_report(cursor):
         "- **Lookahead Isolation**: Strict point-in-time progression (zero data leakage).",
         "- **F5 Scoring**: Evaluated against continuous median with 5.0 / 9.7 volume scalar.",
         "- **Player Hit Calibration**: Empirical Bayes log-odds shrinkage toward 60.5% starter hit rate.",
+        "- **Batter Baselines**: Seeded 2025 team and slot-specific priors with sequential EWMA learning.",
         ""
     ]
     with open("BACKTEST_REPORT.md", "w", encoding="utf-8") as f:
