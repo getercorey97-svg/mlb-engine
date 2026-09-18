@@ -9,8 +9,16 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+try:
+    from auto_calibration import audit_rolling_telemetry, ensure_telemetry_schemas
+except ImportError:
+    def ensure_telemetry_schemas(cursor):
+        pass
+    def audit_rolling_telemetry(conn, cursor, window_size=50):
+        return 0.0, False, False
+
 def ensure_engine_schemas(cursor):
-    """Guarantees all reference tables exist with auto-migration for appearance tracking, platoon splits, and umpire states."""
+    """Guarantees all production reference, telemetry, and modifier tables exist."""
     cursor.executescript('''
     CREATE TABLE IF NOT EXISTS Model_Forecasts (
         game_pk INTEGER PRIMARY KEY,
@@ -110,7 +118,28 @@ def ensure_engine_schemas(cursor):
         win_accuracy REAL,
         f5_win_accuracy REAL DEFAULT 0.0,
         avg_run_error REAL,
+        f5_avg_run_error REAL DEFAULT 0.0,
         executed_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS System_Telemetry (
+        telemetry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        evaluated_games INTEGER,
+        rolling_brier REAL,
+        rolling_win_acc REAL,
+        rolling_f5_acc REAL,
+        rolling_full_run_mae REAL,
+        rolling_f5_median_mae REAL,
+        rolling_f5_signed_bias REAL,
+        rolling_full_signed_bias REAL,
+        drift_flag INTEGER DEFAULT 0,
+        retrain_recommended INTEGER DEFAULT 0,
+        logged_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS Calibration_Offsets (
+        market_type TEXT PRIMARY KEY,
+        active_bias_offset REAL DEFAULT 0.00,
+        consecutive_drifts INTEGER DEFAULT 0,
+        last_adjusted TEXT
     );
     ''')
 
@@ -124,7 +153,8 @@ def ensure_engine_schemas(cursor):
         ("Bullpen_Fatigue", "rolling_ip_3d", "REAL DEFAULT 8.0"),
         ("Pitcher_Modifiers", "appearance_count", "INTEGER DEFAULT 0"),
         ("Dynamic_Modifiers", "appearance_count", "INTEGER DEFAULT 0"),
-        ("Backtest_Ledger", "f5_win_accuracy", "REAL DEFAULT 0.0")
+        ("Backtest_Ledger", "f5_win_accuracy", "REAL DEFAULT 0.0"),
+        ("Backtest_Ledger", "f5_avg_run_error", "REAL DEFAULT 0.0")
     ]
     for table, col, col_def in migrations:
         cursor.execute(f"PRAGMA table_info({table});")
@@ -133,10 +163,7 @@ def ensure_engine_schemas(cursor):
             cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def};")
 
 def project_starter_innings(effective_metric: float) -> tuple:
-    """
-    Computes dynamic starting pitcher innings expectation and derived workload weights.
-    Replaces static 55/45 splits with pitching quality-dependent innings projections.
-    """
+    """Computes dynamic starting pitcher innings expectation and derived workload weights."""
     projected_outs = float(np.clip(27.0 - (effective_metric * 2.2), 9.0, 21.6))
     ip_projected = projected_outs / 3.0
     sp_weight = float(np.clip(ip_projected / 9.0, 0.33, 0.80))
@@ -248,7 +275,7 @@ def build_mlb_stacking_classifier():
 
 def run_ultimate_monte_carlo():
     print("=" * 65)
-    print(f"[{datetime.now()}] Running Deterministic Dual-Engine Monte Carlo (Dynamic Starter IP + NegBinomial)")
+    print(f"[{datetime.now()}] Running Self-Optimizing Dual-Engine Monte Carlo (Dynamic Starter IP + NegBinomial)")
     print("=" * 65)
 
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
@@ -257,7 +284,11 @@ def run_ultimate_monte_carlo():
     cursor = conn.cursor()
 
     ensure_engine_schemas(cursor)
+    ensure_telemetry_schemas(cursor)
     conn.commit()
+
+    # Autonomous System Telemetry & Drift Check
+    bias, is_drift, retrain_needed = audit_rolling_telemetry(conn, cursor, window_size=50)
 
     today_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -302,13 +333,14 @@ def run_ultimate_monte_carlo():
         conn.close()
         return
 
+    # Ingest Empirical Completed Linescores
     cursor.execute('''
         SELECT m.predicted_home_runs, m.predicted_away_runs, m.home_prob, 
                (CASE WHEN p.home_score > p.away_score THEN 1.0 ELSE 0.0 END)
         FROM Post_Match_Analysis p
         INNER JOIN Model_Forecasts m ON p.game_pk = m.game_pk
         WHERE m.home_prob IS NOT NULL AND p.home_score IS NOT NULL
-        ORDER BY p.game_pk DESC LIMIT 3000
+        ORDER BY p.game_pk ASC LIMIT 3000
     ''')
     hist_data = cursor.fetchall()
 
@@ -319,7 +351,18 @@ def run_ultimate_monte_carlo():
             y_train = np.array([r[3] for r in hist_data])
             if len(np.unique(y_train)) > 1:
                 calibrator = build_mlb_stacking_classifier()
-                calibrator.fit(X_train, y_train)
+                
+                # Apply Recency-Weighted Sample Weights if Drift Detected
+                if retrain_needed:
+                    print("[CALIBRATOR] Autonomous Recency-Weighted Re-Fit Active (Drift Triggered)...")
+                    recency_weights = np.exp(np.linspace(-0.5, 0.0, len(y_train)))
+                    try:
+                        calibrator.fit(X_train, y_train, sample_weight=recency_weights)
+                    except TypeError:
+                        calibrator.fit(X_train, y_train)
+                else:
+                    calibrator.fit(X_train, y_train)
+                    
                 print(f"[CALIBRATOR] Regularized Stacking Ensemble active (trained on {len(hist_data)} empirical linescores)")
         except Exception as e:
             print(f"[CALIBRATOR] Error: {e}. Defaulting to Monte Carlo probabilities.")
@@ -381,11 +424,10 @@ def run_ultimate_monte_carlo():
         w_h_p = min(1.0, h_p_n / 10.0)
         h_p_run_mod = w_h_p * h_p_run_mod_raw + (1.0 - w_h_p) * 1.0
 
-        # Compute dynamic starter length based on effective expected performance
         w_h_sp, w_h_pen, h_ip_proj = project_starter_innings(h_sp_metric * h_p_run_mod)
         w_a_sp, w_a_pen, a_ip_proj = project_starter_innings(a_sp_metric * a_p_run_mod)
 
-        # Physical 3-Day Bullpen Workload
+        # 3-Day Physical Bullpen Workload
         a_pen_fatigue, a_ip_3d = get_rolling_bullpen_workload(cursor, away, ref_date)
         h_pen_fatigue, h_ip_3d = get_rolling_bullpen_workload(cursor, home, ref_date)
 
@@ -400,7 +442,7 @@ def run_ultimate_monte_carlo():
         ump_badge = f"🔒 {ump_name}" if ump_locked == 1 and ump_name != "Unknown / TBD" else "⏳ TBD"
         a_circadian_penalty = circadian_drag.get(away, 0.00)
 
-        # Dynamic starter innings weighted run expectancies
+        # Dynamic Starter Inning-Weighted Run Expectancies
         exp_away_runs = max(
             0.2, 
             ((a_sp_matchup_runs * a_off_mod * w_h_sp * (h_sp_metric / 4.20) * h_p_run_mod) + 
