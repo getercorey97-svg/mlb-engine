@@ -149,7 +149,7 @@ def ensure_unified_schemas(cursor):
         games_evaluated INTEGER,
         brier_score REAL,
         win_accuracy REAL,
-        f5_win_accuracy REAL,
+        f5_win_accuracy REAL DEFAULT 0.0,
         avg_run_error REAL,
         executed_at TEXT
     );
@@ -185,7 +185,8 @@ def ensure_unified_schemas(cursor):
         ("Pitcher_Modifiers", "appearance_count", "INTEGER DEFAULT 0"),
         ("Dynamic_Modifiers", "appearance_count", "INTEGER DEFAULT 0"),
         ("Daily_Lineups", "uv_modifier", "REAL DEFAULT 5.0"),
-        ("Daily_Umpires", "umpire_locked", "INTEGER DEFAULT 0")
+        ("Daily_Umpires", "umpire_locked", "INTEGER DEFAULT 0"),
+        ("Backtest_Ledger", "f5_win_accuracy", "REAL DEFAULT 0.0")
     ]
     for table, col, col_def in migrations:
         cursor.execute(f"PRAGMA table_info({table});")
