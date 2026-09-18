@@ -34,7 +34,7 @@ STADIUM_RHO_BASELINES = {
 }
 
 def initialize_database_schemas():
-    """Guarantees every table and column exists with appearance tracking migrations."""
+    """Guarantees every table and column exists with auto-migrations for telemetry and F5 offsets."""
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
@@ -63,7 +63,8 @@ def initialize_database_schemas():
             f5_tie_prob REAL,
             f5_exp_away_runs REAL,
             f5_exp_home_runs REAL,
-            f5_total_runs REAL
+            f5_total_runs REAL,
+            f5_median_total REAL DEFAULT 0.0
         );
         CREATE TABLE IF NOT EXISTS Pitcher_Props (
             game_pk INTEGER,
@@ -125,6 +126,7 @@ def initialize_database_schemas():
         CREATE TABLE IF NOT EXISTS Bullpen_Fatigue (
             team_name TEXT PRIMARY KEY,
             fatigue_multiplier REAL DEFAULT 1.00,
+            rolling_ip_3d REAL DEFAULT 8.0,
             last_updated TEXT
         );
         CREATE TABLE IF NOT EXISTS Post_Match_Analysis (
@@ -137,22 +139,59 @@ def initialize_database_schemas():
             model_correct INTEGER,
             processed_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS System_Telemetry (
+            telemetry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            evaluated_games INTEGER,
+            rolling_brier REAL,
+            rolling_win_acc REAL,
+            rolling_f5_acc REAL,
+            rolling_full_run_mae REAL,
+            rolling_f5_median_mae REAL,
+            rolling_f5_signed_bias REAL,
+            rolling_full_signed_bias REAL,
+            drift_flag INTEGER DEFAULT 0,
+            retrain_recommended INTEGER DEFAULT 0,
+            logged_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS Calibration_Offsets (
+            market_type TEXT PRIMARY KEY,
+            active_bias_offset REAL DEFAULT 0.00,
+            consecutive_drifts INTEGER DEFAULT 0,
+            last_adjusted TEXT
+        );
+        CREATE TABLE IF NOT EXISTS Backtest_Ledger (
+            run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            games_evaluated INTEGER,
+            brier_score REAL,
+            win_accuracy REAL,
+            f5_win_accuracy REAL DEFAULT 0.0,
+            avg_run_error REAL,
+            f5_avg_run_error REAL DEFAULT 0.0,
+            executed_at TEXT
+        );
     ''')
 
-    for table, col in [("Pitcher_Modifiers", "appearance_count INTEGER DEFAULT 0"),
-                       ("Dynamic_Modifiers", "appearance_count INTEGER DEFAULT 0"),
-                       ("Daily_Lineups", "uv_modifier REAL DEFAULT 1.00"),
-                       ("Daily_Umpires", "umpire_locked INTEGER DEFAULT 0"),
-                       ("Bullpen_Fatigue", "last_updated TEXT")]:
+    migrations = [
+        ("Pitcher_Modifiers", "appearance_count INTEGER DEFAULT 0"),
+        ("Dynamic_Modifiers", "appearance_count INTEGER DEFAULT 0"),
+        ("Daily_Lineups", "uv_modifier REAL DEFAULT 1.00"),
+        ("Daily_Umpires", "umpire_locked INTEGER DEFAULT 0"),
+        ("Bullpen_Fatigue", "last_updated TEXT"),
+        ("Bullpen_Fatigue", "rolling_ip_3d REAL DEFAULT 8.0"),
+        ("F5_Forecasts", "f5_median_total REAL DEFAULT 0.0"),
+        ("Backtest_Ledger", "f5_win_accuracy REAL DEFAULT 0.0"),
+        ("Backtest_Ledger", "f5_avg_run_error REAL DEFAULT 0.0")
+    ]
+    for table, col_def in migrations:
         try:
-            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col};")
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col_def};")
         except sqlite3.OperationalError:
             pass
 
-    cursor.execute("SELECT COUNT(*) FROM Park_Factors")
+    cursor.execute("SELECT COUNT(*) FROM Park_Factors;")
     if cursor.fetchone()[0] == 0:
         for team, factor in DEFAULT_PARK_FACTORS.items():
-            cursor.execute("INSERT OR REPLACE INTO Park_Factors (home_team, run_factor) VALUES (?, ?)", (team, factor))
+            cursor.execute("INSERT OR REPLACE INTO Park_Factors (home_team, run_factor) VALUES (?, ?);", (team, factor))
 
     conn.commit()
     conn.close()
@@ -164,7 +203,6 @@ def fetch_daily_matchups_and_lineups():
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
 
-    # Clear active lineup table to ensure no game repeats
     cursor.execute("DELETE FROM Daily_Lineups;")
 
     today_str = datetime.now().strftime('%Y-%m-%d')
@@ -202,7 +240,7 @@ def fetch_daily_matchups_and_lineups():
     print(f"[PHASE 3 COMPLETE] Synchronized {total_ingested} matchups strictly for {today_str}.")
 
 def export_prediction_markdown():
-    """Generates PREDICTIONS_TODAY.md containing Full Game & F5 market projections."""
+    """Generates PREDICTIONS_TODAY.md containing Full Game & F5 discrete median market projections."""
     print("[PHASE 6] Exporting Consolidated Prediction Markdown...")
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
@@ -212,7 +250,7 @@ def export_prediction_markdown():
         m.game_pk, m.away_team, m.home_team, 
         m.away_prob, m.home_prob, m.predicted_edge,
         m.predicted_away_runs, m.predicted_home_runs,
-        f.f5_away_prob, f.f5_home_prob, f.f5_tie_prob, f.f5_total_runs,
+        f.f5_away_prob, f.f5_home_prob, f.f5_tie_prob, f.f5_total_runs, f.f5_median_total,
         d.away_pitcher, d.home_pitcher
     FROM Model_Forecasts m
     INNER JOIN Daily_Lineups d ON m.game_pk = d.game_pk
@@ -238,25 +276,26 @@ def export_prediction_markdown():
         lines.append("| No unplayed active games scheduled | - | - | - | - | - |")
     else:
         for r in rows:
-            pk, away, home, a_prob, h_prob, edge, a_runs, h_runs, f5_a, f5_h, f5_t, f5_tot, a_sp, h_sp = r
+            pk, away, home, a_prob, h_prob, edge, a_runs, h_runs, f5_a, f5_h, f5_t, f5_tot, f5_med, a_sp, h_sp = r
             pick = home if h_prob >= a_prob else away
             prob = max(h_prob, a_prob)
             lines.append(f"| {away} @ {home} | **{pick}** | {prob:.1%} | +{edge*100:.1f}% | {a_runs:.1f} - {h_runs:.1f} | {a_sp} vs {h_sp} |")
 
         lines.extend([
             "",
-            "### ⚡ First 5 (F5) & Props Projections",
+            "### ⚡ First 5 (F5) & Props Projections (L1 Median-Optimized)",
             "",
-            "| Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Total |",
-            "| :--- | :---: | :---: | :---: | :---: |"
+            "| Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | L1 Median Total |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: |"
         ])
         for r in rows:
-            pk, away, home, a_prob, h_prob, edge, a_runs, h_runs, f5_a, f5_h, f5_t, f5_tot, a_sp, h_sp = r
+            pk, away, home, a_prob, h_prob, edge, a_runs, h_runs, f5_a, f5_h, f5_t, f5_tot, f5_med, a_sp, h_sp = r
             f5_a_str = f"{f5_a:.1%}" if f5_a is not None else "-"
             f5_h_str = f"{f5_h:.1%}" if f5_h is not None else "-"
             f5_t_str = f"{f5_t:.1%}" if f5_t is not None else "-"
-            f5_tot_str = f"{f5_tot:.2f}" if f5_tot is not None else "-"
-            lines.append(f"| {away} @ {home} | {f5_a_str} | {f5_h_str} | {f5_t_str} | {f5_tot_str} runs |")
+            f5_tot_str = f"{f5_tot:.2f} r" if f5_tot is not None else "-"
+            f5_med_str = f"**{f5_med:.1f} r**" if f5_med is not None else "-"
+            lines.append(f"| {away} @ {home} | {f5_a_str} | {f5_h_str} | {f5_t_str} | {f5_tot_str} | {f5_med_str} |")
 
     with open("PREDICTIONS_TODAY.md", "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
@@ -264,7 +303,7 @@ def export_prediction_markdown():
 
 def main():
     print("=" * 65)
-    print(f"[{datetime.now()}] Starting Unified MLB Orchestration Pipeline")
+    print(f"[{datetime.now()}] Starting Unified Self-Optimizing MLB Pipeline")
     print("=" * 65)
 
     # 1. Schema Validation & Baseline Setup
@@ -277,6 +316,17 @@ def main():
         post_match_analysis.run_post_match_analysis()
     except Exception as e:
         print(f"[BYPASS] Post-Match analysis skipped: {e}")
+
+    # 2.1 Autonomous Telemetry Audit & Dynamic Drift Control
+    try:
+        import auto_calibration
+        print("[PHASE 2.1] Executing Telemetry Audit & Drift Monitoring...")
+        conn = sqlite3.connect('mlb_engine.db', timeout=30)
+        cursor = conn.cursor()
+        auto_calibration.audit_rolling_telemetry(conn, cursor, window_size=50)
+        conn.close()
+    except Exception as e:
+        print(f"[BYPASS] Autonomous telemetry audit skipped: {e}")
 
     # 2.5 Calculate Rolling Reliever Fatigue Over the Past 3 Days
     try:
@@ -297,7 +347,7 @@ def main():
     except Exception as e:
         print(f"[BYPASS] Lineup verifier skipped: {e}")
 
-    # 3.6 Ingest Live Weather & Thermodynamics
+    # 3.6 Ingest Live Weather & Ballpark Thermodynamics
     try:
         import weather_thermodynamics
         print("[PHASE 3.6] Executing Live Weather Thermodynamics...")
@@ -314,7 +364,7 @@ def main():
     except Exception as e:
         print(f"[BYPASS] Umpire ingestion skipped: {e}")
 
-    # 4. Ingest Esoteric Signals (NOAA + GDELT)
+    # 4. Ingest Discovery Variables (NOAA + GDELT)
     try:
         import open_source_discovery
         print("[PHASE 4] Executing Signal Discovery Sweep...")
@@ -322,7 +372,7 @@ def main():
     except Exception as e:
         print(f"[BYPASS] Discovery ingestion skipped: {e}")
 
-    # 5. Core Full Game Monte Carlo Simulation
+    # 5A. Core Full Game Monte Carlo Simulation (Self-Optimizing)
     try:
         import engine
         print("[PHASE 5A] Executing Full Game Monte Carlo Engine...")
@@ -330,15 +380,15 @@ def main():
     except Exception as e:
         print(f"[ERROR] Engine failure: {e}")
 
-    # 6. Dedicated F5 & Props Secondary Engine
+    # 5B. Dedicated F5 & Props Engine (L1 Median Optimized)
     try:
-        import engine_f5_props as engine_f5
+        import engine_f5_props
         print("[PHASE 5B] Executing First 5 & Pitcher Props Engine...")
-        engine_f5.run_f5_and_props_engine()
+        engine_f5_props.run_f5_and_props_engine()
     except Exception as e:
         print(f"[ERROR] Engine F5 failure: {e}")
 
-    # 7. Compile Markdown Projections for Today's Slate
+    # 6. Compile Markdown Projections for Today's Slate
     export_prediction_markdown()
 
     print("=" * 65)
