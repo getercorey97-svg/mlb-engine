@@ -11,6 +11,7 @@ LEAGUE_AVG_K_RATE = 0.222
 LEAGUE_AVG_BB_RATE = 0.082
 LEAGUE_AVG_BABIP = 0.292
 
+# Order-dependent plate appearance expansion weights
 ORDER_PA_WEIGHTS = {
     1: 1.14, 2: 1.11, 3: 1.08, 4: 1.05, 5: 1.02,
     6: 0.98, 7: 0.95, 8: 0.92, 9: 0.88
@@ -44,6 +45,27 @@ def ensure_batter_schemas(cursor):
         updated_at TEXT
     );
     ''')
+
+def apply_bayesian_hit_shrinkage(raw_prob_over_0_5: float, ab_sample: int = 120) -> float:
+    """
+    Applies empirical Bayes log-odds shrinkage to compress extreme over/under
+    hit probabilities toward the baseline 60.5% starter hit rate.
+    Eliminates quadratic Brier penalties from independent Bernoulli assumptions.
+    """
+    p_clipped = float(np.clip(raw_prob_over_0_5, 0.05, 0.95))
+    logit_raw = np.log(p_clipped / (1.0 - p_clipped))
+    
+    # Prior logit for starter recording >= 1 hit (60.5% league base rate)
+    prior_p = 0.605
+    logit_prior = np.log(prior_p / (1.0 - prior_p))
+    
+    # Weight parameter: scales with sample depth, capped to enforce shrinkage
+    w = float(np.clip(ab_sample / (ab_sample + 80), 0.70, 0.85))
+    
+    shrunk_logit = (w * logit_raw) + ((1.0 - w) * logit_prior)
+    shrunk_p = 1.0 / (1.0 + np.exp(-shrunk_logit))
+    
+    return float(np.clip(shrunk_p, 0.20, 0.82))
 
 def log5_matchup_odds(p_batter: float, p_pitcher: float, p_league: float) -> float:
     """
@@ -103,7 +125,7 @@ def fetch_confirmed_batting_orders(game_pk: int) -> dict:
 
 def run_batter_props_engine():
     print("=" * 65)
-    print(f"[{datetime.now()}] Running High-Precision Batter Hit Engine (50,000 Iterations + Log5 Matchups)")
+    print(f"[{datetime.now()}] Running High-Precision Batter Hit Engine (50,000 Iterations + Bayes Shrinkage)")
     print("=" * 65)
 
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
@@ -206,9 +228,12 @@ def run_batter_props_engine():
                 sim_hits = rng.binomial(int_ab, p_hit_ab, iterations)
 
                 expected_hits = round(proj_ab * p_hit_ab, 2)
-                p_over_0_5 = round(float(np.mean(sim_hits >= 1)), 4)
-                p_over_1_5 = round(float(np.mean(sim_hits >= 2)), 4)
-                p_over_2_5 = round(float(np.mean(sim_hits >= 3)), 4)
+                raw_p_over_0_5 = float(np.mean(sim_hits >= 1))
+                
+                # Empirical Bayes Log-Odds Shrinkage
+                p_over_0_5 = round(apply_bayesian_hit_shrinkage(raw_p_over_0_5, ab_sample=120), 4)
+                p_over_1_5 = round(float(np.clip(np.mean(sim_hits >= 2), 0.001, p_over_0_5 - 0.02)), 4)
+                p_over_2_5 = round(float(np.clip(np.mean(sim_hits >= 3), 0.0001, p_over_1_5 - 0.02)), 4)
 
                 cursor.execute('''
                 INSERT OR REPLACE INTO Batter_Hit_Forecasts 
@@ -219,7 +244,7 @@ def run_batter_props_engine():
     conn.commit()
     cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
     conn.close()
-    print("[SUCCESS] Batter hit projections successfully generated at 50,000 iterations.")
+    print("[SUCCESS] Calibrated Batter hit projections successfully stored in Batter_Hit_Forecasts.")
 
 if __name__ == "__main__":
     run_batter_props_engine()
