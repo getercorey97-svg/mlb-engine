@@ -1,41 +1,41 @@
-# MLB Predictive Model Forecasts (2026-09-18 03:01:26 UTC)
+# MLB Predictive Model Forecasts (2026-09-18 03:53:29 UTC)
 
 ### 🎯 Full Game Projections (Moneyline & Run Expectancies)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Miami Marlins @ San Diego Padres | **San Diego Padres** | 54.1% | +8.3% | 4.0 - 4.0 | Tyler Phillips vs Nick Pivetta |
-| Minnesota Twins @ Los Angeles Angels | **Los Angeles Angels** | 53.6% | +7.2% | 4.7 - 3.9 | Connor Prielipp vs Grayson Rodriguez |
-| Athletics @ Cleveland Guardians | **Cleveland Guardians** | 53.5% | +7.1% | 4.3 - 4.0 | Mason Barnett vs Daniel Espino |
-| Philadelphia Phillies @ New York Mets | **New York Mets** | 53.4% | +6.8% | 4.3 - 4.2 | TBD vs Zac Thornton |
-| Atlanta Braves @ Houston Astros | **Houston Astros** | 53.2% | +6.5% | 4.8 - 4.1 | Tyler Mahle vs Peter Lambert |
-| Boston Red Sox @ Tampa Bay Rays | **Tampa Bay Rays** | 53.1% | +6.2% | 4.3 - 4.3 | Ranger Suarez vs Ian Seymour |
-| Detroit Tigers @ Chicago White Sox | **Chicago White Sox** | 53.0% | +6.1% | 4.5 - 4.5 | Andrew Sears vs David Sandlin |
-| Toronto Blue Jays @ Texas Rangers | **Texas Rangers** | 52.8% | +5.6% | 4.7 - 4.5 | Dylan Cease vs Kumar Rocker |
-| Kansas City Royals @ Pittsburgh Pirates | **Pittsburgh Pirates** | 52.8% | +5.6% | 4.8 - 5.0 | Randy Dobnak vs Paul Skenes |
-| San Francisco Giants @ Los Angeles Dodgers | **Los Angeles Dodgers** | 52.6% | +5.2% | 4.3 - 5.3 | Cesar Perdomo vs Tyler Glasnow |
-| Milwaukee Brewers @ Baltimore Orioles | **Baltimore Orioles** | 52.2% | +4.5% | 5.6 - 4.5 | Dustin May vs TBD |
-| Washington Nationals @ St. Louis Cardinals | **St. Louis Cardinals** | 52.0% | +4.0% | 5.3 - 4.7 | Cade Cavalli vs Kyle Leahy |
-| Seattle Mariners @ Colorado Rockies | **Seattle Mariners** | 52.0% | +4.0% | 6.9 - 7.5 | Bryan Woo vs TBD |
-| Chicago Cubs @ Cincinnati Reds | **Cincinnati Reds** | 51.4% | +2.9% | 6.4 - 4.7 | Clay Holmes vs Chase Burns |
-| New York Yankees @ Arizona Diamondbacks | **Arizona Diamondbacks** | 50.9% | +1.7% | 6.1 - 5.2 | Gerrit Cole vs Eduardo Rodriguez |
+| Chicago Cubs @ Cincinnati Reds | **Chicago Cubs** | 60.7% | +21.4% | 5.8 - 4.3 | Clay Holmes vs Chase Burns |
+| San Francisco Giants @ Los Angeles Dodgers | **Los Angeles Dodgers** | 59.0% | +17.9% | 4.2 - 4.8 | Cesar Perdomo vs Tyler Glasnow |
+| Kansas City Royals @ Pittsburgh Pirates | **Pittsburgh Pirates** | 57.3% | +14.6% | 4.4 - 4.9 | Randy Dobnak vs Paul Skenes |
+| Miami Marlins @ San Diego Padres | **San Diego Padres** | 56.9% | +13.8% | 3.9 - 4.2 | Tyler Phillips vs Nick Pivetta |
+| Detroit Tigers @ Chicago White Sox | **Chicago White Sox** | 55.6% | +11.2% | 4.3 - 4.5 | Andrew Sears vs David Sandlin |
+| Seattle Mariners @ Colorado Rockies | **Colorado Rockies** | 54.7% | +9.3% | 7.0 - 7.9 | Bryan Woo vs TBD |
+| Philadelphia Phillies @ New York Mets | **New York Mets** | 54.5% | +9.0% | 4.2 - 4.2 | TBD vs Zac Thornton |
+| Milwaukee Brewers @ Baltimore Orioles | **Milwaukee Brewers** | 54.2% | +8.4% | 5.3 - 4.5 | Dustin May vs TBD |
+| Athletics @ Cleveland Guardians | **Cleveland Guardians** | 52.6% | +5.3% | 4.5 - 4.4 | Mason Barnett vs Daniel Espino |
+| New York Yankees @ Arizona Diamondbacks | **Arizona Diamondbacks** | 52.6% | +5.1% | 4.8 - 4.8 | Gerrit Cole vs Eduardo Rodriguez |
+| Boston Red Sox @ Tampa Bay Rays | **Tampa Bay Rays** | 51.9% | +3.7% | 4.3 - 3.9 | Ranger Suarez vs Ian Seymour |
+| Minnesota Twins @ Los Angeles Angels | **Los Angeles Angels** | 51.1% | +2.3% | 4.5 - 4.1 | Connor Prielipp vs Grayson Rodriguez |
+| Atlanta Braves @ Houston Astros | **Houston Astros** | 51.0% | +2.0% | 4.6 - 4.3 | Tyler Mahle vs Peter Lambert |
+| Washington Nationals @ St. Louis Cardinals | **Washington Nationals** | 51.0% | +1.9% | 5.0 - 4.5 | Cade Cavalli vs Kyle Leahy |
+| Toronto Blue Jays @ Texas Rangers | **Texas Rangers** | 50.0% | +0.1% | 4.8 - 4.4 | Dylan Cease vs Kumar Rocker |
 
 ### ⚡ First 5 (F5) & Props Projections
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Total |
 | :--- | :---: | :---: | :---: | :---: |
-| Miami Marlins @ San Diego Padres | 40.3% | 41.4% | 18.4% | 4.51 runs |
-| Minnesota Twins @ Los Angeles Angels | 45.5% | 37.4% | 17.1% | 4.91 runs |
-| Athletics @ Cleveland Guardians | 40.4% | 41.3% | 18.3% | 4.80 runs |
-| Philadelphia Phillies @ New York Mets | 41.8% | 40.5% | 17.6% | 4.79 runs |
-| Atlanta Braves @ Houston Astros | 47.9% | 34.8% | 17.2% | 5.01 runs |
-| Boston Red Sox @ Tampa Bay Rays | 41.3% | 40.6% | 18.0% | 4.62 runs |
-| Detroit Tigers @ Chicago White Sox | 42.5% | 39.5% | 18.0% | 4.95 runs |
-| Toronto Blue Jays @ Texas Rangers | 51.4% | 32.6% | 16.0% | 5.33 runs |
-| Kansas City Royals @ Pittsburgh Pirates | 42.5% | 40.7% | 16.8% | 5.18 runs |
-| San Francisco Giants @ Los Angeles Dodgers | 39.5% | 43.1% | 17.4% | 4.99 runs |
-| Milwaukee Brewers @ Baltimore Orioles | 43.9% | 40.0% | 16.1% | 5.41 runs |
-| Washington Nationals @ St. Louis Cardinals | 43.4% | 39.0% | 17.6% | 4.98 runs |
-| Seattle Mariners @ Colorado Rockies | 49.3% | 37.6% | 13.2% | 8.04 runs |
-| Chicago Cubs @ Cincinnati Reds | 46.9% | 37.3% | 15.7% | 5.72 runs |
-| New York Yankees @ Arizona Diamondbacks | 48.0% | 37.1% | 14.9% | 6.27 runs |
+| Chicago Cubs @ Cincinnati Reds | 43.9% | 38.9% | 17.2% | 5.12 runs |
+| San Francisco Giants @ Los Angeles Dodgers | 40.4% | 41.7% | 17.9% | 4.73 runs |
+| Kansas City Royals @ Pittsburgh Pirates | 39.7% | 43.2% | 17.1% | 4.96 runs |
+| Miami Marlins @ San Diego Padres | 38.2% | 43.9% | 17.9% | 4.53 runs |
+| Detroit Tigers @ Chicago White Sox | 40.5% | 42.1% | 17.4% | 4.91 runs |
+| Seattle Mariners @ Colorado Rockies | 48.4% | 39.1% | 12.5% | 8.31 runs |
+| Philadelphia Phillies @ New York Mets | 41.0% | 41.5% | 17.5% | 4.76 runs |
+| Milwaukee Brewers @ Baltimore Orioles | 41.6% | 41.5% | 16.9% | 5.21 runs |
+| Athletics @ Cleveland Guardians | 42.6% | 40.4% | 16.9% | 4.83 runs |
+| New York Yankees @ Arizona Diamondbacks | 40.6% | 42.6% | 16.7% | 5.34 runs |
+| Boston Red Sox @ Tampa Bay Rays | 42.7% | 39.3% | 18.0% | 4.54 runs |
+| Minnesota Twins @ Los Angeles Angels | 40.4% | 42.6% | 17.1% | 5.05 runs |
+| Atlanta Braves @ Houston Astros | 44.4% | 38.5% | 17.2% | 5.07 runs |
+| Washington Nationals @ St. Louis Cardinals | 40.9% | 40.9% | 18.2% | 4.76 runs |
+| Toronto Blue Jays @ Texas Rangers | 51.0% | 32.8% | 16.3% | 5.27 runs |
