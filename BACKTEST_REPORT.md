@@ -1,4 +1,4 @@
-# MLB Engine Empirical Backtest Report (2026-09-18 08:20:19)
+# MLB Engine Empirical Backtest Report (2026-09-18 08:41:12)
 
 ### 📊 Walk-Forward Simulation Summary (50,000 Iterations)
 
@@ -11,11 +11,11 @@
 | **Full Game Mean Run Error** | `3.72 runs` | < 3.80 |
 | **First 5 (F5) Median Run Error** | `2.58 runs` | <= 2.50 |
 | **Batter Hit Prop MAE** | `0.70 hits` | < 0.70 |
-| **Batter Over 0.5 Hit Brier** | `0.2509` | < 0.2250 |
+| **Batter Over 0.5 Hit Brier** | `0.2517` | < 0.2250 |
 
 ### ⚙️ Engine State
 - **Execution Model**: Deterministic Dual-Engine Monte Carlo (50,000 Iterations).
 - **Ensemble**: Stacking Classifier (RandomForest + XGBoost -> Logistic Regression).
 - **Lookahead Isolation**: Strict point-in-time progression (zero data leakage).
 - **F5 Scoring**: Evaluated against continuous median with 0.5000 volume scalar.
-- **Player Hit Props**: Endogenous plate appearance simulation with Log5 batter-vs-pitcher contact mixture.
+- **Player Hit Calibration**: Empirical Bayes log-odds shrinkage toward 60.5% starter hit rate.
