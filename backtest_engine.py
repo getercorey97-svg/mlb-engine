@@ -42,7 +42,6 @@ STADIUM_RHO_BASELINES = {
     "Toronto Blue Jays": 1.190, "Default": 1.225
 }
 
-# Empirical Catcher Framing Runs per 9 Innings
 CATCHER_FRAMING_RUNS = {
     "San Francisco Giants": -0.18, "Texas Rangers": -0.15, "Milwaukee Brewers": -0.16,
     "New York Yankees": -0.14, "Los Angeles Dodgers": -0.12, "Toronto Blue Jays": -0.11,
@@ -257,16 +256,9 @@ def ensure_unified_schemas(cursor):
             cursor.execute("INSERT OR REPLACE INTO Park_Factors (home_team, run_factor) VALUES (?, ?);", (team, factor))
 
 def compute_24_state_markov_half_inning_runs(p_single, p_double, p_triple, p_hr, p_bb, p_k, p_out):
-    """
-    Computes exact expected runs per half-inning via 24-state base-out Markov chain
-    fundamental matrix: E[Runs] = (I - Q)^(-1) * R_vec
-    States: 8 base states (0 to 7) x 3 out states (0, 1, 2) = 24 transient states.
-    """
     Q = np.zeros((24, 24))
     R_vec = np.zeros(24)
 
-    # Base state mappings: 0=Empty, 1=1st, 2=2nd, 3=1st&2nd, 4=3rd, 5=1st&3rd, 6=2nd&3rd, 7=Loaded
-    # Advance outcomes: (next_base_state, runs_scored)
     outcomes = {
         'single': {0: (1, 0), 1: (3, 0), 2: (1, 1), 3: (3, 1), 4: (1, 1), 5: (3, 1), 6: (1, 2), 7: (3, 2)},
         'double': {0: (2, 0), 1: (2, 1), 2: (2, 1), 3: (2, 2), 4: (2, 1), 5: (2, 2), 6: (2, 2), 7: (2, 3)},
@@ -278,32 +270,26 @@ def compute_24_state_markov_half_inning_runs(p_single, p_double, p_triple, p_hr,
     for out in range(3):
         for b in range(8):
             curr_state = out * 8 + b
-
-            # Events without additional outs
             for ev, p_ev in [('single', p_single), ('double', p_double), ('triple', p_triple), ('hr', p_hr), ('bb', p_bb)]:
                 next_b, runs = outcomes[ev][b]
                 next_state = out * 8 + next_b
                 Q[curr_state, next_state] += p_ev
                 R_vec[curr_state] += p_ev * runs
 
-            # Strikeout (adds 1 out, bases stay identical)
             if out < 2:
                 next_state_k = (out + 1) * 8 + b
                 Q[curr_state, next_state_k] += p_k
 
-            # Field out / ground out (simplified DP dynamic if runner on 1st with < 2 outs)
             has_runner_1st = (b in (1, 3, 5, 7))
             if has_runner_1st and out == 0:
                 p_dp = p_out * 0.12
                 p_reg_out = p_out - p_dp
-                # DP adds 2 outs
                 next_b = 0 if b == 1 else (2 if b == 3 else (4 if b == 5 else 6))
                 Q[curr_state, (out + 2) * 8 + next_b] += p_dp
                 Q[curr_state, (out + 1) * 8 + b] += p_reg_out
             elif out < 2:
                 Q[curr_state, (out + 1) * 8 + b] += p_out
 
-    # Fundamental matrix inversion: N = (I - Q)^(-1)
     I = np.eye(24)
     try:
         N = np.linalg.inv(I - Q)
@@ -559,13 +545,11 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         except Exception:
             curr_dt = datetime.now()
 
-        # 1. Tiered Bullpen Leverage Availability Tracking
         def compute_sim_pen_workload(team_name):
             recent_games = team_recent_workload.get(team_name, [])
             valid = [r for r in recent_games if 1 <= (curr_dt - r[0]).days <= 3]
             hl_valid = [r for r in team_high_leverage_workload.get(team_name, []) if 1 <= (curr_dt - r[0]).days <= 2]
             
-            # Binary check on High Leverage Tier (Closer / Setups burned)
             hl_burned = (len(hl_valid) >= 2 or sum(r[1] for r in hl_valid) >= 40.0)
             hl_tax = 0.35 if hl_burned else 0.00
             
@@ -583,7 +567,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         h_pen_fatigue, h_ip_3d, h_hl_tax, h_hl_avail = compute_sim_pen_workload(home)
         a_pen_fatigue, a_ip_3d, a_hl_tax, a_hl_avail = compute_sim_pen_workload(away)
 
-        # 2. Bayesian Modifier Shrinkage (N / 10.0)
         w_h_team = min(1.0, sim_team_count.get(home, 0) / 10.0)
         w_a_team = min(1.0, sim_team_count.get(away, 0) / 10.0)
         h_off_mod = w_h_team * sim_team_off.get(home, 1.0) + (1.0 - w_h_team) * 1.0
@@ -596,16 +579,13 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         h_p_run_mod = w_h_p * sim_pitcher_f5.get(home_p, 1.0) + (1.0 - w_h_p) * 1.0
         a_p_run_mod = w_a_p * sim_pitcher_f5.get(away_p, 1.0) + (1.0 - w_a_p) * 1.0
 
-        # 3. Dynamic Starter Length Weighting
         w_h_sp, w_h_pen, h_ip_proj = project_starter_innings(h_sp_metric * h_p_run_mod)
         w_a_sp, w_a_pen, a_ip_proj = project_starter_innings(a_sp_metric * a_p_run_mod)
 
-        # 4. Environmental Scaling & Catcher Shadow-Zone Integration
         base_pf = DEFAULT_PARK_FACTORS.get(home, 1.00)
         air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
         uv_glare_mult = 1.000 + (np.clip(uv_raw, 1.0, 11.0) - 5.0) * 0.005
         
-        # Catcher framing run value integration
         h_catcher_framing = CATCHER_FRAMING_RUNS.get(home, 0.0)
         a_catcher_framing = CATCHER_FRAMING_RUNS.get(away, 0.0)
         effective_ump_h = max(0.85, ump_run + (h_catcher_framing / 9.0))
@@ -614,7 +594,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         full_env_scalar_h = base_pf * air_drag_mult * uv_glare_mult * effective_ump_h
         full_env_scalar_a = base_pf * air_drag_mult * uv_glare_mult * effective_ump_a
 
-        # 5. Full-Game Platoon & Expected Runs (with High-Leverage Tax)
         a_platoon_ops = a_ops_lhp if h_throws == 'L' else a_ops_rhp
         h_platoon_ops = h_ops_lhp if a_throws == 'L' else h_ops_rhp
 
@@ -632,8 +611,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
               (h_bsr * h_off_mod * w_a_pen * a_pen_fatigue * a_pitch_mod)) * full_env_scalar_h) + a_hl_tax
         )
 
-        # 6. Analytical 24-State Base-Out Markov Run Generation
-        # Convert expected runs into discrete event probabilities for Markov matrix
         p_bb_a = float(np.clip(LEAGUE_AVG_BB_RATE * (a_platoon_ops / 0.720), 0.05, 0.14))
         p_k_a = float(np.clip(LEAGUE_AVG_K_RATE * (h_sp_metric / 4.20), 0.12, 0.35))
         p_hit_a = float(np.clip(LEAGUE_AVG_BA * (a_platoon_ops / 0.720), 0.18, 0.32))
@@ -656,13 +633,11 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         p_out_h = max(0.20, 1.0 - (p_single_h + p_double_h + p_triple_h + p_hr_h + p_bb_h + p_k_h))
 
         markov_half_inn_home = compute_24_state_markov_half_inning_runs(p_single_h, p_double_h, p_triple_h, p_hr_h, p_bb_h, p_k_h, p_out_h)
-        markov_expected_home = markov_half_inn_home * 8.65  # Adjust for home team not batting in 9th
+        markov_expected_home = markov_half_inn_home * 8.65
 
-        # Synthesize blended expectancies: 60% dynamic mixture + 40% analytical Markov chain
         final_exp_away = round((0.60 * exp_away_runs) + (0.40 * markov_expected_away), 2)
         final_exp_home = round((0.60 * exp_home_runs) + (0.40 * markov_expected_home), 2)
 
-        # 7. High-Precision Monte Carlo Simulation (50,000 Iterations)
         rng = np.random.default_rng(seed=int(pk))
         va = max(final_exp_away + 0.01, final_exp_away * dispersion)
         vh = max(final_exp_home + 0.01, final_exp_home * dispersion)
@@ -678,7 +653,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         p_tie_reg = float(np.mean(home_sim == away_sim))
         raw_home_prob = p_home_reg + (0.53 * p_tie_reg)
 
-        # 8. Stacking Classifier Ensemble
         if idx > 0 and idx % 200 == 0 and len(calibrator_pool_y) >= 150:
             try:
                 X_fit = np.array(calibrator_pool_X)
@@ -703,7 +677,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         final_home_prob = round(final_home_prob, 4)
         edge = round(abs(final_home_prob - final_away_prob), 4)
 
-        # 9. Decoupled F5 Expectancy (Markov Aligned)
         f5_regressed_pf = 1.000 + (base_pf - 1.000) * PARK_REGRESSION_FACTOR
         f5_env_scalar_h = f5_regressed_pf * air_drag_mult * uv_glare_mult * effective_ump_h
         f5_env_scalar_a = f5_regressed_pf * air_drag_mult * uv_glare_mult * effective_ump_a
@@ -734,7 +707,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         f5_home_prob = float(np.mean(f5_sim_h > f5_sim_a))
         f5_tie_prob = float(np.mean(f5_sim_a == f5_sim_h))
 
-        # 10. Batter Props with Arsenal Matching & Dynamic Bayesian Shrinkage
         box_batters = box_lookup.get(pk, [])
         if box_batters:
             env_hit_scalar = (1.000 + (base_pf - 1.000) * 0.70) * (1.000 + ((1.225 - rho) * 0.8))
@@ -754,12 +726,11 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
                 b_mod = sim_batter_mod.get(b_name, 1.000)
                 base_contact = (b_lhp if opp_throws == 'L' else b_rhp) * b_mod
 
-                # Repertoire Decomposition Adjustments
                 if opp_arsenal == 'FourSeam_Sweeper':
-                    b_k_adj = b_k * 1.08       # Higher whiff rate on sweepers/elevated 4-seam
+                    b_k_adj = b_k * 1.08
                     contact_adj = base_contact * 0.96
                 elif opp_arsenal == 'Sinker_Cutter':
-                    b_k_adj = b_k * 0.92       # Lower whiff rate, higher groundball BABIP dependency
+                    b_k_adj = b_k * 0.92
                     contact_adj = base_contact * 1.03
                 else:
                     b_k_adj = b_k
@@ -767,7 +738,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
 
                 proj_pa, proj_ab = project_endogenous_plate_appearances(b_order, tm_runs, is_h, final_home_prob if is_h else final_away_prob)
                 
-                # Log5 Matchup Synthesis with Pitch-Arsenal Adjustments
                 matchup_k = log5_matchup_odds(b_k_adj, 0.220, LEAGUE_AVG_K_RATE)
                 p_in_play = max(0.40, 1.0 - matchup_k - b_bb)
                 matchup_ba_sp = log5_matchup_odds(contact_adj, float(np.clip(opp_era / 17.5, 0.18, 0.32)), LEAGUE_AVG_BA) * env_hit_scalar
@@ -781,7 +751,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
                 pred_hits_exp = float(proj_ab * p_hit_ab)
                 raw_over_0_5 = float(np.mean(b_sim_hits >= 1))
                 
-                # Dynamic sample size refinement based on chronological appearance count
                 actual_sample = sim_batter_count.get(b_name, 0) * 4
                 pred_over_0_5 = apply_bayesian_hit_shrinkage(raw_over_0_5, ab_sample=max(15, actual_sample))
 
@@ -790,7 +759,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
                     'hit_brier': (pred_over_0_5 - (1.0 if b_act_hits >= 1 else 0.0)) ** 2
                 })
 
-                # Sequential Walk-Forward Batter Memory Update
                 b_err = b_act_hits - pred_hits_exp
                 b_alpha = min(0.08, 0.02 + (abs(b_err) * 0.015))
                 old_b_mod = sim_batter_mod.get(b_name, 1.000)
@@ -839,15 +807,12 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         WHERE game_pk = ?
         ''', (is_correct, now_ts, pk))
 
-        # 11. Post-Mortem Feedback Updates (Tiered Leverage Accounting)
         h_late = max(0, home_score - h_f5)
         a_late = max(0, away_score - a_f5)
         
-        # Track general workload
         team_recent_workload.setdefault(home, []).append((curr_dt, 4.0 + max(0.0, (a_late - 2) * 0.25)))
         team_recent_workload.setdefault(away, []).append((curr_dt, 4.0 + max(0.0, (h_late - 2) * 0.25)))
 
-        # Track high-leverage tier usage (closer/setup in games within 2 runs)
         if abs(home_score - away_score) <= 2:
             team_high_leverage_workload.setdefault(home, []).append((curr_dt, 18.0))
             team_high_leverage_workload.setdefault(away, []).append((curr_dt, 18.0))
