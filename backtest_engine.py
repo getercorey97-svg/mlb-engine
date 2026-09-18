@@ -45,7 +45,7 @@ STADIUM_RHO_BASELINES = {
 CORRELATION_SIGNIFICANCE_THRESHOLD = 0.20
 TTOP_SUPPRESSION_FACTOR = 0.90
 TOP_ORDER_WEIGHT = 1.03
-F5_VOLUME_SCALAR = 5.0 / 10.0
+F5_VOLUME_SCALAR = 5.0 / 9.7
 PARK_REGRESSION_FACTOR = 0.90
 
 LEAGUE_AVG_BA = 0.245
@@ -613,7 +613,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         f5_disp = 1.22
         f5_va, f5_vh = lam_f5_a * f5_disp, lam_f5_h * f5_disp
         f5_pa, f5_ph = max(0.01, min(0.99, lam_f5_a / f5_va)), max(0.01, min(0.99, lam_f5_h / f5_vh))
-        f5_na, f5_nh = max(0.1, (lam_f5_a ** 2) / (f5_va - lam_f5_a)), max(0.1, (lam_f5_h ** 2) / (f5_vh - lam_f5_h))
+        f5_na, f5_nh = max(0.1, (lam_f5_a ** 2) / (f5_va - lam_f5_a)), max(0.1, (f5_nh = max(0.1, (lam_f5_h ** 2) / (f5_vh - lam_f5_h)))
 
         f5_sim_a = np.clip(rng.negative_binomial(f5_na, f5_pa, iterations), 0, 15)
         f5_sim_h = np.clip(rng.negative_binomial(f5_nh, f5_ph, iterations), 0, 15)
