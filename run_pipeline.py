@@ -34,7 +34,7 @@ STADIUM_RHO_BASELINES = {
 }
 
 def initialize_database_schemas():
-    """Guarantees every table and column exists with auto-migrations for telemetry and F5 offsets."""
+    """Guarantees every table and column exists with auto-migrations for telemetry, props, and batter hit forecasts."""
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
@@ -65,6 +65,40 @@ def initialize_database_schemas():
             f5_exp_home_runs REAL,
             f5_total_runs REAL,
             f5_median_total REAL DEFAULT 0.0
+        );
+        CREATE TABLE IF NOT EXISTS Batter_Hit_Forecasts (
+            game_pk INTEGER,
+            player_name TEXT,
+            team_name TEXT,
+            batting_order INTEGER,
+            projected_pa REAL,
+            projected_ab REAL,
+            expected_hits REAL,
+            over_0_5_hit_prob REAL,
+            over_1_5_hit_prob REAL,
+            over_2_5_hit_prob REAL,
+            PRIMARY KEY (game_pk, player_name)
+        );
+        CREATE TABLE IF NOT EXISTS Batter_Stats (
+            player_name TEXT PRIMARY KEY,
+            team_name TEXT,
+            avg REAL DEFAULT 0.250,
+            avg_vs_rhp REAL DEFAULT 0.250,
+            avg_vs_lhp REAL DEFAULT 0.250,
+            bb_rate REAL DEFAULT 0.085,
+            k_rate REAL DEFAULT 0.220,
+            babip REAL DEFAULT 0.295,
+            updated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS Historical_Batter_Boxscores (
+            game_pk INTEGER,
+            player_name TEXT,
+            team_name TEXT,
+            batting_order INTEGER,
+            hits INTEGER,
+            ab INTEGER,
+            pa INTEGER,
+            PRIMARY KEY (game_pk, player_name)
         );
         CREATE TABLE IF NOT EXISTS Pitcher_Props (
             game_pk INTEGER,
@@ -167,6 +201,8 @@ def initialize_database_schemas():
             f5_win_accuracy REAL DEFAULT 0.0,
             avg_run_error REAL,
             f5_avg_run_error REAL DEFAULT 0.0,
+            batter_hit_mae REAL DEFAULT 0.0,
+            batter_hit_brier REAL DEFAULT 0.0,
             executed_at TEXT
         );
     ''')
@@ -180,7 +216,10 @@ def initialize_database_schemas():
         ("Bullpen_Fatigue", "rolling_ip_3d REAL DEFAULT 8.0"),
         ("F5_Forecasts", "f5_median_total REAL DEFAULT 0.0"),
         ("Backtest_Ledger", "f5_win_accuracy REAL DEFAULT 0.0"),
-        ("Backtest_Ledger", "f5_avg_run_error REAL DEFAULT 0.0")
+        ("Backtest_Ledger", "f5_avg_run_error REAL DEFAULT 0.0"),
+        ("Backtest_Ledger", "batter_hit_mae REAL DEFAULT 0.0"),
+        ("Backtest_Ledger", "batter_hit_brier REAL DEFAULT 0.0"),
+        ("Batter_Stats", "babip REAL DEFAULT 0.295")
     ]
     for table, col_def in migrations:
         try:
@@ -240,7 +279,7 @@ def fetch_daily_matchups_and_lineups():
     print(f"[PHASE 3 COMPLETE] Synchronized {total_ingested} matchups strictly for {today_str}.")
 
 def export_prediction_markdown():
-    """Generates PREDICTIONS_TODAY.md containing Full Game & F5 discrete median market projections."""
+    """Generates PREDICTIONS_TODAY.md containing Full Game, F5, and Top Batter Hit Props."""
     print("[PHASE 6] Exporting Consolidated Prediction Markdown...")
     conn = sqlite3.connect('mlb_engine.db', timeout=30)
     cursor = conn.cursor()
@@ -260,13 +299,24 @@ def export_prediction_markdown():
     '''
     cursor.execute(query)
     rows = cursor.fetchall()
+
+    hit_props_query = '''
+    SELECT player_name, team_name, batting_order, projected_pa, expected_hits, over_0_5_hit_prob, over_1_5_hit_prob
+    FROM Batter_Hit_Forecasts
+    WHERE over_0_5_hit_prob >= 0.65
+    ORDER BY over_0_5_hit_prob DESC, expected_hits DESC
+    LIMIT 15;
+    '''
+    cursor.execute(hit_props_query)
+    hit_rows = cursor.fetchall()
+
     conn.close()
 
     today_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')
     lines = [
         f"# MLB Predictive Model Forecasts ({today_str})",
         "",
-        "### 🎯 Full Game Projections (Moneyline & Run Expectancies)",
+        "### 🎯 Full Game Projections (50,000 Iterations)",
         "",
         "| Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |",
         "| :--- | :---: | :---: | :---: | :---: | :--- |"
@@ -283,9 +333,9 @@ def export_prediction_markdown():
 
         lines.extend([
             "",
-            "### ⚡ First 5 (F5) & Props Projections (L1 Median-Optimized)",
+            "### ⚡ First 5 (F5) Projections (Continuous L1 Median)",
             "",
-            "| Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | L1 Median Total |",
+            "| Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |",
             "| :--- | :---: | :---: | :---: | :---: | :---: |"
         ])
         for r in rows:
@@ -294,8 +344,20 @@ def export_prediction_markdown():
             f5_h_str = f"{f5_h:.1%}" if f5_h is not None else "-"
             f5_t_str = f"{f5_t:.1%}" if f5_t is not None else "-"
             f5_tot_str = f"{f5_tot:.2f} r" if f5_tot is not None else "-"
-            f5_med_str = f"**{f5_med:.1f} r**" if f5_med is not None else "-"
+            f5_med_str = f"**{f5_med:.2f} r**" if f5_med is not None else "-"
             lines.append(f"| {away} @ {home} | {f5_a_str} | {f5_h_str} | {f5_t_str} | {f5_tot_str} | {f5_med_str} |")
+
+        if hit_rows:
+            lines.extend([
+                "",
+                "### 🏏 Top Batter Hit Props (Log5 Component Model)",
+                "",
+                "| Batter | Team | Order Slot | Proj PA | Exp Hits | Over 0.5 Hit Prob | Over 1.5 Hit Prob |",
+                "| :--- | :--- | :---: | :---: | :---: | :---: | :---: |"
+            ])
+            for b in hit_rows:
+                b_name, b_team, b_order, b_pa, b_exp_h, p_0_5, p_1_5 = b
+                lines.append(f"| **{b_name}** | {b_team} | #{b_order} | {b_pa:.1f} | {b_exp_h:.2f} | **{p_0_5:.1%}** | {p_1_5:.1%} |")
 
     with open("PREDICTIONS_TODAY.md", "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
@@ -303,7 +365,7 @@ def export_prediction_markdown():
 
 def main():
     print("=" * 65)
-    print(f"[{datetime.now()}] Starting Unified Self-Optimizing MLB Pipeline")
+    print(f"[{datetime.now()}] Starting Unified Self-Optimizing MLB Pipeline (50,000 Iterations)")
     print("=" * 65)
 
     # 1. Schema Validation & Baseline Setup
@@ -372,7 +434,7 @@ def main():
     except Exception as e:
         print(f"[BYPASS] Discovery ingestion skipped: {e}")
 
-    # 5A. Core Full Game Monte Carlo Simulation (Self-Optimizing)
+    # 5A. Core Full Game Monte Carlo Simulation (50,000 Iterations)
     try:
         import engine
         print("[PHASE 5A] Executing Full Game Monte Carlo Engine...")
@@ -380,7 +442,7 @@ def main():
     except Exception as e:
         print(f"[ERROR] Engine failure: {e}")
 
-    # 5B. Dedicated F5 & Props Engine (L1 Median Optimized)
+    # 5B. Dedicated F5 & Props Engine (Continuous L1 Median)
     try:
         import engine_f5_props
         print("[PHASE 5B] Executing First 5 & Pitcher Props Engine...")
@@ -388,11 +450,19 @@ def main():
     except Exception as e:
         print(f"[ERROR] Engine F5 failure: {e}")
 
-    # 6. Compile Markdown Projections for Today's Slate
+    # 5C. Dedicated Batter Hit Props Engine (Log5 Component Modeling)
+    try:
+        import engine_batter_props
+        print("[PHASE 5C] Executing Batter Hit Prop Engine...")
+        engine_batter_props.run_batter_props_engine()
+    except Exception as e:
+        print(f"[ERROR] Batter Props Engine failure: {e}")
+
+    # 6. Compile Consolidated Markdown Projections
     export_prediction_markdown()
 
     print("=" * 65)
-    print(f"[{datetime.now()}] Orchestration Pipeline Complete. Forecasts Synchronized.")
+    print(f"[{datetime.now()}] Pipeline Complete. 50,000-Iteration Forecasts Synchronized.")
     print("=" * 65)
 
 if __name__ == "__main__":
