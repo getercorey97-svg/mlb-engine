@@ -4,10 +4,20 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-# Times-Through-The-Order early run suppression coefficient for Innings 1-5
+try:
+    from auto_calibration import get_active_f5_bias_offset
+except ImportError:
+    def get_active_f5_bias_offset(cursor) -> float:
+        return 0.00
+
+# Times-Through-The-Order (TTOP) early run suppression coefficient (turns 1 and 2)
 TTOP_SUPPRESSION_FACTOR = 0.90
-# Top-of-the-order PA concentration weighting (Batters 1-4 receive 3 PAs vs 2 PAs for 7-9)
+# Top-of-the-order PA concentration weighting (Batters 1-4 bat 3x vs 2x for 7-9)
 TOP_ORDER_WEIGHT = 1.03
+# Empirical 5-inning run share (51.55% of full-game volume; 5.0 / 9.7 standard & extra frames)
+F5_VOLUME_SCALAR = 5.0 / 9.7
+# Bayesian shrinkage factor for F5 park factors to compress early batted-ball variance
+PARK_REGRESSION_FACTOR = 0.90
 
 def ensure_f5_schemas(cursor):
     """Guarantees F5 and Pitcher Props tables exist with median total schema migrations."""
@@ -53,7 +63,6 @@ def run_f5_and_props_engine():
     ensure_f5_schemas(cursor)
     conn.commit()
 
-    # Query active slate matchups with atmospheric and umpire conditions
     cursor.execute('''
         SELECT d.game_pk, d.away_team, d.home_team, d.away_pitcher, d.home_pitcher, 
                COALESCE(d.air_density, 1.225), COALESCE(d.uv_modifier, 5.0), 
@@ -67,7 +76,6 @@ def run_f5_and_props_engine():
         conn.close()
         return
 
-    # Ingest feature caches
     pitcher_mods = {r[0]: (r[1], r[2], r[3]) for r in cursor.execute(
         "SELECT pitcher_name, COALESCE(k_modifier, 1.0), COALESCE(f5_run_modifier, 1.0), COALESCE(appearance_count, 0) FROM Pitcher_Modifiers"
     ).fetchall()}
@@ -77,10 +85,12 @@ def run_f5_and_props_engine():
     park_factors = {r[0]: r[1] for r in cursor.execute("SELECT home_team, COALESCE(run_factor, 1.0) FROM Park_Factors").fetchall()}
     pitcher_stats = {r[0]: (r[1], r[2]) for r in cursor.execute("SELECT last_name, COALESCE(est_era, 4.20), COALESCE(throws, 'R') FROM Pitcher_Stats").fetchall()}
     
-    # Ingest platoon splits: team_name -> (ops_vs_rhp, ops_vs_lhp)
     platoon_ops = {r[0]: (r[1], r[2]) for r in cursor.execute(
         "SELECT team_name, COALESCE(ops_vs_rhp, 0.720), COALESCE(ops_vs_lhp, 0.720) FROM Team_Offense"
     ).fetchall()}
+
+    active_bias_offset = get_active_f5_bias_offset(cursor)
+    half_bias_offset = active_bias_offset / 2.0
 
     def get_shrunk_pitcher(name):
         k_raw, f5_raw, n = pitcher_mods.get(name, (1.0, 1.0, 0))
@@ -98,12 +108,14 @@ def run_f5_and_props_engine():
     for game in matchups:
         pk, away, home, away_sp, home_sp, rho, uv_raw, ump_run, ump_name = game
         
-        # 1. Atmospheric & Visual Carry Modifiers
+        # 1. Regressed Ballpark Factor & Atmospheric Resistance
+        base_pf = park_factors.get(home, 1.00)
+        f5_regressed_pf = 1.000 + (base_pf - 1.000) * PARK_REGRESSION_FACTOR
         rho_mult = 1.000 + ((1.225 - rho) * 1.5)
         uv_glare_mod = 1.000 + (np.clip(uv_raw, 1.0, 11.0) - 5.0) * 0.005
-        env_mult = park_factors.get(home, 1.0) * rho_mult * ump_run
+        env_mult = f5_regressed_pf * rho_mult * ump_run
 
-        # 2. Pure Starter Profiling (Zero Bullpen Contamination + TTOP Suppression)
+        # 2. Pure Starter Profiling (Zero Relief Contamination + TTOP Turn Suppression)
         a_ln = away_sp.split()[-1] if " " in away_sp else away_sp
         h_ln = home_sp.split()[-1] if " " in home_sp else home_sp
         a_xera_raw, a_hand = pitcher_stats.get(a_ln, (4.20, 'R'))
@@ -112,15 +124,14 @@ def run_f5_and_props_engine():
         a_f5_mod, a_k_mod = get_shrunk_pitcher(away_sp)
         h_f5_mod, h_k_mod = get_shrunk_pitcher(home_sp)
 
-        # Apply 0.90x TTOP suppression for turns 1 and 2 through the batting order
         a_xera = np.clip(a_xera_raw, 1.5, 9.0) * a_f5_mod * TTOP_SUPPRESSION_FACTOR
         h_xera = np.clip(h_xera_raw, 1.5, 9.0) * h_f5_mod * TTOP_SUPPRESSION_FACTOR
 
-        # 3. Isolated F5 Run Expectancy
-        lam_a = max(0.10, (h_xera * get_platoon_offense(away, h_hand) * env_mult) * (5.0 / 9.0))
-        lam_h = max(0.10, (a_xera * get_platoon_offense(home, a_hand) * env_mult) * (5.0 / 9.0))
+        # 3. Isolated F5 Run Expectancy with Empirical 0.5155 Share & Auto-Calibration Offset
+        lam_a = max(0.10, ((h_xera * get_platoon_offense(away, h_hand) * env_mult) * F5_VOLUME_SCALAR) + half_bias_offset)
+        lam_h = max(0.10, ((a_xera * get_platoon_offense(home, a_hand) * env_mult) * F5_VOLUME_SCALAR) + half_bias_offset)
 
-        # 4. Negative Binomial Stochastic Sampling
+        # 4. Stochastic Negative Binomial Simulation
         disp = 1.22
         va, vh = lam_a * disp, lam_h * disp
         pa, ph = max(0.01, min(0.99, lam_a / va)), max(0.01, min(0.99, lam_h / vh))
@@ -131,8 +142,8 @@ def run_f5_and_props_engine():
         sim_h = np.clip(rng.negative_binomial(nh, ph, 25000), 0, 15)
         sim_tot = sim_a + sim_h
 
-        # L1-Optimized Median Point Projection
-        f5_median_total = float(np.median(sim_tot))
+        # L1-Optimized Discrete Median Point Projection
+        f5_median_total = float(np.round(np.median(sim_tot)))
         f5_mean_total = round(lam_a + lam_h, 2)
 
         f5_away_prob = float(np.mean(sim_a > sim_h))
@@ -146,7 +157,7 @@ def run_f5_and_props_engine():
         ''', (pk, away, home, away_sp, home_sp, round(f5_away_prob, 4), round(f5_home_prob, 4), 
               round(f5_tie_prob, 4), round(lam_a, 2), round(lam_h, 2), f5_mean_total, round(f5_median_total, 2)))
 
-        # 5. Decoupled Pitcher Strikeout Props Modeling
+        # 5. Decoupled Strikeout Props
         ump_k_mod = 1.000 - ((ump_run - 1.000) * 1.6)
         for sp, tm, xera, k_mod in [(away_sp, away, a_xera, a_k_mod), (home_sp, home, h_xera, h_k_mod)]:
             if sp in ("TBD", "Unknown"):
