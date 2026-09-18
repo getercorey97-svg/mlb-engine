@@ -239,12 +239,12 @@ def ensure_unified_schemas(cursor):
         for team, factor in DEFAULT_PARK_FACTORS.items():
             cursor.execute("INSERT OR REPLACE INTO Park_Factors (home_team, run_factor) VALUES (?, ?);", (team, factor))
 
-def apply_bayesian_hit_shrinkage(raw_prob_over_0_5: float, ab_sample: int = 120) -> float:
+def apply_bayesian_hit_shrinkage(raw_prob_over_0_5: float, ab_sample: int = 40) -> float:
     p_clipped = float(np.clip(raw_prob_over_0_5, 0.05, 0.95))
     logit_raw = np.log(p_clipped / (1.0 - p_clipped))
     prior_p = 0.605
     logit_prior = np.log(prior_p / (1.0 - prior_p))
-    w = float(np.clip(ab_sample / (ab_sample + 80), 0.70, 0.85))
+    w = float(np.clip(ab_sample / (ab_sample + 80), 0.20, 0.85))
     shrunk_logit = (w * logit_raw) + ((1.0 - w) * logit_prior)
     shrunk_p = 1.0 / (1.0 + np.exp(-shrunk_logit))
     return float(np.clip(shrunk_p, 0.20, 0.82))
@@ -451,7 +451,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
     for r in cursor.fetchall():
         box_lookup.setdefault(r[0], []).append((r[1], r[2], r[3], r[4], r[5]))
 
-    # Pre-cache seeded Batter Stats for fast lookup
     cursor.execute("SELECT player_name, team_name, avg, avg_vs_rhp, avg_vs_lhp, k_rate, bb_rate FROM Batter_Stats;")
     batter_stats_lookup = {}
     for r in cursor.fetchall():
@@ -612,7 +611,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
         f5_home_prob = float(np.mean(f5_sim_h > f5_sim_a))
         f5_tie_prob = float(np.mean(f5_sim_a == f5_sim_h))
 
-        # 9. Individual Batter Hit Evaluation with Empirical Baselines & Shrinkage
+        # 9. Individual Batter Hit Evaluation with Dynamic Empirical Bayes Shrinkage
         box_batters = box_lookup.get(pk, [])
         if box_batters:
             env_hit_scalar = (1.000 + (base_pf - 1.000) * 0.70) * (1.000 + ((1.225 - rho) * 0.8))
@@ -623,7 +622,6 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
                 opp_era = a_sp_metric if is_h else h_sp_metric
                 w_sp = w_a_sp if is_h else w_h_sp
 
-                # Retrieve seeded batter baseline or generic team slot prior
                 b_stats = batter_stats_lookup.get((b_name, b_team))
                 if not b_stats:
                     b_stats = batter_stats_lookup.get((f"Batter {b_order}", b_team), (0.250, 0.250, 0.250, 0.220, 0.085))
@@ -648,7 +646,9 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
                 pred_hits_exp = float(proj_ab * p_hit_ab)
                 raw_over_0_5 = float(np.mean(b_sim_hits >= 1))
                 
-                pred_over_0_5 = apply_bayesian_hit_shrinkage(raw_over_0_5, ab_sample=120)
+                # Dynamic sample size refinement based on chronological appearance count
+                actual_sample = sim_batter_count.get(b_name, 0) * 4
+                pred_over_0_5 = apply_bayesian_hit_shrinkage(raw_over_0_5, ab_sample=max(15, actual_sample))
 
                 batter_eval_history.append({
                     'hit_err': abs(b_act_hits - pred_hits_exp),
@@ -895,7 +895,7 @@ def export_backtest_markdown_report(cursor):
         "- **Ensemble**: Stacking Classifier (RandomForest + XGBoost -> Logistic Regression).",
         "- **Lookahead Isolation**: Strict point-in-time progression (zero data leakage).",
         "- **F5 Scoring**: Evaluated against continuous median with 5.0 / 9.7 volume scalar.",
-        "- **Player Hit Calibration**: Empirical Bayes log-odds shrinkage toward 60.5% starter hit rate.",
+        "- **Player Hit Calibration**: Dynamic Empirical Bayes log-odds shrinkage tied to cumulative appearance count.",
         "- **Batter Baselines**: Seeded 2025 team and slot-specific priors with sequential EWMA learning.",
         ""
     ]
