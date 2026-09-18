@@ -13,6 +13,7 @@ from xgboost import XGBClassifier
 import warnings
 
 warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=UserWarning)
 
 DEFAULT_PARK_FACTORS = {
     "Colorado Rockies": 1.38, "Boston Red Sox": 1.09, "Cincinnati Reds": 1.08,
@@ -399,8 +400,9 @@ def sync_sample_historical_boxscores(conn, cursor, game_pks, max_games=150):
     conn.commit()
 
 def build_mlb_stacking_classifier():
-    rf_base = RandomForestClassifier(n_estimators=100, max_depth=3, min_samples_leaf=10, random_state=42, n_jobs=-1)
-    xgb_base = XGBClassifier(n_estimators=80, learning_rate=0.03, max_depth=3, subsample=0.8, eval_metric='logloss', random_state=42, n_jobs=-1)
+    # Enforce n_jobs=1 on base models to prevent nested thread contention with top-level StackingClassifier
+    rf_base = RandomForestClassifier(n_estimators=100, max_depth=3, min_samples_leaf=10, random_state=42, n_jobs=1)
+    xgb_base = XGBClassifier(n_estimators=80, learning_rate=0.03, max_depth=3, subsample=0.8, eval_metric='logloss', random_state=42, n_jobs=1)
     level_1_meta = LogisticRegression(penalty='l2', C=0.5, solver='lbfgs', max_iter=1000)
     cv_strategy = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
