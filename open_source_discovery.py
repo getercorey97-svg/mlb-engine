@@ -8,13 +8,22 @@ NOAA_KP_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.js
 def fetch_geomagnetic_kp():
     """Pulls live NOAA planetary geomagnetic Kp-index."""
     try:
-        res = requests.get(NOAA_KP_URL, timeout=4).json()
-        if isinstance(res, list) and len(res) > 1:
-            val = res[-1][1]
-            if val is not None:
-                return float(val)
-    except Exception as e:
-        print(f"[NOAA WARNING] Kp fetch failed, falling back to 2.0: {e}")
+        r = requests.get("https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json", timeout=5, headers={"User-Agent": "MLB-Engine/2.0"})
+        if r.status_code == 200:
+            data = r.json()
+            last = data[-1]
+            return float((last.get("Kp") or last.get("kp")) if isinstance(last, dict) else last[1])
+    except Exception:
+        pass
+    try:
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        r = requests.get(f"https://kp.gfz-potsdam.de/app/json/?start={today}T00:00:00Z&end={today}T23:59:59Z", timeout=5, headers={"User-Agent": "MLB-Engine/2.0"})
+        if r.status_code == 200:
+            return float(r.json()["Kp"][-1])
+    except Exception:
+        pass
+    return 2.0
     return 2.0
 
 def fetch_gdelt_tone(team_name):
