@@ -723,7 +723,7 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
 
         box_batters = box_lookup.get(pk, [])
         if box_batters:
-            env_hit_scalar = (1.000 + (base_pf - 1.000) * 0.70) * (1.000 + ((1.225 - rho) * 0.8))
+            env_hit_scalar = float(np.clip(1.000 + ((base_pf - 1.000) * 0.35) + ((1.225 - rho) * 0.25), 0.85, 1.18))
             for b_name, b_team, b_order, b_act_hits, b_act_ab in box_batters:
                 is_h = (b_team == home)
                 tm_runs = final_exp_home if is_h else final_exp_away
@@ -752,14 +752,9 @@ def run_chronological_walk_forward_backtest(conn, cursor, max_eval=2000, iterati
 
                 proj_pa, proj_ab = project_endogenous_plate_appearances(b_order, tm_runs, is_h, final_home_prob if is_h else final_away_prob)
                 
-                matchup_k = log5_matchup_odds(b_k_adj, 0.220, LEAGUE_AVG_K_RATE)
-                p_in_play = max(0.40, 1.0 - matchup_k - b_bb)
-                matchup_ba_sp = log5_matchup_odds(contact_adj, float(np.clip(opp_era / 17.5, 0.18, 0.32)), LEAGUE_AVG_BA) * env_hit_scalar
-                p_hit_pa_sp = p_in_play * (matchup_ba_sp / max(0.01, 1.0 - LEAGUE_AVG_K_RATE - LEAGUE_AVG_BB_RATE))
-                p_hit_pa_pen = (1.0 - 0.220 - 0.085) * (0.250 * env_hit_scalar / max(0.01, 1.0 - LEAGUE_AVG_K_RATE - LEAGUE_AVG_BB_RATE))
-
-                p_hit_pa = float(np.clip(w_sp * p_hit_pa_sp + (1.0 - w_sp) * p_hit_pa_pen, 0.10, 0.45))
-                p_hit_ab = float(np.clip(p_hit_pa / 0.895, 0.12, 0.48))
+                p_hit_sp = log5_matchup_odds(contact_adj, float(np.clip(opp_era / 17.5, 0.18, 0.32)), LEAGUE_AVG_BA) * env_hit_scalar
+                p_hit_pen = 0.250 * env_hit_scalar
+                p_hit_ab = float(np.clip(w_sp * p_hit_sp + (1.0 - w_sp) * p_hit_pen, 0.14, 0.38))
 
                 b_sim_hits = rng.binomial(int(np.round(proj_ab)), p_hit_ab, 5000)
                 pred_hits_exp = float(proj_ab * p_hit_ab)
