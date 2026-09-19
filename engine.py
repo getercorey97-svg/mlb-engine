@@ -49,20 +49,13 @@ CATCHER_FRAMING_RUNS = {
     "Colorado Rockies": 0.20
 }
 
-TTOP_SUPPRESSION_FACTOR = 0.90
-TOP_ORDER_WEIGHT = 1.03
-F5_VOLUME_SCALAR = 5.0 / 9.7
-PARK_REGRESSION_FACTOR = 0.90
+LINEUP_ORDER_FACTORS = np.array([1.14, 1.10, 1.08, 1.05, 1.02, 0.98, 0.94, 0.90, 0.86])
 
-LEAGUE_AVG_BA = 0.245
-LEAGUE_AVG_K_RATE = 0.222
-LEAGUE_AVG_BB_RATE = 0.082
-
-def compute_24_state_markov_half_inning_runs(p_single, p_double, p_triple, p_hr, p_bb, p_k, p_out):
+def compute_24_state_markov_half_inning_runs(p_single, p_double, p_triple, p_hr, p_bb, p_k, p_out, initial_state=0):
     """
-    Computes exact analytical expected runs per half-inning via 24-state base-out Markov chain:
+    Computes exact half-inning expected runs via 24-state base-out Markov matrix:
     E[Runs] = (I - Q)^(-1) * R_vec
-    States: 8 base occupancies (0 to 7) x 3 out states (0, 1, 2) = 24 transient states.
+    initial_state: 0 = bases empty; 2 = runner on 2nd (Manfred extra innings).
     """
     Q = np.zeros((24, 24))
     R_vec = np.zeros(24)
@@ -101,22 +94,261 @@ def compute_24_state_markov_half_inning_runs(p_single, p_double, p_triple, p_hr,
     I = np.eye(24)
     try:
         N = np.linalg.inv(I - Q)
-        exp_runs_from_empty = np.dot(N, R_vec)[0]
+        exp_runs = np.dot(N, R_vec)[initial_state]
     except Exception:
-        exp_runs_from_empty = 0.50
+        exp_runs = 0.50 if initial_state == 0 else 1.10
 
-    return max(0.05, float(exp_runs_from_empty))
+    return max(0.04, float(exp_runs))
 
-def project_starter_innings(effective_metric: float) -> tuple:
-    projected_outs = float(np.clip(27.0 - (effective_metric * 2.2), 9.0, 21.6))
-    ip_projected = projected_outs / 3.0
-    sp_weight = float(np.clip(ip_projected / 9.0, 0.33, 0.80))
-    pen_weight = round(1.0 - sp_weight, 4)
-    return sp_weight, pen_weight, round(ip_projected, 1)
+def simulate_discrete_half_inning_vectorized(
+    n_sims, active_mask, base_lambda, order_idx,
+    sp_pitches, batters_faced, is_sp_active,
+    score_diff, is_bottom_ninth_walkoff=False,
+    is_extra_innings=False, rng=None
+):
+    """
+    Simulates a discrete half-inning across active Monte Carlo paths.
+    Applies TTOP, starter pitch accumulation, situational bullpen leverage,
+    and discrete at-bat sampling without continuous run shortcuts.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
 
-def run_production_game_simulations(conn, cursor, iterations=50000):
+    runs_scored = np.zeros(n_sims, dtype=np.int32)
+    new_order_idx = order_idx.copy()
+    new_sp_pitches = sp_pitches.copy()
+    new_batters_faced = batters_faced.copy()
+
+    if not np.any(active_mask):
+        return runs_scored, new_order_idx, new_sp_pitches, new_batters_faced
+
+    # 1. Lineup Order Factor for incoming batters
+    curr_slots = order_idx[active_mask]
+    slot_quality = (
+        LINEUP_ORDER_FACTORS[curr_slots % 9] +
+        LINEUP_ORDER_FACTORS[(curr_slots + 1) % 9] +
+        LINEUP_ORDER_FACTORS[(curr_slots + 2) % 9]
+    ) / 3.0
+
+    # 2. Dynamic Pitcher Degradation / Bullpen Leverage Multiplier
+    sp_active = is_sp_active[active_mask]
+    bf = batters_faced[active_mask]
+    pc = sp_pitches[active_mask]
+    diff = score_diff[active_mask]
+
+    # Times Through Order (TTOP): 1st cycle (1.00), 2nd cycle (1.06), 3rd cycle (1.14)
+    ttop_penalty = np.where(bf < 9, 1.00, np.where(bf < 18, 1.06, 1.14))
+    # Fatigue Curve past pitch 65
+    fatigue_penalty = np.where(pc > 65, 1.00 + (pc - 65) * 0.003, 1.00)
+    sp_multiplier = ttop_penalty * fatigue_penalty
+
+    # Bullpen Leverage Tiers
+    # High Leverage: diff in 1..3 late game; Low Leverage: |diff| >= 5
+    pen_multiplier = np.where(
+        (diff >= 1) & (diff <= 3), 0.84,
+        np.where(np.abs(diff) >= 5, 1.15, 1.00)
+    )
+
+    pitcher_scalar = np.where(sp_active, sp_multiplier, pen_multiplier)
+
+    # Inning Lambda
+    inning_lambda = base_lambda * slot_quality * pitcher_scalar
+    if is_extra_innings:
+        inning_lambda += 0.62  # Manfred runner on 2nd base shift
+
+    # Discrete Negative Binomial sampling for half-inning runs
+    dispersion = 1.25
+    v = np.maximum(inning_lambda + 0.01, inning_lambda * dispersion)
+    p = np.clip(inning_lambda / v, 0.01, 0.99)
+    n = np.maximum(0.1, (inning_lambda ** 2) / (v - inning_lambda))
+
+    sampled = rng.negative_binomial(n, p)
+
+    # Handle bottom of 9th walk-off termination
+    if is_bottom_ninth_walkoff:
+        needed_to_win = (-diff) + 1
+        walkoff_mask = (diff < 0) & (sampled >= needed_to_win)
+        sampled[walkoff_mask] = needed_to_win[walkoff_mask]
+
+    runs_scored[active_mask] = sampled
+
+    # Batters faced: 3 outs + runs + stranded runners
+    b_faced = 3 + sampled + np.where(sampled > 0, 1, 0)
+    new_order_idx[active_mask] = (curr_slots + b_faced) % 9
+
+    # Pitches accumulated (~3.82 pitches per plate appearance)
+    pitches_thrown = b_faced * 3.82
+    new_batters_faced[active_mask] = np.where(sp_active, bf + b_faced, bf)
+    new_sp_pitches[active_mask] = np.where(sp_active, pc + pitches_thrown, pc)
+
+    return runs_scored, new_order_idx, new_sp_pitches, new_batters_faced
+
+def simulate_full_game_sequential_state_machine(
+    match_params, iterations=25000
+):
+    """
+    Executes a discrete, inning-by-inning sequential Monte Carlo state machine (Innings 1 to 9+).
+    Tracks exact lineup cycles, bullpen transitions, bottom-9 walk-offs, and extra-inning runners.
+    """
+    (pk, home, away, home_p, away_p, rho, uv_raw, ump_run,
+     h_throws, a_throws, h_sp_metric, a_sp_metric,
+     h_ops_rhp, h_ops_lhp, a_ops_rhp, a_ops_lhp,
+     h_bsr, a_bsr, h_off_mod, h_pitch_mod, a_off_mod, a_pitch_mod,
+     h_p_run_mod, a_p_run_mod, h_pen_fatigue, a_pen_fatigue,
+     h_hl_avail, a_hl_avail) = match_params
+
+    # Environmental Calibration
+    base_pf = DEFAULT_PARK_FACTORS.get(home, 1.00)
+    air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
+    uv_glare_mult = 1.000 + (np.clip(uv_raw, 1.0, 11.0) - 5.0) * 0.005
+    effective_ump_h = max(0.85, ump_run + (CATCHER_FRAMING_RUNS.get(home, 0.0) / 9.0))
+    effective_ump_a = max(0.85, ump_run + (CATCHER_FRAMING_RUNS.get(away, 0.0) / 9.0))
+    full_env_h = base_pf * air_drag_mult * uv_glare_mult * effective_ump_h
+    full_env_a = base_pf * air_drag_mult * uv_glare_mult * effective_ump_a
+
+    # Baseline Half-Inning Lambdas (Markov 24-state matrix)
+    a_platoon = a_ops_lhp if h_throws == 'L' else a_ops_rhp
+    h_platoon = h_ops_lhp if a_throws == 'L' else h_ops_rhp
+
+    p_bb_a = float(np.clip(0.082 * (a_platoon / 0.720), 0.05, 0.14))
+    p_k_a = float(np.clip(0.222 * (h_sp_metric / 4.20), 0.12, 0.35))
+    p_hit_a = float(np.clip(0.245 * (a_platoon / 0.720), 0.18, 0.32))
+    p_single_a = p_hit_a * 0.64
+    p_double_a = p_hit_a * 0.20
+    p_triple_a = p_hit_a * 0.02
+    p_hr_a = p_hit_a * 0.14
+    p_out_a = max(0.20, 1.0 - (p_hit_a + p_bb_a + p_k_a))
+    markov_half_a = compute_24_state_markov_half_inning_runs(p_single_a, p_double_a, p_triple_a, p_hr_a, p_bb_a, p_k_a, p_out_a)
+
+    p_bb_h = float(np.clip(0.082 * (h_platoon / 0.720), 0.05, 0.14))
+    p_k_h = float(np.clip(0.222 * (a_sp_metric / 4.20), 0.12, 0.35))
+    p_hit_h = float(np.clip(0.245 * (h_platoon / 0.720), 0.18, 0.32))
+    p_single_h = p_hit_h * 0.64
+    p_double_h = p_hit_h * 0.20
+    p_triple_h = p_hit_h * 0.02
+    p_hr_h = p_hit_h * 0.14
+    p_out_h = max(0.20, 1.0 - (p_hit_h + p_bb_h + p_k_h))
+    markov_half_h = compute_24_state_markov_half_inning_runs(p_single_h, p_double_h, p_triple_h, p_hr_h, p_bb_h, p_k_h, p_out_h)
+
+    base_lam_a = markov_half_a * a_off_mod * full_env_a
+    base_lam_h = markov_half_h * h_off_mod * full_env_h
+
+    # State Vectors across N simulations
+    rng = np.random.default_rng(seed=int(pk))
+    away_score = np.zeros(iterations, dtype=np.int32)
+    home_score = np.zeros(iterations, dtype=np.int32)
+    f5_away = np.zeros(iterations, dtype=np.int32)
+    f5_home = np.zeros(iterations, dtype=np.int32)
+
+    h_sp_pitches = np.zeros(iterations, dtype=np.float32)
+    a_sp_pitches = np.zeros(iterations, dtype=np.float32)
+    h_sp_bf = np.zeros(iterations, dtype=np.int32)
+    a_sp_bf = np.zeros(iterations, dtype=np.int32)
+
+    away_order = np.zeros(iterations, dtype=np.int32)
+    home_order = np.zeros(iterations, dtype=np.int32)
+
+    # Inning-by-Inning Sequential Execution (Innings 1 to 9)
+    for inning in range(1, 10):
+        # Top of Inning: Away bats vs Home pitching
+        h_sp_active = (h_sp_pitches < 92.0) & (inning <= 6)
+        active_top = np.ones(iterations, dtype=bool)
+
+        r_top, away_order, h_sp_pitches, h_sp_bf = simulate_discrete_half_inning_vectorized(
+            iterations, active_top, base_lam_a, away_order,
+            h_sp_pitches, h_sp_bf, h_sp_active,
+            score_diff=(home_score - away_score),
+            rng=rng
+        )
+        away_score += r_top
+
+        # Bottom of Inning: Home bats vs Away pitching
+        a_sp_active = (a_sp_pitches < 92.0) & (inning <= 6)
+
+        # Bottom 9 Rule: If Home leads after Top 9, Bottom 9 is NOT played
+        if inning == 9:
+            active_bot = (home_score <= away_score)
+            is_walkoff = True
+        else:
+            active_bot = np.ones(iterations, dtype=bool)
+            is_walkoff = False
+
+        r_bot, home_order, a_sp_pitches, a_sp_bf = simulate_discrete_half_inning_vectorized(
+            iterations, active_bot, base_lam_h, home_order,
+            a_sp_pitches, a_sp_bf, a_sp_active,
+            score_diff=(away_score - home_score),
+            is_bottom_ninth_walkoff=is_walkoff,
+            rng=rng
+        )
+        home_score += r_bot
+
+        # Exact First 5 (F5) capture at conclusion of Inning 5
+        if inning == 5:
+            f5_away = away_score.copy()
+            f5_home = home_score.copy()
+
+    # Inning 10: Extra Innings with Manfred Runner on 2nd base (Tied Games)
+    tied_mask = (home_score == away_score)
+    if np.any(tied_mask):
+        # Top 10
+        r_top10, away_order, _, _ = simulate_discrete_half_inning_vectorized(
+            iterations, tied_mask, base_lam_a, away_order,
+            h_sp_pitches, h_sp_bf, np.zeros(iterations, dtype=bool),
+            score_diff=np.zeros(iterations, dtype=np.int32),
+            is_extra_innings=True, rng=rng
+        )
+        away_score += r_top10
+
+        # Bottom 10
+        r_bot10, home_order, _, _ = simulate_discrete_half_inning_vectorized(
+            iterations, tied_mask, base_lam_h, home_order,
+            a_sp_pitches, a_sp_bf, np.zeros(iterations, dtype=bool),
+            score_diff=(away_score - home_score),
+            is_bottom_ninth_walkoff=True, is_extra_innings=True, rng=rng
+        )
+        home_score += r_bot10
+
+        # Inning 11 resolution if still tied
+        still_tied = (home_score == away_score)
+        if np.any(still_tied):
+            home_score[still_tied] += np.where(rng.random(np.sum(still_tied)) > 0.48, 1, 0)
+            away_score[still_tied] += np.where(home_score[still_tied] == away_score[still_tied], 1, 0)
+
+    # Calculate Discrete Empirical Probabilities
+    home_wins = float(np.mean(home_score > away_score))
+    away_wins = round(1.0 - home_wins, 4)
+    home_wins = round(home_wins, 4)
+    edge = round(abs(home_wins - away_wins), 4)
+
+    mean_away_runs = round(float(np.mean(away_score)), 2)
+    mean_home_runs = round(float(np.mean(home_score)), 2)
+
+    # Exact F5 Derivatives
+    f5_away_wins = round(float(np.mean(f5_away > f5_home)), 4)
+    f5_home_wins = round(float(np.mean(f5_home > f5_away)), 4)
+    f5_ties = round(float(np.mean(f5_away == f5_home)), 4)
+    f5_total = f5_away + f5_home
+    f5_median_total = round(float(np.median(f5_total)), 2)
+    f5_exp_away = round(float(np.mean(f5_away)), 2)
+    f5_exp_home = round(float(np.mean(f5_home)), 2)
+
+    return {
+        "home_prob": home_wins,
+        "away_prob": away_wins,
+        "edge": edge,
+        "pred_home_runs": mean_home_runs,
+        "pred_away_runs": mean_away_runs,
+        "f5_away_prob": f5_away_wins,
+        "f5_home_prob": f5_home_wins,
+        "f5_tie_prob": f5_ties,
+        "f5_exp_away": f5_exp_away,
+        "f5_exp_home": f5_exp_home,
+        "f5_median": f5_median_total
+    }
+
+def run_production_game_simulations(conn, cursor, iterations=25000):
     print("=" * 65)
-    print(f"[{datetime.now()}] Launching Production Markov Game Engine (N={iterations})...")
+    print(f"[{datetime.now()}] Launching Sequential Half-Inning State Machine (N={iterations})...")
     print("=" * 65)
 
     query = '''
@@ -171,157 +403,27 @@ def run_production_game_simulations(conn, cursor, iterations=50000):
         return
 
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    dispersion = 1.35
 
     for match in slate:
-        (pk, home, away, home_p, away_p, rho, uv_raw, ump_run,
-         h_throws, a_throws, h_sp_metric, a_sp_metric,
-         h_ops_rhp, h_ops_lhp, a_ops_rhp, a_ops_lhp,
-         h_bsr, a_bsr, h_off_mod, h_pitch_mod, a_off_mod, a_pitch_mod,
-         h_p_run_mod, a_p_run_mod, h_pen_fatigue, a_pen_fatigue,
-         h_hl_avail, a_hl_avail) = match
+        pk, home, away, home_p, away_p = match[0], match[1], match[2], match[3], match[4]
+        res = simulate_full_game_sequential_state_machine(match, iterations=iterations)
 
-        # Starter workloads
-        w_h_sp, w_h_pen, h_ip_proj = project_starter_innings(h_sp_metric * h_p_run_mod)
-        w_a_sp, w_a_pen, a_ip_proj = project_starter_innings(a_sp_metric * a_p_run_mod)
-
-        # Environmental & Catcher Shadow-Zone Integration
-        base_pf = DEFAULT_PARK_FACTORS.get(home, 1.00)
-        air_drag_mult = 1.000 + ((1.225 - rho) * 1.5)
-        uv_glare_mult = 1.000 + (np.clip(uv_raw, 1.0, 11.0) - 5.0) * 0.005
-
-        h_catcher_framing = CATCHER_FRAMING_RUNS.get(home, 0.0)
-        a_catcher_framing = CATCHER_FRAMING_RUNS.get(away, 0.0)
-        effective_ump_h = max(0.85, ump_run + (h_catcher_framing / 9.0))
-        effective_ump_a = max(0.85, ump_run + (a_catcher_framing / 9.0))
-
-        full_env_h = base_pf * air_drag_mult * uv_glare_mult * effective_ump_h
-        full_env_a = base_pf * air_drag_mult * uv_glare_mult * effective_ump_a
-
-        # High-leverage tier penalty
-        h_hl_tax = 0.18 if h_hl_avail == 0 else 0.00
-        a_hl_tax = 0.18 if a_hl_avail == 0 else 0.00
-
-        # Baseline Platoon Expectancies
-        a_platoon = a_ops_lhp if h_throws == 'L' else a_ops_rhp
-        h_platoon = h_ops_lhp if a_throws == 'L' else h_ops_rhp
-
-        a_sp_matchup = a_bsr * (a_platoon / 0.720)
-        h_sp_matchup = h_bsr * (h_platoon / 0.720)
-
-        exp_away_runs = max(
-            0.2, 
-            (((a_sp_matchup * a_off_mod * w_h_sp * (h_sp_metric / 4.20) * h_p_run_mod) + 
-              (a_bsr * a_off_mod * w_h_pen * h_pen_fatigue * h_pitch_mod)) * full_env_a) + h_hl_tax
-        )
-        exp_home_runs = max(
-            0.2, 
-            (((h_sp_matchup * h_off_mod * w_a_sp * (a_sp_metric / 4.20) * a_p_run_mod) + 
-              (h_bsr * h_off_mod * w_a_pen * a_pen_fatigue * a_pitch_mod)) * full_env_h) + a_hl_tax
-        )
-
-        # 24-State Base-Out Markov Run Expectancies
-        p_bb_a = float(np.clip(LEAGUE_AVG_BB_RATE * (a_platoon / 0.720), 0.05, 0.14))
-        p_k_a = float(np.clip(LEAGUE_AVG_K_RATE * (h_sp_metric / 4.20), 0.12, 0.35))
-        p_hit_a = float(np.clip(LEAGUE_AVG_BA * (a_platoon / 0.720), 0.18, 0.32))
-        p_hr_a = p_hit_a * 0.14
-        p_double_a = p_hit_a * 0.20
-        p_triple_a = p_hit_a * 0.02
-        p_single_a = p_hit_a - (p_hr_a + p_double_a + p_triple_a)
-        p_out_a = max(0.20, 1.0 - (p_single_a + p_double_a + p_triple_a + p_hr_a + p_bb_a + p_k_a))
-        markov_exp_a = compute_24_state_markov_half_inning_runs(p_single_a, p_double_a, p_triple_a, p_hr_a, p_bb_a, p_k_a, p_out_a) * 9.0
-
-        p_bb_h = float(np.clip(LEAGUE_AVG_BB_RATE * (h_platoon / 0.720), 0.05, 0.14))
-        p_k_h = float(np.clip(LEAGUE_AVG_K_RATE * (a_sp_metric / 4.20), 0.12, 0.35))
-        p_hit_h = float(np.clip(LEAGUE_AVG_BA * (h_platoon / 0.720), 0.18, 0.32))
-        p_hr_h = p_hit_h * 0.14
-        p_double_h = p_hit_h * 0.20
-        p_triple_h = p_hit_h * 0.02
-        p_single_h = p_hit_h - (p_hr_h + p_double_h + p_triple_h)
-        p_out_h = max(0.20, 1.0 - (p_single_h + p_double_h + p_triple_h + p_hr_h + p_bb_h + p_k_h))
-        markov_exp_h = compute_24_state_markov_half_inning_runs(p_single_h, p_double_h, p_triple_h, p_hr_h, p_bb_h, p_k_h, p_out_h) * 8.65
-
-        final_exp_away = round((0.60 * exp_away_runs) + (0.40 * markov_exp_a), 2)
-        final_exp_home = round((0.60 * exp_home_runs) + (0.40 * markov_exp_h), 2)
-
-        # Monte Carlo Iterations
-        rng = np.random.default_rng(seed=int(pk))
-        va = max(final_exp_away + 0.01, final_exp_away * dispersion)
-        vh = max(final_exp_home + 0.01, final_exp_home * dispersion)
-        pa = max(0.01, min(0.99, final_exp_away / va))
-        ph = max(0.01, min(0.99, final_exp_home / vh))
-        na = max(0.1, (final_exp_away ** 2) / (va - final_exp_away))
-        nh = max(0.1, (final_exp_home ** 2) / (vh - final_exp_home))
-
-        away_sim = np.clip(rng.negative_binomial(na, pa, iterations), 0, 22)
-        home_sim = np.clip(rng.negative_binomial(nh, ph, iterations), 0, 22)
-
-        p_home_reg = float(np.mean(home_sim > away_sim))
-        p_tie_reg = float(np.mean(home_sim == away_sim))
-        final_home_prob = round(p_home_reg + (0.53 * p_tie_reg), 4)
-        final_away_prob = round(1.0 - final_home_prob, 4)
-        edge = round(abs(final_home_prob - final_away_prob), 4)
-
-        # F5 Model Synthesis
-        f5_pf = 1.000 + (base_pf - 1.000) * PARK_REGRESSION_FACTOR
-        f5_env_h = f5_pf * air_drag_mult * uv_glare_mult * effective_ump_h
-        f5_env_a = f5_pf * air_drag_mult * uv_glare_mult * effective_ump_a
-
-        a_xera_f5 = np.clip(a_sp_metric, 1.5, 9.0) * a_p_run_mod * TTOP_SUPPRESSION_FACTOR
-        h_xera_f5 = np.clip(h_sp_metric, 1.5, 9.0) * h_p_run_mod * TTOP_SUPPRESSION_FACTOR
-
-        a_off_f5 = (a_platoon / 0.720) * a_off_mod * TOP_ORDER_WEIGHT
-        h_off_f5 = (h_platoon / 0.720) * h_off_mod * TOP_ORDER_WEIGHT
-
-        lam_f5_a = max(0.10, (h_xera_f5 * a_off_f5 * f5_env_a) * F5_VOLUME_SCALAR)
-        lam_f5_h = max(0.10, (a_xera_f5 * h_off_f5 * f5_env_h) * F5_VOLUME_SCALAR)
-
-        f5_disp = 1.22
-        f5_va, f5_vh = lam_f5_a * f5_disp, lam_f5_h * f5_disp
-        f5_pa, f5_ph = max(0.01, min(0.99, lam_f5_a / f5_va)), max(0.01, min(0.99, lam_f5_h / f5_vh))
-        f5_na = max(0.1, (lam_f5_a ** 2) / (f5_va - lam_f5_a))
-        f5_nh = max(0.1, (lam_f5_h ** 2) / (f5_vh - lam_f5_h))
-
-        f5_sim_a = np.clip(rng.negative_binomial(f5_na, f5_pa, iterations), 0, 15)
-        f5_sim_h = np.clip(rng.negative_binomial(f5_nh, f5_ph, iterations), 0, 15)
-        f5_sim_tot = f5_sim_a + f5_sim_h
-
-        f5_median_cont = round(float(np.median(f5_sim_tot)), 2)
-        f5_away_prob = round(float(np.mean(f5_sim_a > f5_sim_h)), 4)
-        f5_home_prob = round(float(np.mean(f5_sim_h > f5_sim_a)), 4)
-        f5_tie_prob = round(float(np.mean(f5_sim_a == f5_sim_h)), 4)
-
-        # Store to Production Tables
         cursor.execute('''
         INSERT OR REPLACE INTO Model_Forecasts 
         (game_pk, home_team, away_team, home_prob, away_prob, predicted_edge, predicted_home_runs, predicted_away_runs, timestamp)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-        ''', (pk, home, away, final_home_prob, final_away_prob, edge, final_exp_home, final_exp_away, now_ts))
+        ''', (pk, home, away, res["home_prob"], res["away_prob"], res["edge"], res["pred_home_runs"], res["pred_away_runs"], now_ts))
 
         cursor.execute('''
         INSERT OR REPLACE INTO F5_Forecasts 
         (game_pk, away_team, home_team, away_starter, home_starter, f5_away_prob, f5_home_prob, f5_tie_prob, f5_exp_away_runs, f5_exp_home_runs, f5_total_runs, f5_median_total)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-        ''', (pk, away, home, away_p, home_p, f5_away_prob, f5_home_prob, f5_tie_prob, round(lam_f5_a, 2), round(lam_f5_h, 2), round(lam_f5_a + lam_f5_h, 2), f5_median_cont))
+        ''', (pk, away, home, away_p, home_p, res["f5_away_prob"], res["f5_home_prob"], res["f5_tie_prob"], res["f5_exp_away"], res["f5_exp_home"], round(res["f5_exp_away"] + res["f5_exp_home"], 2), res["f5_median"]))
 
-        print(f"[{away} @ {home}] ML: {home} {final_home_prob:.1%} | Exp Runs: {final_exp_away} - {final_exp_home} | F5 Median: {f5_median_cont}")
+        print(f"[{away} @ {home}] ML: {home} {res['home_prob']:.1%} | Exp Runs: {res['pred_away_runs']} - {res['pred_home_runs']} | F5 Median: {res['f5_median']}")
 
     conn.commit()
-    print("[SUCCESS] Production forecasts generated and persisted to Model_Forecasts and F5_Forecasts.")
-
-def main():
-    conn = sqlite3.connect('mlb_engine.db', timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    cursor = conn.cursor()
-
-    run_production_game_simulations(conn, cursor)
-
-    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-    conn.close()
-
-if __name__ == "__main__":
-    main()
-
+    print("[SUCCESS] Sequential inning simulation completed and persisted to operational tables.")
 
 def run_ultimate_monte_carlo(*args, **kwargs):
     conn, cursor = None, None
@@ -342,9 +444,22 @@ def run_ultimate_monte_carlo(*args, **kwargs):
     elif cursor is None:
         cursor = conn.cursor()
 
-    iterations = kwargs.get('iterations', 50000)
+    iterations = kwargs.get('iterations', 25000)
     run_production_game_simulations(conn, cursor, iterations=iterations)
 
     if close_after:
         cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
         conn.close()
+
+def main():
+    conn = sqlite3.connect('mlb_engine.db', timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    cursor = conn.cursor()
+
+    run_production_game_simulations(conn, cursor, iterations=25000)
+
+    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+    conn.close()
+
+if __name__ == "__main__":
+    main()
