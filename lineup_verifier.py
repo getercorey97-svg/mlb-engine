@@ -37,6 +37,26 @@ def verify_starting_lineups():
             # A game's lineup status is only confirmed if BOTH teams have submitted their 9 batters
             if len(away_lineup) >= 9 and len(home_lineup) >= 9:
                 status = "Confirmed"
+                away_team_name = teams.get('away', {}).get('team', {}).get('name', 'Away')
+                home_team_name = teams.get('home', {}).get('team', {}).get('name', 'Home')
+
+                cursor.execute("DELETE FROM Daily_Batters WHERE game_pk = ?", (game_pk,))
+
+                for idx, player in enumerate(away_lineup[:9], 1):
+                    p_name = player.get('fullName') or player.get('name') or (player.get('person', {}).get('fullName') if isinstance(player.get('person'), dict) else str(player))
+                    if p_name:
+                        cursor.execute("""
+                            INSERT OR REPLACE INTO Daily_Batters (game_pk, player_name, team_name, batting_order, is_starter)
+                            VALUES (?, ?, ?, ?, 1)
+                        """, (game_pk, p_name, away_team_name, idx))
+
+                for idx, player in enumerate(home_lineup[:9], 1):
+                    p_name = player.get('fullName') or player.get('name') or (player.get('person', {}).get('fullName') if isinstance(player.get('person'), dict) else str(player))
+                    if p_name:
+                        cursor.execute("""
+                            INSERT OR REPLACE INTO Daily_Batters (game_pk, player_name, team_name, batting_order, is_starter)
+                            VALUES (?, ?, ?, ?, 1)
+                        """, (game_pk, p_name, home_team_name, idx))
             else:
                 status = "Pending/TBD"
             
