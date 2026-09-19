@@ -250,6 +250,20 @@ def ensure_unified_schemas(cursor):
     );
     ''')
 
+
+    # Automated column migrations for existing operational tables
+    for tbl, col, col_def in [
+        ('Pitcher_Stats', 'arsenal_type', 'TEXT DEFAULT "Balanced"'),
+        ('Bullpen_Fatigue', 'high_leverage_available', 'INTEGER DEFAULT 1')
+    ]:
+        try:
+            cursor.execute(f"PRAGMA table_info({tbl});")
+            existing_cols = [r[1] for r in cursor.fetchall()]
+            if col not in existing_cols and len(existing_cols) > 0:
+                cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {col_def};")
+        except Exception:
+            pass
+
     cursor.execute("SELECT COUNT(*) FROM Park_Factors;")
     if cursor.fetchone()[0] == 0:
         for team, factor in DEFAULT_PARK_FACTORS.items():
