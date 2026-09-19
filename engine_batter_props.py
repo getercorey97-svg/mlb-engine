@@ -21,28 +21,14 @@ DEFAULT_PARK_FACTORS = {
     "Los Angeles Dodgers": 0.93, "San Diego Padres": 0.92, "Seattle Mariners": 0.91
 }
 
-STADIUM_RHO_BASELINES = {
-    "Colorado Rockies": 1.050, "Arizona Diamondbacks": 1.075, "Texas Rangers": 1.135,
-    "Atlanta Braves": 1.145, "Minnesota Twins": 1.150, "Cincinnati Reds": 1.160,
-    "Detroit Tigers": 1.162, "Milwaukee Brewers": 1.163, "Chicago Cubs": 1.166,
-    "Chicago White Sox": 1.167, "St. Louis Cardinals": 1.168, "Washington Nationals": 1.172,
-    "Tampa Bay Rays": 1.175, "Miami Marlins": 1.185, "New York Yankees": 1.188,
-    "Boston Red Sox": 1.195, "Baltimore Orioles": 1.198, "San Francisco Giants": 1.205,
-    "Los Angeles Dodgers": 1.210, "Los Angeles Angels": 1.212, "New York Mets": 1.215,
-    "Philadelphia Phillies": 1.218, "San Diego Padres": 1.225, "Seattle Mariners": 1.225,
-    "Oakland Athletics": 1.220, "Athletics": 1.220, "Houston Astros": 1.180,
-    "Kansas City Royals": 1.155, "Pittsburgh Pirates": 1.170, "Cleveland Guardians": 1.165,
-    "Toronto Blue Jays": 1.190, "Default": 1.225
+ORDER_PA_WEIGHTS = {
+    1: 1.14, 2: 1.11, 3: 1.08, 4: 1.05, 5: 1.02,
+    6: 0.98, 7: 0.95, 8: 0.92, 9: 0.88
 }
 
 LEAGUE_AVG_BA = 0.245
 LEAGUE_AVG_K_RATE = 0.222
 LEAGUE_AVG_BB_RATE = 0.082
-
-ORDER_PA_WEIGHTS = {
-    1: 1.14, 2: 1.11, 3: 1.08, 4: 1.05, 5: 1.02,
-    6: 0.98, 7: 0.95, 8: 0.92, 9: 0.88
-}
 
 def log5_matchup_odds(p_batter: float, p_pitcher: float, p_league: float) -> float:
     p_b = float(np.clip(p_batter, 0.05, 0.95))
@@ -82,7 +68,7 @@ def project_starter_innings(effective_metric: float) -> tuple:
 
 def run_production_batter_props(conn, cursor):
     print("=" * 65)
-    print(f"[{datetime.now()}] Synthesizing Production Batter Props (Pitch-Arsenal Log5)...")
+    print(f"[{datetime.now()}] Synthesizing Calibrated Batter Props (True BA Log5)...")
     print("=" * 65)
 
     cursor.executescript('''
@@ -109,7 +95,9 @@ def run_production_batter_props(conn, cursor):
     );
     ''')
 
-    # Query daily slates with game model context
+    # Purge stale rows
+    cursor.execute("DELETE FROM Batter_Hit_Forecasts;")
+
     query_games = '''
     SELECT 
         d.game_pk,
@@ -141,7 +129,6 @@ def run_production_batter_props(conn, cursor):
         print("[INFO] No active slates found for batter prop synthesis.")
         return
 
-    # Cache active modifiers and stats
     cursor.execute("SELECT player_name, contact_modifier, appearance_count FROM Batter_Modifiers;")
     batter_mods = {r[0]: (r[1], r[2]) for r in cursor.fetchall()}
 
@@ -156,21 +143,17 @@ def run_production_batter_props(conn, cursor):
          h_throws, a_throws, h_era, a_era, h_arsenal, a_arsenal) = game
 
         base_pf = DEFAULT_PARK_FACTORS.get(home, 1.00)
-        env_hit_scalar = (1.000 + (base_pf - 1.000) * 0.70) * (1.000 + ((1.225 - rho) * 0.8))
+        # Scaled environmental multiplier prevents altitude over-compounding (max 1.18x)
+        env_hit_scalar = float(np.clip(1.000 + ((base_pf - 1.000) * 0.35) + ((1.225 - rho) * 0.25), 0.85, 1.18))
 
         w_h_sp, _ = project_starter_innings(h_era)
         w_a_sp, _ = project_starter_innings(a_era)
 
-        # Retrieve slate batters from Daily_Batters
         cursor.execute("SELECT player_name, team_name, batting_order FROM Daily_Batters WHERE game_pk = ? ORDER BY batting_order ASC;", (pk,))
         lineup_batters = cursor.fetchall()
 
-        # Fallback to seeded top-order slots if lineup not confirmed
         if not lineup_batters:
-            lineup_batters = []
-            for t_name in (away, home):
-                for slot in range(1, 10):
-                    lineup_batters.append((f"Batter {slot}", t_name, slot))
+            continue
 
         for b_name, b_team, b_order in lineup_batters:
             is_home = (b_team == home)
@@ -183,7 +166,7 @@ def run_production_batter_props(conn, cursor):
 
             stats = batter_stats.get((b_name, b_team))
             if not stats:
-                stats = batter_stats.get((f"Batter {b_order}", b_team), (0.250, 0.250, 0.250, 0.220, 0.085))
+                stats = (0.250, 0.250, 0.250, 0.220, 0.085)
 
             b_avg, b_rhp, b_lhp, b_k, b_bb = stats
             mod_tuple = batter_mods.get(b_name, (1.000, 0))
@@ -191,33 +174,24 @@ def run_production_batter_props(conn, cursor):
 
             base_contact = (b_lhp if opp_throws == 'L' else b_rhp) * b_mod
 
-            # Pitch-Arsenal Matchup Decomposition
+            # Pitch-Arsenal Adjustments
             if opp_arsenal == 'FourSeam_Sweeper':
-                b_k_adj = b_k * 1.08
                 contact_adj = base_contact * 0.96
             elif opp_arsenal == 'Sinker_Cutter':
-                b_k_adj = b_k * 0.92
                 contact_adj = base_contact * 1.03
             else:
-                b_k_adj = b_k
                 contact_adj = base_contact
 
             proj_pa, proj_ab = project_endogenous_plate_appearances(b_order, tm_runs, is_home, win_prob)
 
-            # Matchup Odds Synthesis (Log5)
-            matchup_k = log5_matchup_odds(b_k_adj, 0.220, LEAGUE_AVG_K_RATE)
-            p_in_play = max(0.40, 1.0 - matchup_k - b_bb)
-            matchup_ba_sp = log5_matchup_odds(contact_adj, float(np.clip(opp_era / 17.5, 0.18, 0.32)), LEAGUE_AVG_BA) * env_hit_scalar
-
-            p_hit_pa_sp = p_in_play * (matchup_ba_sp / max(0.01, 1.0 - LEAGUE_AVG_K_RATE - LEAGUE_AVG_BB_RATE))
-            p_hit_pa_pen = (1.0 - 0.220 - 0.085) * (0.250 * env_hit_scalar / max(0.01, 1.0 - LEAGUE_AVG_K_RATE - LEAGUE_AVG_BB_RATE))
-
-            p_hit_pa = float(np.clip(w_sp * p_hit_pa_sp + (1.0 - w_sp) * p_hit_pa_pen, 0.10, 0.45))
-            p_hit_ab = float(np.clip(p_hit_pa / 0.895, 0.12, 0.48))
+            # Direct Batting Average Synthesis (Hits per AB)
+            p_hit_sp = log5_matchup_odds(contact_adj, float(np.clip(opp_era / 17.5, 0.18, 0.32)), LEAGUE_AVG_BA) * env_hit_scalar
+            p_hit_pen = 0.250 * env_hit_scalar
+            p_hit_ab = float(np.clip(w_sp * p_hit_sp + (1.0 - w_sp) * p_hit_pen, 0.14, 0.38))
 
             expected_hits = round(proj_ab * p_hit_ab, 2)
 
-            # Binomial Simulation & Dynamic Bayesian Shrinkage
+            # Monte Carlo Simulation of At-Bats
             rng = np.random.default_rng(seed=int(pk) + int(b_order) * 7)
             sim_hits = rng.binomial(int(np.round(proj_ab)), p_hit_ab, 5000)
 
@@ -243,21 +217,7 @@ def run_production_batter_props(conn, cursor):
     ''', prop_rows)
 
     conn.commit()
-    print(f"[SUCCESS] Synthesized hit props for {len(prop_rows)} batters into Batter_Hit_Forecasts.")
-
-def main():
-    conn = sqlite3.connect('mlb_engine.db', timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    cursor = conn.cursor()
-
-    run_production_batter_props(conn, cursor)
-
-    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-    conn.close()
-
-if __name__ == "__main__":
-    main()
-
+    print(f"[SUCCESS] Calibrated hit props for {len(prop_rows)} batters into Batter_Hit_Forecasts.")
 
 def run_batter_props_engine(*args, **kwargs):
     conn, cursor = None, None
@@ -283,3 +243,16 @@ def run_batter_props_engine(*args, **kwargs):
     if close_after:
         cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
         conn.close()
+
+def main():
+    conn = sqlite3.connect('mlb_engine.db', timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    cursor = conn.cursor()
+
+    run_production_batter_props(conn, cursor)
+
+    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+    conn.close()
+
+if __name__ == "__main__":
+    main()
