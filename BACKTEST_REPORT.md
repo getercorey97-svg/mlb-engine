@@ -1,22 +1,21 @@
-# MLB Engine Empirical Backtest Report (2026-09-18 23:29:43)
+# MLB Engine Empirical Backtest Report (2026-09-19 00:05:30)
 
 ### 📊 Walk-Forward Simulation Summary (50,000 Iterations)
 
 | Metric | Result | Target Benchmark |
 | :--- | :---: | :---: |
 | **Sample Size (Games Evaluated)** | `2000` | > 2,000 |
-| **Full Game Win Accuracy** | `53.65%` | > 54.0% |
-| **First 5 (F5) Win Accuracy** | `53.50%` | > 55.0% |
+| **Full Game Win Accuracy** | `53.90%` | > 54.0% |
+| **First 5 (F5) Win Accuracy** | `52.91%` | > 55.0% |
 | **Probability Brier Score** | `0.2481` | < 0.2500 |
-| **Full Game Mean Run Error** | `3.74 runs` | < 3.80 |
+| **Full Game Mean Run Error** | `3.90 runs` | < 3.80 |
 | **First 5 (F5) Median Run Error** | `2.57 runs` | <= 2.50 |
 | **Batter Hit Prop MAE** | `0.70 hits` | < 0.70 |
 | **Batter Over 0.5 Hit Brier** | `0.2490` | < 0.2250 |
 
-### ⚙️ Engine State
-- **Execution Model**: Deterministic Dual-Engine Monte Carlo (50,000 Iterations).
-- **Ensemble**: Stacking Classifier (RandomForest + XGBoost -> Logistic Regression).
-- **Lookahead Isolation**: Strict point-in-time progression (zero data leakage).
-- **F5 Scoring**: Evaluated against continuous median with 5.0 / 9.7 volume scalar.
-- **Player Hit Calibration**: Dynamic Empirical Bayes log-odds shrinkage tied to cumulative appearance count.
-- **Batter Baselines**: Seeded 2025 team and slot-specific priors with sequential EWMA learning.
+### ⚙️ Enhanced Quantitative Engine State
+- **Markov Analytical Chain**: 24-state base-out fundamental matrix inversion replacing blunt Poisson approximations.
+- **Arsenal Matching**: Pitcher repertoire decomposition (Sinker/Cutter vs Four-Seam/Sweeper) mapped in Log5 space.
+- **Tiered Bullpen Leverage**: Binary tracking of high-leverage availability (closer/setup workload) with dynamic run taxes.
+- **Catcher Shadow-Zone Integration**: Starting catcher framing metrics blended with home plate umpire strike zone edges.
+- **Expanded Empirical Memory**: 500-matchup boxscore hydration driving mature Bayesian shrinkage weights.
