@@ -1,4 +1,4 @@
-# MLB Engine Empirical Backtest Report (2026-09-19 00:05:30)
+# MLB Engine Empirical Backtest Report (2026-09-19 01:17:33)
 
 ### 📊 Walk-Forward Simulation Summary (50,000 Iterations)
 
@@ -11,7 +11,7 @@
 | **Full Game Mean Run Error** | `3.90 runs` | < 3.80 |
 | **First 5 (F5) Median Run Error** | `2.57 runs` | <= 2.50 |
 | **Batter Hit Prop MAE** | `0.70 hits` | < 0.70 |
-| **Batter Over 0.5 Hit Brier** | `0.2490` | < 0.2250 |
+| **Batter Over 0.5 Hit Brier** | `0.2462` | < 0.2250 |
 
 ### ⚙️ Enhanced Quantitative Engine State
 - **Markov Analytical Chain**: 24-state base-out fundamental matrix inversion replacing blunt Poisson approximations.
