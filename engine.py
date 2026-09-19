@@ -321,3 +321,30 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def run_ultimate_monte_carlo(*args, **kwargs):
+    conn, cursor = None, None
+    for arg in args:
+        if isinstance(arg, sqlite3.Connection):
+            conn = arg
+        elif isinstance(arg, sqlite3.Cursor):
+            cursor = arg
+    close_after = False
+    if conn is None:
+        if cursor is not None:
+            conn = cursor.connection
+        else:
+            conn = sqlite3.connect('mlb_engine.db', timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            cursor = conn.cursor()
+            close_after = True
+    elif cursor is None:
+        cursor = conn.cursor()
+
+    iterations = kwargs.get('iterations', 50000)
+    run_production_game_simulations(conn, cursor, iterations=iterations)
+
+    if close_after:
+        cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        conn.close()

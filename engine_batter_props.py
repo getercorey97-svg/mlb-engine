@@ -257,3 +257,29 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def run_batter_props_engine(*args, **kwargs):
+    conn, cursor = None, None
+    for arg in args:
+        if isinstance(arg, sqlite3.Connection):
+            conn = arg
+        elif isinstance(arg, sqlite3.Cursor):
+            cursor = arg
+    close_after = False
+    if conn is None:
+        if cursor is not None:
+            conn = cursor.connection
+        else:
+            conn = sqlite3.connect('mlb_engine.db', timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            cursor = conn.cursor()
+            close_after = True
+    elif cursor is None:
+        cursor = conn.cursor()
+
+    run_production_batter_props(conn, cursor)
+
+    if close_after:
+        cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        conn.close()
