@@ -8,20 +8,75 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
+def auto_repair_lineup_schema(conn):
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS Daily_Lineups (
+            game_pk INTEGER PRIMARY KEY,
+            away_team TEXT,
+            home_team TEXT,
+            away_sp TEXT,
+            home_sp TEXT,
+            away_pitcher TEXT,
+            home_pitcher TEXT,
+            lineup_status TEXT,
+            status TEXT,
+            game_datetime_utc TEXT,
+            game_time_et TEXT,
+            gatekeeper_trigger_utc TEXT,
+            ingested_at TEXT
+        )
+    """)
+    existing_dl = [r[1] for r in c.execute("PRAGMA table_info(Daily_Lineups)").fetchall()]
+    required_dl = [
+        ("away_team", "TEXT"), ("home_team", "TEXT"),
+        ("away_sp", "TEXT"), ("home_sp", "TEXT"),
+        ("away_pitcher", "TEXT"), ("home_pitcher", "TEXT"),
+        ("lineup_status", "TEXT"), ("status", "TEXT"),
+        ("game_datetime_utc", "TEXT"), ("game_time_et", "TEXT"),
+        ("gatekeeper_trigger_utc", "TEXT"), ("ingested_at", "TEXT")
+    ]
+    for col_name, col_type in required_dl:
+        if col_name not in existing_dl:
+            c.execute(f"ALTER TABLE Daily_Lineups ADD COLUMN {col_name} {col_type}")
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS Daily_Batters (
+            game_pk INTEGER,
+            player_name TEXT,
+            team_name TEXT,
+            batting_order INTEGER,
+            is_starter INTEGER DEFAULT 1,
+            is_confirmed INTEGER DEFAULT 0,
+            game_datetime_utc TEXT,
+            game_time_et TEXT,
+            PRIMARY KEY (game_pk, player_name)
+        )
+    """)
+    existing_db = [r[1] for r in c.execute("PRAGMA table_info(Daily_Batters)").fetchall()]
+    required_db = [
+        ("game_datetime_utc", "TEXT"), ("game_time_et", "TEXT"),
+        ("is_starter", "INTEGER DEFAULT 1"), ("is_confirmed", "INTEGER DEFAULT 0")
+    ]
+    for col_name, col_type in required_db:
+        if col_name not in existing_db:
+            c.execute(f"ALTER TABLE Daily_Batters ADD COLUMN {col_name} {col_type}")
+    conn.commit()
+
 def format_start_times(iso_utc_str):
+    now_utc = datetime.now(timezone.utc)
     if not iso_utc_str:
-        now_utc = datetime.now(timezone.utc)
         return now_utc.isoformat(), now_utc.astimezone(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT"), (now_utc - timedelta(minutes=30)).isoformat()
 
     dt_utc = datetime.fromisoformat(iso_utc_str.replace("Z", "+00:00"))
     dt_et = dt_utc.astimezone(ZoneInfo("America/New_York"))
     time_et_str = dt_et.strftime("%I:%M %p EDT")
     gatekeeper_utc = (dt_utc - timedelta(minutes=30)).isoformat()
-
     return dt_utc.isoformat(), time_et_str, gatekeeper_utc
 
 def populate_slate_and_lineups():
     conn = get_db_connection()
+    auto_repair_lineup_schema(conn)
     c = conn.cursor()
 
     now_utc = datetime.now(timezone.utc)
@@ -52,17 +107,15 @@ def populate_slate_and_lineups():
             home_sp = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
             lineups = g.get("lineups", {})
 
-            # Populates both naming conventions to prevent schema lookup mismatches
             c.execute("""
                 INSERT OR REPLACE INTO Daily_Lineups 
                 (game_pk, away_team, home_team, away_sp, home_sp, away_pitcher, home_pitcher, 
                  lineup_status, status, game_datetime_utc, game_time_et, gatekeeper_trigger_utc, ingested_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (pk, away_team, home_team, away_sp, home_sp, away_sp, home_sp, 
-                  status_desc, status_desc, dt_utc_str, time_et_str, gatekeeper_str))
+                  status_desc, status_desc, dt_utc_str, time_et_str, gatekeeper_str, now_utc.isoformat()))
             total_games += 1
 
-            # Ingest confirmed card or active roster depth chart
             for side in ["away", "home"]:
                 team_name = away_team if side == "away" else home_team
                 confirmed_lineup = lineups.get(f"{side}Players", [])
@@ -96,7 +149,7 @@ def populate_slate_and_lineups():
 
     conn.commit()
     conn.close()
-    print(f"[LINEUP INGESTION] Synchronized {total_games} matchups and {total_batters} batters with timestamps.")
+    print(f"[LINEUP INGESTION] Synchronized {total_games} matchups and {total_batters} batters with start times.")
 
 if __name__ == "__main__":
     populate_slate_and_lineups()
