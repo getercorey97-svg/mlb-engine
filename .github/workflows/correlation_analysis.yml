@@ -43,10 +43,20 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           [ -f mlb_engine.db ] && git add mlb_engine.db
-          if ! git diff-index --quiet HEAD; then
-            git commit -m "Auto-update feature correlation matrix [skip ci]"
-            git pull --rebase --autostash
-            git push origin main
-          else
-            echo "No correlation changes to commit."
-          fi
+          # Fetch latest remote changes and align HEAD to prevent binary merge conflicts
+git fetch origin main
+git reset origin/main
+
+# Stage generated database and markdown artifacts
+[ -f README.md ] && git add README.md
+[ -f PREDICTIONS_TODAY.md ] && git add PREDICTIONS_TODAY.md
+[ -f F5_PREDICTIONS_TODAY.md ] && git add F5_PREDICTIONS_TODAY.md
+[ -f mlb_engine.db ] && git add mlb_engine.db
+[ -f mlb_forecasts_2026.csv ] && git add mlb_forecasts_2026.csv
+
+if ! git diff-index --quiet HEAD; then
+  git commit -m "Auto-update full-game, F5 props, README, and operational database [skip ci]"
+  git push origin main
+else
+  echo "No changes to commit."
+fi
