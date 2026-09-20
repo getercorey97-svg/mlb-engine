@@ -12,14 +12,15 @@ def evaluate_fluid_pregame_triggers():
     current_et = now_utc.astimezone(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT")
     print(f"[GATEKEEPER TICK] Current System Time: {current_et} ({now_utc.isoformat()})")
 
-    # Ingest active slate games from Daily_Lineups
     games = c.execute("""
-        SELECT game_pk, away_team, home_team, lineup_status, game_datetime_utc, game_time_et 
+        SELECT game_pk, away_team, home_team, 
+               COALESCE(lineup_status, status, '') as match_status, 
+               game_datetime_utc, game_time_et 
         FROM Daily_Lineups
     """).fetchall()
 
     if not games:
-        print("[GATEKEEPER] No slate games found in Daily_Lineups. Triggering morning slate load.")
+        print("[GATEKEEPER] Daily_Lineups table empty. Triggering slate load.")
         conn.close()
         sys.exit(0)
 
@@ -27,11 +28,10 @@ def evaluate_fluid_pregame_triggers():
 
     for g in games:
         pk = g["game_pk"]
-        status = g["lineup_status"] or ""
+        status = g["match_status"]
         dt_str = g["game_datetime_utc"]
         time_et = g["game_time_et"] or "TBD"
 
-        # Exclude completed games
         if any(x in status.lower() for x in ["final", "game over", "completed"]):
             continue
 
@@ -45,18 +45,16 @@ def evaluate_fluid_pregame_triggers():
 
         minutes_until_first_pitch = (start_utc - now_utc).total_seconds() / 60.0
 
-        # Check if forecasts already exist for this specific game
         forecast_count = c.execute(
             "SELECT COUNT(*) FROM Batter_Hit_Forecasts WHERE game_pk = ?", (pk,)
         ).fetchone()[0]
 
-        print(f"  • Matchup {g['away_team']} @ {g['home_team']} (PK: {pk}) | Start: {time_et} | In: {minutes_until_first_pitch:.1f} min | Cached Props: {forecast_count}")
+        print(f"  • {g['away_team']} @ {g['home_team']} (PK: {pk}) | Start: {time_et} | In: {minutes_until_first_pitch:.1f} min | Cached Props: {forecast_count}")
 
-        # Dynamic Fluid Pre-Game Window: Trigger between 15 and 45 minutes before first pitch
-        if 15.0 <= minutes_until_first_pitch <= 45.0:
-            if forecast_count == 0:
-                print(f"    --> [TRIGGER MATCH] Game is inside 30-min window and requires prop synthesis.")
-                pending_synthesis.append(pk)
+        # Trigger if starting within 45 minutes or recently started (< 20 mins ago) without existing projections
+        if -20.0 <= minutes_until_first_pitch <= 45.0 and forecast_count == 0:
+            print(f"    --> [TRIGGER] Impending first pitch requires prop synthesis.")
+            pending_synthesis.append(pk)
 
     conn.close()
 
@@ -64,7 +62,7 @@ def evaluate_fluid_pregame_triggers():
         print(f"[GATEKEEPER STATUS] Authorized pipeline execution for {len(pending_synthesis)} game(s).")
         sys.exit(0)
     else:
-        print("[GATEKEEPER STATUS] No pending games inside the 30-min pre-game window. Pipeline skipped.")
+        print("[GATEKEEPER STATUS] No pending games inside the trigger window. Pipeline skipped.")
         sys.exit(2)
 
 if __name__ == "__main__":

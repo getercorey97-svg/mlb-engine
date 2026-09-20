@@ -31,7 +31,7 @@ def populate_slate_and_lineups():
     try:
         res = requests.get(url, timeout=10).json()
     except Exception as e:
-        print(f"[LINEUP VERIFIER ERROR] Could not reach MLB Stats API: {e}")
+        print(f"[LINEUP VERIFIER ERROR] Failed to fetch schedule: {e}")
         conn.close()
         return
 
@@ -52,16 +52,17 @@ def populate_slate_and_lineups():
             home_sp = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
             lineups = g.get("lineups", {})
 
-            # 1. Update Daily_Lineups with full timestamp parameters
+            # Populates both naming conventions to prevent schema lookup mismatches
             c.execute("""
                 INSERT OR REPLACE INTO Daily_Lineups 
-                (game_pk, away_team, home_team, away_sp, home_sp, lineup_status, 
-                 game_datetime_utc, game_time_et, gatekeeper_trigger_utc, ingested_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """, (pk, away_team, home_team, away_sp, home_sp, status_desc, dt_utc_str, time_et_str, gatekeeper_str))
+                (game_pk, away_team, home_team, away_sp, home_sp, away_pitcher, home_pitcher, 
+                 lineup_status, status, game_datetime_utc, game_time_et, gatekeeper_trigger_utc, ingested_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (pk, away_team, home_team, away_sp, home_sp, away_sp, home_sp, 
+                  status_desc, status_desc, dt_utc_str, time_et_str, gatekeeper_str))
             total_games += 1
 
-            # 2. Ingest confirmed or projected 1-9 batting orders
+            # Ingest confirmed card or active roster depth chart
             for side in ["away", "home"]:
                 team_name = away_team if side == "away" else home_team
                 confirmed_lineup = lineups.get(f"{side}Players", [])
@@ -95,7 +96,7 @@ def populate_slate_and_lineups():
 
     conn.commit()
     conn.close()
-    print(f"[LINEUP INGESTION] Synchronized {total_games} matchups and {total_batters} batters with start timestamps.")
+    print(f"[LINEUP INGESTION] Synchronized {total_games} matchups and {total_batters} batters with timestamps.")
 
 if __name__ == "__main__":
     populate_slate_and_lineups()
