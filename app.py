@@ -81,8 +81,7 @@ def fetch_mlb_slate_and_scores():
         print(f"[MLB API FETCH ERROR] {e}")
     return {}
 
-# ----------------- BACKTEST WORKER & STATE -----------------
-
+# ----------------- BACKTEST WORKER -----------------
 backtest_state = {
     "status": "idle",
     "message": "Ready to execute backtest.",
@@ -115,7 +114,6 @@ def execute_backtest_task():
 def trigger_backtest(background_tasks: BackgroundTasks):
     if backtest_state["status"] == "running":
         return JSONResponse(status_code=409, content={"status": "running", "message": "Backtest is already executing."})
-    
     background_tasks.add_task(execute_backtest_task)
     return {"status": "started", "message": "Engine backtest initiated in background."}
 
@@ -123,8 +121,7 @@ def trigger_backtest(background_tasks: BackgroundTasks):
 def get_backtest_status():
     return backtest_state
 
-# ----------------- PROPOSAL PROMOTION & REJECTION APIS -----------------
-
+# ----------------- PROPOSALS APIS -----------------
 @app.post("/api/proposals/promote")
 def promote_proposal(proposal_id: int):
     conn = get_db_connection()
@@ -133,12 +130,7 @@ def promote_proposal(proposal_id: int):
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Proposal not found")
-
-    c.execute("""
-        UPDATE Engine_Proposals 
-        SET status = 'approved', action_taken_at = CURRENT_TIMESTAMP 
-        WHERE id = ?
-    """, (proposal_id,))
+    c.execute("UPDATE Engine_Proposals SET status = 'approved', action_taken_at = CURRENT_TIMESTAMP WHERE id = ?", (proposal_id,))
     conn.commit()
     conn.close()
     return {"status": "promoted", "id": proposal_id, "feature": row["feature_name"]}
@@ -151,18 +143,12 @@ def reject_proposal(proposal_id: int):
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Proposal not found")
-
-    c.execute("""
-        UPDATE Engine_Proposals 
-        SET status = 'rejected', action_taken_at = CURRENT_TIMESTAMP 
-        WHERE id = ?
-    """, (proposal_id,))
+    c.execute("UPDATE Engine_Proposals SET status = 'rejected', action_taken_at = CURRENT_TIMESTAMP WHERE id = ?", (proposal_id,))
     conn.commit()
     conn.close()
     return {"status": "rejected", "id": proposal_id, "feature": row["feature_name"]}
 
 # ----------------- DASHBOARD ROUTE -----------------
-
 @app.get("/", response_class=HTMLResponse)
 def serve_dashboard():
     conn = get_db_connection()
@@ -363,9 +349,17 @@ def serve_dashboard():
     stage_order = {"live": 0, "upcoming": 1, "final": 2}
     games.sort(key=lambda x: stage_order.get(x["stage"], 3))
 
+    # Ingest Batters with Left Joined Post-Mortem Audit Data
     batters = []
     if "Batter_Hit_Forecasts" in tables:
-        raw_batters = [dict(r) for r in c.execute("SELECT * FROM Batter_Hit_Forecasts ORDER BY over_0_5_hit_prob DESC").fetchall()]
+        batter_query = """
+            SELECT b.*, p.actual_hits, p.actual_ab, p.actual_pa, p.over_hit
+            FROM Batter_Hit_Forecasts b
+            LEFT JOIN Batter_Post_Mortem_Logs p ON b.game_pk = p.game_pk AND b.player_name = p.player_name
+            ORDER BY b.over_0_5_hit_prob DESC
+        """ if "Batter_Post_Mortem_Logs" in tables else "SELECT *, NULL as actual_hits, NULL as actual_ab, NULL as actual_pa, NULL as over_hit FROM Batter_Hit_Forecasts ORDER BY over_0_5_hit_prob DESC"
+        
+        raw_batters = [dict(r) for r in c.execute(batter_query).fetchall()]
         for b in raw_batters:
             p05 = float(b.get("over_0_5_hit_prob") or 0.0)
             p15 = float(b.get("over_1_5_hit_prob") or 0.0)
@@ -380,7 +374,37 @@ def serve_dashboard():
                 "xhits": round(float(b.get("expected_hits") or 0.0), 2),
                 "p_0_5": round(p05 * 100 if p05 <= 1.0 else p05, 1),
                 "p_1_5": round(p15 * 100 if p15 <= 1.0 else p15, 1),
-                "p_2_5": round(p25 * 100 if p25 <= 1.0 else p25, 1)
+                "p_2_5": round(p25 * 100 if p25 <= 1.0 else p25, 1),
+                "actual_hits": b.get("actual_hits"),
+                "actual_ab": b.get("actual_ab"),
+                "over_hit": b.get("over_hit")
+            })
+
+    # Ingest Pitchers with Left Joined Post-Mortem Audit Data
+    pitchers = []
+    if "Pitcher_K_Forecasts" in tables:
+        pitcher_query = """
+            SELECT f.*, p.actual_k, p.actual_pitches, p.actual_strikes, p.over_hit
+            FROM Pitcher_K_Forecasts f
+            LEFT JOIN Pitcher_Post_Mortem_Logs p ON f.game_pk = p.game_pk AND f.pitcher_name = p.pitcher_name
+            ORDER BY f.expected_k DESC
+        """ if "Pitcher_Post_Mortem_Logs" in tables else "SELECT *, NULL as actual_k, NULL as actual_pitches, NULL as actual_strikes, NULL as over_hit FROM Pitcher_K_Forecasts ORDER BY expected_k DESC"
+
+        raw_pitchers = [dict(r) for r in c.execute(pitcher_query).fetchall()]
+        for p in raw_pitchers:
+            pitchers.append({
+                "game_pk": p.get("game_pk"),
+                "pitcher_name": p.get("pitcher_name"),
+                "team_name": p.get("team_name"),
+                "opponent_team": p.get("opponent_team"),
+                "projected_pitches": round(float(p.get("projected_pitches") or 88.0), 1),
+                "expected_k": round(float(p.get("expected_k") or 0.0), 2),
+                "k_line": float(p.get("k_line") or 4.5),
+                "over_prob": round(float(p.get("over_prob") or 0.0) * 100, 1),
+                "under_prob": round(float(p.get("under_prob") or 0.0) * 100, 1),
+                "actual_k": p.get("actual_k"),
+                "actual_pitches": p.get("actual_pitches"),
+                "over_hit": p.get("over_hit")
             })
 
     sgps = []
@@ -405,6 +429,7 @@ def serve_dashboard():
 
     games_json = json.dumps(games)
     batters_json = json.dumps(batters)
+    pitchers_json = json.dumps(pitchers)
     sgps_json = json.dumps(sgps)
     proposals_json = json.dumps(proposals)
 
@@ -440,7 +465,6 @@ def serve_dashboard():
         </style>
     </head>
     <body class="espn-dark text-gray-200 font-sans antialiased min-h-screen flex flex-col selection:bg-red-600 selection:text-white pb-24 md:pb-12">
-        <!-- Top ESPN BottomLine Scrolling Ticker -->
         <div class="bg-black border-b border-red-700/80 overflow-hidden flex items-center h-10 sticky top-0 z-50 shadow-md">
             <div class="espn-red text-white px-3.5 h-full uppercase tracking-wider flex items-center z-10 shrink-0 font-black text-xs">
                 <span class="inline-block w-2 h-2 rounded-full bg-yellow-400 mr-2 animate-pulse"></span>
@@ -453,20 +477,17 @@ def serve_dashboard():
             </div>
         </div>
 
-        <!-- Master Header Navigation -->
         <header class="espn-subbar border-b border-gray-800 px-4 py-3 shadow-lg">
             <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
                 <div class="flex items-center gap-3">
                     <span class="espn-red text-white text-xl font-black px-2.5 py-0.5 rounded tracking-tighter italic shadow">ESPN</span>
                     <div>
                         <h1 class="text-lg md:text-2xl font-black text-white tracking-wide uppercase">StatsCenter Quant Hub</h1>
-                        <p class="text-[11px] md:text-xs font-mono text-gray-400">Autonomous Edge Discovery • Dynamic Backtesting Protocol</p>
+                        <p class="text-[11px] md:text-xs font-mono text-gray-400">Autonomous Edge Discovery • Continuous Bayesian Learning</p>
                     </div>
                 </div>
 
-                <!-- Action Toolbar (Stage Filters + Backtest Control) -->
                 <div class="flex items-center gap-2 overflow-x-auto w-full md:w-auto touch-scroll py-1">
-                    <!-- Current Engine Backtest Button -->
                     <button onclick="promptBacktestConfirmation('current')" id="btn-backtest" class="min-h-[40px] px-3.5 py-2 rounded-md bg-blue-600 hover:bg-blue-500 text-white font-black text-xs uppercase tracking-wider shadow active:scale-95 transition-all flex items-center gap-1.5 whitespace-nowrap">
                         <span id="backtest-spinner" class="hidden w-2 h-2 rounded-full bg-white animate-ping"></span>
                         <span id="backtest-btn-text">📊 Run Backtest</span>
@@ -474,7 +495,6 @@ def serve_dashboard():
 
                     <div class="h-6 w-px bg-gray-700 mx-1 hidden md:block"></div>
 
-                    <!-- Stage Filter Pills -->
                     <div class="flex items-center gap-1.5 text-xs font-black uppercase tracking-wider">
                         <button onclick="setGameStage('all')" id="stage-btn-all" class="stage-btn min-h-[40px] px-3 py-2 rounded-md bg-red-600 text-white shadow active:scale-95 transition-all">All (<span id="count-all">0</span>)</button>
                         <button onclick="setGameStage('live')" id="stage-btn-live" class="stage-btn min-h-[40px] px-3 py-2 rounded-md bg-gray-800 text-gray-400 border border-gray-700 active:scale-95 transition-all">🔴 Live (<span id="count-live">0</span>)</button>
@@ -484,68 +504,27 @@ def serve_dashboard():
                 </div>
             </div>
 
-            <!-- Market Type Navigation Tabs -->
             <div class="max-w-7xl mx-auto mt-3 flex gap-2 overflow-x-auto touch-scroll border-t border-gray-800/80 pt-2.5 text-xs md:text-sm font-bold uppercase no-scrollbar">
                 <button onclick="setBetMarket('all')" id="tab-all" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-red-600 text-white whitespace-nowrap">All Markets</button>
                 <button onclick="setBetMarket('f5')" id="tab-f5" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">⏱️ First 5 (F5)</button>
                 <button onclick="setBetMarket('moneyline')" id="tab-moneyline" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🏆 Moneylines</button>
-                <button onclick="setBetMarket('batters')" id="tab-batters" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🎯 Batter Hits</button>
+                <button onclick="setBetMarket('pitchers')" id="tab-pitchers" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">⚾ Pitcher Ks (<span id="count-pitchers">0</span>)</button>
+                <button onclick="setBetMarket('batters')" id="tab-batters" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🎯 Batter Hits (<span id="count-batters">0</span>)</button>
                 <button onclick="setBetMarket('sgp')" id="tab-sgp" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">⚡ Correlated SGPs</button>
                 <button onclick="setBetMarket('lab')" id="tab-lab" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-purple-400 hover:text-purple-300 whitespace-nowrap">🔬 Lab Proposals (<span id="proposals-badge">0</span>)</button>
             </div>
         </header>
 
-        <!-- Backtest Confirmation Modal Dialog -->
-        <div id="backtest-modal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
-            <div class="bg-[#121722] border border-gray-700 rounded-xl max-w-md w-full p-5 shadow-2xl space-y-4">
-                <div class="flex items-center gap-3">
-                    <div class="w-10 h-10 rounded-full bg-blue-900/60 border border-blue-500/50 flex items-center justify-center text-blue-400 text-lg">
-                        📊
-                    </div>
-                    <div>
-                        <h3 class="text-base font-black text-white uppercase tracking-wide">Confirm Engine Backtest</h3>
-                        <p class="text-xs text-gray-400">Current Regular Season Production Model</p>
-                    </div>
-                </div>
-                <div class="bg-black/50 p-3.5 rounded-lg border border-gray-800 text-xs font-mono text-gray-300 space-y-2">
-                    <p class="text-yellow-400 font-bold">Are you sure you want to start the backtest on the current engine?</p>
-                    <p class="text-gray-400 text-[11px] leading-relaxed">
-                        This executes an out-of-sample walk-forward sweep across archived games in <span class="text-emerald-400">Historical_Forecasts</span>. It will re-calculate Brier score calibration, log-loss, and closing line value (CLV) deltas without disrupting active line tracking.
-                    </p>
-                </div>
-                <div class="flex gap-2.5 pt-1">
-                    <button onclick="confirmStartBacktest()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-black py-2.5 px-4 rounded-lg text-xs uppercase tracking-wider active:scale-95 transition-all shadow-md">
-                        Yes, Start Backtest
-                    </button>
-                    <button onclick="closeBacktestModal()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 font-bold py-2.5 px-4 rounded-lg text-xs uppercase tracking-wider active:scale-95 transition-all border border-gray-700">
-                        Cancel
-                    </button>
-                </div>
-            </div>
-        </div>
-
         <main class="max-w-7xl mx-auto p-4 md:p-6 space-y-6 flex-1 w-full">
-            <!-- Backtest Status Notification Banner -->
-            <div id="backtest-banner" class="hidden bg-blue-950/80 border border-blue-700/60 p-3 rounded-lg text-xs font-mono flex items-center justify-between shadow-lg">
-                <div class="flex items-center gap-2">
-                    <span id="banner-pulse" class="w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
-                    <span id="banner-status-text" class="text-gray-200">Backtest worker status: Ready.</span>
-                </div>
-                <span id="banner-time" class="text-gray-500 text-[11px]"></span>
-            </div>
-
             <div class="flex justify-between items-center bg-gray-900/90 border border-gray-800 px-3.5 py-2.5 rounded-lg text-xs">
                 <span class="text-gray-400">View: <strong id="filter-label" class="text-yellow-400 uppercase font-mono font-bold tracking-wide">All Slates • All Markets</strong></span>
                 <span class="font-mono text-gray-500 text-[11px]">Database: <strong class="text-emerald-400">mlb_engine.db</strong></span>
             </div>
 
-            <!-- Section 0: Edge Discovery Lab & Promotion Gate -->
+            <!-- Section 0: Edge Discovery Lab -->
             <section id="section-lab" class="hidden space-y-4 pt-2">
                 <div class="flex items-center justify-between border-b border-gray-800 pb-2">
-                    <div>
-                        <h2 class="text-base md:text-lg font-black uppercase text-purple-400 tracking-wide">🔬 Quantum Discovery Lab & Promotion Gate</h2>
-                        <p class="text-xs text-gray-400 mt-0.5">Empirical shadow models that improved out-of-sample Brier scores. Awaiting explicit promotion approval.</p>
-                    </div>
+                    <h2 class="text-base md:text-lg font-black uppercase text-purple-400 tracking-wide">🔬 Quantum Discovery Lab & Promotion Gate</h2>
                 </div>
                 <div id="proposals-container" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
             </section>
@@ -559,10 +538,35 @@ def serve_dashboard():
                 <div id="games-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5"></div>
             </section>
 
-            <!-- Section 2: Batter Hit Props Table -->
+            <!-- Section 2: Pitcher Strikeout Props Table -->
+            <section id="section-pitchers" class="space-y-3">
+                <div class="flex items-center justify-between border-b border-gray-800 pb-2">
+                    <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Pitcher Strikeouts Projections & Post-Mortem Audit</h2>
+                    <span class="text-xs font-mono text-gray-400" id="pitchers-total-counter"></span>
+                </div>
+                <div class="overflow-x-auto espn-card border rounded-lg shadow touch-scroll">
+                    <table class="w-full text-left text-xs md:text-sm">
+                        <thead class="bg-gray-800/90 text-gray-400 font-mono uppercase text-[11px]">
+                            <tr>
+                                <th class="py-3 px-3.5">Starting Pitcher</th>
+                                <th class="py-3 px-3">Opponent</th>
+                                <th class="py-3 px-3 text-right">Proj Pitches</th>
+                                <th class="py-3 px-3 text-right">xK</th>
+                                <th class="py-3 px-3 text-center">Line</th>
+                                <th class="py-3 px-3.5 text-right font-bold text-emerald-400">Over %</th>
+                                <th class="py-3 px-3.5 text-right font-bold text-cyan-400">Under %</th>
+                                <th class="py-3 px-3.5 text-center">Actual K (Post-Mortem)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pitchers-table" class="divide-y divide-gray-800 font-mono"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Section 3: Batter Hit Props & Post-Mortem Audit Table -->
             <section id="section-batters" class="space-y-3">
                 <div class="flex items-center justify-between border-b border-gray-800 pb-2">
-                    <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Endogenous Batter Hit Distributions</h2>
+                    <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Batter Hit Projections & Empirical Post-Mortem</h2>
                     <span class="text-xs font-mono text-gray-400" id="batters-total-counter"></span>
                 </div>
                 <div class="overflow-x-auto espn-card border rounded-lg shadow touch-scroll">
@@ -575,7 +579,7 @@ def serve_dashboard():
                                 <th class="py-3 px-3 text-right">xHits</th>
                                 <th class="py-3 px-3.5 text-right font-bold text-emerald-400">Over 0.5</th>
                                 <th class="py-3 px-3.5 text-right font-bold text-cyan-400">Over 1.5</th>
-                                <th class="py-3 px-3 text-right text-gray-400">Over 2.5</th>
+                                <th class="py-3 px-3.5 text-center">Actual Hits (Post-Mortem)</th>
                             </tr>
                         </thead>
                         <tbody id="batters-table" class="divide-y divide-gray-800 font-mono"></tbody>
@@ -583,7 +587,7 @@ def serve_dashboard():
                 </div>
             </section>
 
-            <!-- Section 3: Correlated Same Game Parlays (SGP) Table -->
+            <!-- Section 4: Correlated Same Game Parlays (SGP) Table -->
             <section id="section-sgp" class="space-y-3">
                 <div class="flex items-center justify-between border-b border-gray-800 pb-2">
                     <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Cross-Market Joint Probability Edges</h2>
@@ -611,6 +615,7 @@ def serve_dashboard():
         <script>
             const gamesData = {games_json};
             const battersData = {batters_json};
+            const pitchersData = {pitchers_json};
             const sgpData = {sgps_json};
             let proposalsData = {proposals_json};
 
@@ -621,25 +626,34 @@ def serve_dashboard():
             document.getElementById('count-live').textContent = gamesData.filter(g => g.stage === 'live').length;
             document.getElementById('count-upcoming').textContent = gamesData.filter(g => g.stage === 'upcoming').length;
             document.getElementById('count-final').textContent = gamesData.filter(g => g.stage === 'final').length;
+            document.getElementById('count-pitchers').textContent = pitchersData.length;
+            document.getElementById('count-batters').textContent = battersData.length;
             document.getElementById('proposals-badge').textContent = proposalsData.filter(p => p.status === 'pending').length;
 
             function buildTicker() {{
                 const items = [];
                 gamesData.filter(g => g.stage === 'live').forEach(g => {{
-                    items.push(`🔴 LIVE: ${{g.away_team}} ${{g.away_actual_runs}}, ${{g.home_team}} ${{g.home_actual_runs}} (${{g.inning_state}} ${{g.current_inning}}) | Live Proj Runs: ${{g.live_exp_away}} - ${{g.live_exp_home}} | Home Win: ${{g.live_prob_home}}%`);
+                    items.push(`🔴 LIVE: ${{g.away_team}} ${{g.away_actual_runs}}, ${{g.home_team}} ${{g.home_actual_runs}} (${{g.inning_state}} ${{g.current_inning}}) | Live Proj Runs: ${{g.live_exp_away}} - ${{g.live_exp_home}}`);
                 }});
                 gamesData.filter(g => g.stage === 'final').forEach(g => {{
                     const badge = g.hit_ml ? 'HIT ✅' : 'MISS ❌';
-                    items.push(`🏁 FINAL: ${{g.away_team}} ${{g.away_actual_runs}}, ${{g.home_team}} ${{g.home_actual_runs}} (Tot: ${{g.actual_total_runs}}) | Fav: ${{g.fav_team}} (${{g.fav_prob}}%) -> ${{badge}} | Full Runs Exp: ${{g.pregame_exp_away}}-${{g.pregame_exp_home}}`);
+                    items.push(`🏁 FINAL: ${{g.away_team}} ${{g.away_actual_runs}}, ${{g.home_team}} ${{g.home_actual_runs}} | Fav: ${{g.fav_team}} -> ${{badge}}`);
                 }});
-                gamesData.filter(g => g.stage === 'upcoming').forEach(g => {{
-                    items.push(`⏳ UPCOMING: ${{g.away_team}} @ ${{g.home_team}} | Fav: ${{g.fav_team}} (${{g.fav_prob}}%) | Exp Runs: ${{g.pregame_exp_away}} - ${{g.pregame_exp_home}} | F5 Line: ${{g.pregame_f5_median}}`);
+                pitchersData.slice(0, 6).forEach(p => {{
+                    if (p.actual_k !== null && p.actual_k !== undefined) {{
+                        const badge = p.actual_k > p.k_line ? 'OVER ✅' : 'UNDER ❌';
+                        items.push(`⚾ ${{p.pitcher_name}}: ${{p.actual_k}} Ks (Line: ${{p.k_line}}) -> ${{badge}}`);
+                    }} else {{
+                        items.push(`⚾ ${{p.pitcher_name}}: Line ${{p.k_line}} Ks (${{p.over_prob}}% Over)`);
+                    }}
                 }});
-                battersData.slice(0, 8).forEach(b => {{
-                    items.push(`🎯 ${{b.name}} (${{b.team}} #${{b.order}}): ${{b.p_0_5}}% Over 0.5 Hits (${{b.xhits}} xH)`);
-                }});
-                sgpData.slice(0, 6).forEach(s => {{
-                    items.push(`⚡ SGP: ${{s.leg_1}} + ${{s.leg_2}} [Joint: ${{s.joint}}% | +${{s.edge}}% Edge]`);
+                battersData.slice(0, 6).forEach(b => {{
+                    if (b.actual_hits !== null && b.actual_hits !== undefined) {{
+                        const badge = b.actual_hits >= 1 ? 'HIT ✅' : 'MISS ❌';
+                        items.push(`🎯 ${{b.name}}: ${{b.actual_hits}} Hits (Proj: ${{b.xhits}}) -> ${{badge}}`);
+                    }} else {{
+                        items.push(`🎯 ${{b.name}} (${{b.team}}): ${{b.p_0_5}}% Over 0.5 Hits`);
+                    }}
                 }});
 
                 const content = items.length > 0 ? items.join(' &nbsp;&nbsp;&nbsp;•&nbsp;&nbsp;&nbsp; ') : 'Synchronizing slate linescores...';
@@ -650,76 +664,6 @@ def serve_dashboard():
             const tickerText = document.getElementById('ticker-content');
             tickerBox.addEventListener('touchstart', () => tickerText.classList.add('ticker-paused'), {{passive: true}});
             tickerBox.addEventListener('touchend', () => tickerText.classList.remove('ticker-paused'), {{passive: true}});
-
-            // ----------------- BACKTEST CONFIRMATION & EXECUTION -----------------
-            function promptBacktestConfirmation(engineType) {{
-                document.getElementById('backtest-modal').classList.remove('hidden');
-            }}
-
-            function closeBacktestModal() {{
-                document.getElementById('backtest-modal').classList.add('hidden');
-            }}
-
-            async function confirmStartBacktest() {{
-                closeBacktestModal();
-                const btnText = document.getElementById('backtest-btn-text');
-                const spinner = document.getElementById('backtest-spinner');
-                const banner = document.getElementById('backtest-banner');
-                const bannerText = document.getElementById('banner-status-text');
-
-                btnText.textContent = 'Backtest Running...';
-                spinner.classList.remove('hidden');
-                banner.classList.remove('hidden');
-                bannerText.textContent = 'Initiating backtest worker on cloud thread...';
-
-                try {{
-                    const res = await fetch('/api/backtest/run', {{ method: 'POST' }});
-                    const data = await res.json();
-                    bannerText.textContent = data.message || 'Worker running...';
-                    pollBacktestStatus();
-                }} catch (e) {{
-                    bannerText.textContent = 'Error starting backtest: ' + e;
-                    btnText.textContent = '📊 Run Backtest';
-                    spinner.classList.add('hidden');
-                }}
-            }}
-
-            function pollBacktestStatus() {{
-                const interval = setInterval(async () => {{
-                    try {{
-                        const res = await fetch('/api/backtest/status');
-                        const data = await res.json();
-                        const banner = document.getElementById('backtest-banner');
-                        const bannerText = document.getElementById('banner-status-text');
-                        const bannerTime = document.getElementById('banner-time');
-                        const btnText = document.getElementById('backtest-btn-text');
-                        const spinner = document.getElementById('backtest-spinner');
-
-                        bannerText.textContent = data.message;
-                        if (data.last_run) bannerTime.textContent = data.last_run;
-
-                        if (data.status === 'completed') {{
-                            clearInterval(interval);
-                            btnText.textContent = '✅ Backtest Complete';
-                            spinner.classList.add('hidden');
-                            banner.className = "bg-emerald-950/80 border border-emerald-700/60 p-3 rounded-lg text-xs font-mono flex items-center justify-between shadow-lg";
-                            setTimeout(() => {{
-                                btnText.textContent = '📊 Run Backtest';
-                            }}, 8000);
-                        }} else if (data.status === 'error') {{
-                            clearInterval(interval);
-                            btnText.textContent = '❌ Backtest Failed';
-                            spinner.classList.add('hidden');
-                            banner.className = "bg-red-950/80 border border-red-700/60 p-3 rounded-lg text-xs font-mono flex items-center justify-between shadow-lg";
-                            setTimeout(() => {{
-                                btnText.textContent = '📊 Run Backtest';
-                            }}, 8000);
-                        }}
-                    }} catch (e) {{
-                        console.error('Polling error:', e);
-                    }}
-                }}, 3000);
-            }}
 
             function setGameStage(stage) {{
                 currentStage = stage;
@@ -745,286 +689,74 @@ def serve_dashboard():
                 renderAll();
             }}
 
-            async function promoteProposal(id) {{
-                try {{
-                    const res = await fetch(`/api/proposals/promote?proposal_id=${{id}}`, {{ method: 'POST' }});
-                    if (res.ok) {{
-                        const p = proposalsData.find(item => item.id === id);
-                        if (p) p.status = 'approved';
-                        document.getElementById('proposals-badge').textContent = proposalsData.filter(p => p.status === 'pending').length;
-                        renderLab();
-                    }}
-                }} catch (e) {{
-                    alert('Error promoting proposal: ' + e);
-                }}
-            }}
-
-            async function rejectProposal(id) {{
-                try {{
-                    const res = await fetch(`/api/proposals/reject?proposal_id=${{id}}`, {{ method: 'POST' }});
-                    if (res.ok) {{
-                        const p = proposalsData.find(item => item.id === id);
-                        if (p) p.status = 'rejected';
-                        document.getElementById('proposals-badge').textContent = proposalsData.filter(p => p.status === 'pending').length;
-                        renderLab();
-                    }}
-                }} catch (e) {{
-                    alert('Error rejecting proposal: ' + e);
-                }}
-            }}
-
-            function renderLab() {{
-                const container = document.getElementById('proposals-container');
-                container.innerHTML = '';
-
-                if (proposalsData.length === 0) {{
-                    container.innerHTML = '<p class="text-sm text-gray-500 font-mono col-span-2">No candidate discoveries recorded. Discovery agent runs overnight.</p>';
-                    return;
-                }}
-
-                proposalsData.forEach(p => {{
-                    let statusBadge = '<span class="bg-yellow-600/80 text-white px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider">Awaiting Promotion</span>';
-                    if (p.status === 'approved') statusBadge = '<span class="bg-emerald-600 text-white px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider">PROMOTED TO CORE ✅</span>';
-                    if (p.status === 'rejected') statusBadge = '<span class="bg-red-800 text-gray-300 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider">REJECTED ❌</span>';
-
-                    const card = document.createElement('div');
-                    card.className = "espn-card border rounded-lg p-4 shadow-md flex flex-col justify-between space-y-3";
-                    card.innerHTML = `
-                        <div>
-                            <div class="flex justify-between items-center mb-1.5">
-                                <span class="text-xs font-mono text-purple-400 font-bold">${{p.vector}}</span>
-                                ${{statusBadge}}
-                            </div>
-                            <h3 class="text-sm md:text-base font-black text-white font-mono uppercase tracking-wide break-all">${{p.feature}}</h3>
-                            <p class="text-xs text-gray-300 mt-1 leading-relaxed">${{p.hypothesis}}</p>
-                            
-                            <div class="grid grid-cols-2 gap-2 mt-3 bg-black/60 p-2.5 rounded border border-gray-800 text-xs font-mono">
-                                <div>
-                                    <span class="text-gray-400 block text-[10px] uppercase">OOS Brier Delta:</span>
-                                    <span class="text-emerald-400 font-black">+${{p.brier}}% Edge</span>
-                                </div>
-                                <div>
-                                    <span class="text-gray-400 block text-[10px] uppercase">Shadow Slate Record:</span>
-                                    <span class="text-white font-bold">${{p.record}}</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        ${{p.status === 'pending' ? `
-                        <div class="flex gap-2 pt-2 border-t border-gray-800/80">
-                            <button onclick="promoteProposal(${{p.id}})" class="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-3 rounded text-xs active:scale-95 transition-all">
-                                Promote to Core Pipeline
-                            </button>
-                            <button onclick="rejectProposal(${{p.id}})" class="bg-gray-800 hover:bg-gray-700 text-gray-300 font-bold py-2 px-3 rounded text-xs active:scale-95 transition-all border border-gray-700">
-                                Reject
-                            </button>
-                        </div>
-                        ` : ''}}
-                    `;
-                    container.appendChild(card);
-                }});
-            }}
-
             function renderAll() {{
                 document.getElementById('filter-label').textContent = `${{currentStage}} Slates • ${{currentMarket}} Market`;
 
                 const secLab = document.getElementById('section-lab');
                 const secGames = document.getElementById('section-games');
+                const secPitchers = document.getElementById('section-pitchers');
                 const secBatters = document.getElementById('section-batters');
                 const secSgp = document.getElementById('section-sgp');
-
-                if (currentMarket === 'lab') {{
-                    secLab.classList.remove('hidden');
-                    secGames.classList.add('hidden');
-                    secBatters.classList.add('hidden');
-                    secSgp.classList.add('hidden');
-                    renderLab();
-                    return;
-                }} else {{
-                    secLab.classList.add('hidden');
-                }}
 
                 const filteredGames = gamesData.filter(g => currentStage === 'all' || g.stage === currentStage);
                 const activePks = new Set(filteredGames.map(g => g.game_pk));
 
-                if (currentMarket === 'batters') {{
-                    secGames.classList.add('hidden');
-                }} else {{
-                    secGames.classList.remove('hidden');
-                    const container = document.getElementById('games-grid');
-                    container.innerHTML = '';
-                    
-                    filteredGames.forEach(g => {{
-                        const card = document.createElement('div');
-                        card.className = "espn-card border rounded-lg p-3.5 shadow-md flex flex-col justify-between";
+                // Control market visibility
+                secGames.classList.toggle('hidden', currentMarket === 'batters' || currentMarket === 'pitchers' || currentMarket === 'lab');
+                secPitchers.classList.toggle('hidden', currentMarket !== 'all' && currentMarket !== 'pitchers');
+                secBatters.classList.toggle('hidden', currentMarket !== 'all' && currentMarket !== 'batters');
+                secSgp.classList.toggle('hidden', currentMarket !== 'all' && currentMarket !== 'sgp');
+                secLab.classList.toggle('hidden', currentMarket !== 'lab');
 
-                        const causalBlock = `
-                            <div class="bg-[#0e131d] p-2.5 rounded border border-gray-800/90 mb-2 space-y-1 text-[11px] font-mono">
-                                <div class="text-[10px] font-sans font-bold text-cyan-400 uppercase tracking-wider flex justify-between">
-                                    <span>Geter Principle: Causal Vectors</span>
-                                    <span class="text-gray-400">Net: ${{g.net_diff > 0 ? '+' + g.net_diff : g.net_diff}}</span>
-                                </div>
-                                <div class="flex justify-between text-gray-300">
-                                    <span>• SP Kinematics Delta:</span>
-                                    <strong class="${{g.v_pitching >= 0 ? 'text-emerald-400' : 'text-red-400'}}">${{g.v_pitching > 0 ? '+' + g.v_pitching : g.v_pitching}} R</strong>
-                                </div>
-                                <div class="flex justify-between text-gray-300">
-                                    <span>• Bullpen Biological Fatigue:</span>
-                                    <strong class="${{g.v_fatigue >= 0 ? 'text-emerald-400' : 'text-red-400'}}">${{g.v_fatigue > 0 ? '+' + g.v_fatigue : g.v_fatigue}} R</strong>
-                                </div>
-                                <div class="flex justify-between text-gray-400">
-                                    <span>• Atmospheric & Base Run Value:</span>
-                                    <span>${{g.v_baseline > 0 ? '+' + g.v_baseline : g.v_baseline}} R</span>
-                                </div>
-                            </div>
-                        `;
-
-                        if (g.stage === 'live') {{
-                            card.innerHTML = `
-                                <div>
-                                    <div class="flex justify-between items-center mb-2">
-                                        <span class="bg-red-600 text-white px-2 py-0.5 rounded text-[10px] font-black tracking-wider animate-pulse flex items-center gap-1">
-                                            <span class="w-1.5 h-1.5 rounded-full bg-white animate-ping"></span>
-                                            LIVE: ${{g.inning_state}} ${{g.current_inning}}
-                                        </span>
-                                        <span class="font-mono text-xs text-yellow-400 font-bold">Innings 1-9</span>
-                                    </div>
-                                    <div class="flex justify-between items-baseline mb-2">
-                                        <h3 class="text-base font-black text-white uppercase">${{g.away_team}} @ ${{g.home_team}}</h3>
-                                        <span class="text-lg font-mono font-black text-yellow-400">${{g.away_actual_runs}} - ${{g.home_actual_runs}}</span>
-                                    </div>
-                                    ${{causalBlock}}
-                                    <div class="bg-black/60 p-2.5 rounded border border-red-900/60 mb-2 space-y-1 text-xs font-mono">
-                                        <div class="text-[10px] text-red-400 uppercase font-bold tracking-wider font-sans">Live Run Projections</div>
-                                        <div class="flex justify-between text-gray-300">
-                                            <span>Projected Full Game:</span>
-                                            <strong class="text-yellow-300">${{g.live_exp_away}} - ${{g.live_exp_home}}</strong>
-                                        </div>
-                                        <div class="flex justify-between text-gray-300">
-                                            <span>Live Win Expectancy:</span>
-                                            <strong class="text-white">${{g.home_team}} (${{g.live_prob_home}}%)</strong>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="bg-gray-900/70 p-2.5 rounded border border-gray-800 text-[11px] font-mono text-gray-400 space-y-1">
-                                    <div class="flex justify-between">
-                                        <span>Pregame Full Runs:</span>
-                                        <span class="text-gray-200">${{g.pregame_exp_away}} - ${{g.pregame_exp_home}} (Tot: ${{g.full_total}})</span>
-                                    </div>
-                                    <div class="flex justify-between">
-                                        <span>Pregame F5 Runs:</span>
-                                        <span class="text-yellow-400">${{g.f5_exp_away}} - ${{g.f5_exp_home}} (Line: ${{g.pregame_f5_median}})</span>
-                                    </div>
-                                </div>
-                            `;
-                        }} else if (g.stage === 'final') {{
-                            const verdictBadge = g.hit_ml 
-                                ? '<span class="bg-emerald-600 text-white px-2 py-0.5 rounded text-[10px] font-black">HIT ✅</span>'
-                                : '<span class="bg-red-700 text-white px-2 py-0.5 rounded text-[10px] font-black">MISS ❌</span>';
-
-                            const f5Text = g.f5_actual_runs !== null 
-                                ? `${{g.f5_actual_away}} - ${{g.f5_actual_home}} (Total: ${{g.f5_actual_runs}})`
-                                : "N/A";
-
-                            card.innerHTML = `
-                                <div>
-                                    <div class="flex justify-between items-center mb-2">
-                                        <span class="bg-blue-600 text-white px-2 py-0.5 rounded text-[10px] font-black tracking-wider">FINAL</span>
-                                        ${{verdictBadge}}
-                                    </div>
-                                    <div class="flex justify-between items-baseline mb-2">
-                                        <h3 class="text-base font-black text-white uppercase">${{g.away_team}} @ ${{g.home_team}}</h3>
-                                        <span class="text-lg font-mono font-black text-white">${{g.away_actual_runs}} - ${{g.home_actual_runs}}</span>
-                                    </div>
-                                    ${{causalBlock}}
-                                    <div class="bg-black/60 p-2.5 rounded border border-gray-800 mb-2 space-y-1 text-xs font-mono">
-                                        <div class="text-[10px] font-sans font-bold text-gray-400 uppercase tracking-wider flex justify-between">
-                                            <span>Full Game Projections</span>
-                                            <span class="text-emerald-400">Fav: ${{g.fav_team}} (${{g.fav_prob}}%)</span>
-                                        </div>
-                                        <div class="flex justify-between text-gray-300">
-                                            <span>Predicted Runs:</span>
-                                            <span class="text-white font-bold">${{g.pregame_exp_away}} - ${{g.pregame_exp_home}} (Tot: ${{g.full_total}})</span>
-                                        </div>
-                                        <div class="flex justify-between text-gray-400 text-[11px]">
-                                            <span>Actual Runs:</span>
-                                            <span class="text-yellow-300 font-bold">${{g.away_actual_runs}} - ${{g.home_actual_runs}} (Tot: ${{g.actual_total_runs}})</span>
-                                        </div>
-                                    </div>
-                                    <div class="bg-black/60 p-2.5 rounded border border-gray-800 mb-2 space-y-1 text-xs font-mono">
-                                        <div class="text-[10px] font-sans font-bold text-yellow-400 uppercase tracking-wider">
-                                            First 5 Innings (F5)
-                                        </div>
-                                        <div class="flex justify-between text-gray-300">
-                                            <span>Predicted F5 Runs:</span>
-                                            <span class="text-white font-bold">${{g.f5_exp_away}} - ${{g.f5_exp_home}} (Line: ${{g.pregame_f5_median}})</span>
-                                        </div>
-                                        <div class="flex justify-between text-gray-400 text-[11px]">
-                                            <span>Actual F5 Score:</span>
-                                            <span class="text-yellow-300 font-bold">${{f5Text}}</span>
-                                        </div>
-                                    </div>
-                                </div>
-                            `;
-                        }} else {{
-                            card.innerHTML = `
-                                <div>
-                                    <div class="flex justify-between items-center mb-2">
-                                        <span class="bg-gray-700 text-gray-300 px-2 py-0.5 rounded text-[10px] font-black tracking-wider">UPCOMING</span>
-                                        <span class="font-mono text-xs text-yellow-400 font-bold">F5 Line: ${{g.pregame_f5_median}}</span>
-                                    </div>
-                                    <h3 class="text-base font-black text-white uppercase tracking-tight mb-1">${{g.away_team}} @ ${{g.home_team}}</h3>
-                                    <div class="text-xs text-gray-400 space-y-0.5 mb-2.5">
-                                        <div class="truncate">SP: <span class="text-gray-200">${{g.away_sp}}</span> vs <span class="text-gray-200">${{g.home_sp}}</span></div>
-                                    </div>
-                                    ${{causalBlock}}
-                                    <div class="bg-black/60 p-2.5 rounded border border-gray-800 mb-2 space-y-1 text-xs font-mono">
-                                        <div class="text-[10px] font-sans font-bold text-gray-400 uppercase tracking-wider flex justify-between">
-                                            <span>Full Game Projection</span>
-                                            <span class="text-emerald-400">${{g.fav_team}} (${{g.fav_prob}}%)</span>
-                                        </div>
-                                        <div class="flex justify-between text-gray-300">
-                                            <span>Expected Runs:</span>
-                                            <span class="text-white font-bold">${{g.pregame_exp_away}} - ${{g.pregame_exp_home}} (Tot: ${{g.full_total}})</span>
-                                        </div>
-                                        <div class="flex justify-between text-gray-400 text-[11px]">
-                                            <span>Moneyline Odds:</span>
-                                            <span>Away ${{g.pregame_prob_away}}% • Home ${{g.pregame_prob_home}}%</span>
-                                        </div>
-                                    </div>
-                                    <div class="bg-black/60 p-2.5 rounded border border-gray-800 space-y-1 text-xs font-mono">
-                                        <div class="text-[10px] font-sans font-bold text-yellow-400 uppercase tracking-wider">
-                                            First 5 Innings (F5) Projection
-                                        </div>
-                                        <div class="flex justify-between text-gray-300">
-                                            <span>Expected F5 Runs:</span>
-                                            <span class="text-white font-bold">${{g.f5_exp_away}} - ${{g.f5_exp_home}}</span>
-                                        </div>
-                                        <div class="flex justify-between text-gray-400 text-[11px]">
-                                            <span>Predicted F5 Total:</span>
-                                            <span class="text-yellow-400 font-bold">${{g.pregame_f5_median}} Runs</span>
-                                        </div>
-                                    </div>
-                                </div>
-                            `;
-                        }}
-
-                        container.appendChild(card);
-                    }});
-                    document.getElementById('games-total-counter').textContent = `${{filteredGames.length}} Matchups`;
-                }}
-
-                if (currentMarket === 'f5' || currentMarket === 'moneyline') {{
-                    secBatters.classList.add('hidden');
-                }} else {{
-                    secBatters.classList.remove('hidden');
-                    const bTable = document.getElementById('batters-table');
-                    bTable.innerHTML = '';
-                    
-                    const filteredBatters = battersData.filter(b => activePks.has(b.game_pk));
-                    filteredBatters.slice(0, 30).forEach(b => {{
+                // 1. Render Pitchers
+                if (currentMarket === 'all' || currentMarket === 'pitchers') {{
+                    const pTable = document.getElementById('pitchers-table');
+                    pTable.innerHTML = '';
+                    const filteredPitchers = pitchersData.filter(p => activePks.has(p.game_pk));
+                    filteredPitchers.forEach(p => {{
                         const tr = document.createElement('tr');
                         tr.className = "hover:bg-gray-800/60 transition-colors";
+                        
+                        let actualBadge = '<span class="text-gray-500 font-sans text-xs">Scheduled</span>';
+                        if (p.actual_k !== null && p.actual_k !== undefined) {{
+                            const hitBadge = p.actual_k > p.k_line 
+                                ? '<span class="text-emerald-400 font-black">OVER ✅</span>' 
+                                : '<span class="text-red-400 font-black">UNDER ❌</span>';
+                            actualBadge = `<strong class="text-white">${{p.actual_k}} Ks</strong> (${{p.actual_pitches}} P) • ${{hitBadge}}`;
+                        }}
+
+                        tr.innerHTML = `
+                            <td class="py-2.5 px-3.5 font-sans font-bold text-white whitespace-nowrap">${{p.pitcher_name}} (${{p.team_name}})</td>
+                            <td class="py-2.5 px-3 text-gray-400">vs ${{p.opponent_team}}</td>
+                            <td class="py-2.5 px-3 text-right text-gray-300">${{p.projected_pitches}}</td>
+                            <td class="py-2.5 px-3 text-right text-yellow-400 font-bold">${{p.expected_k}}</td>
+                            <td class="py-2.5 px-3 text-center text-white font-bold">${{p.k_line}}</td>
+                            <td class="py-2.5 px-3.5 text-right font-bold text-emerald-400">${{p.over_prob}}%</td>
+                            <td class="py-2.5 px-3.5 text-right font-bold text-cyan-400">${{p.under_prob}}%</td>
+                            <td class="py-2.5 px-3.5 text-center">${{actualBadge}}</td>
+                        `;
+                        pTable.appendChild(tr);
+                    }});
+                    document.getElementById('pitchers-total-counter').textContent = `${{filteredPitchers.length}} Pitchers`;
+                }}
+
+                // 2. Render Batters
+                if (currentMarket === 'all' || currentMarket === 'batters') {{
+                    const bTable = document.getElementById('batters-table');
+                    bTable.innerHTML = '';
+                    const filteredBatters = battersData.filter(b => activePks.has(b.game_pk));
+                    filteredBatters.slice(0, 35).forEach(b => {{
+                        const tr = document.createElement('tr');
+                        tr.className = "hover:bg-gray-800/60 transition-colors";
+
+                        let actualHitsBadge = '<span class="text-gray-500 font-sans text-xs">Scheduled</span>';
+                        if (b.actual_hits !== null && b.actual_hits !== undefined) {{
+                            const badge = b.actual_hits >= 1 
+                                ? '<span class="text-emerald-400 font-black">OVER 0.5 ✅</span>' 
+                                : '<span class="text-red-400 font-black">0 HITS ❌</span>';
+                            actualHitsBadge = `<strong class="text-white">${{b.actual_hits}} H</strong> (${{b.actual_ab}} AB) • ${{badge}}`;
+                        }}
+
                         tr.innerHTML = `
                             <td class="py-2.5 px-3.5 font-sans font-bold text-white whitespace-nowrap">${{b.name}}</td>
                             <td class="py-2.5 px-3 text-center text-gray-400 text-xs">${{b.team}} #${{b.order}}</td>
@@ -1032,36 +764,11 @@ def serve_dashboard():
                             <td class="py-2.5 px-3 text-right text-white">${{b.xhits}}</td>
                             <td class="py-2.5 px-3.5 text-right font-bold text-emerald-400">${{b.p_0_5}}%</td>
                             <td class="py-2.5 px-3.5 text-right font-bold text-cyan-400">${{b.p_1_5}}%</td>
-                            <td class="py-2.5 px-3 text-right text-gray-400">${{b.p_2_5}}%</td>
+                            <td class="py-2.5 px-3.5 text-center">${{actualHitsBadge}}</td>
                         `;
                         bTable.appendChild(tr);
                     }});
                     document.getElementById('batters-total-counter').textContent = `${{filteredBatters.length}} Batters`;
-                }}
-
-                if (currentMarket === 'batters' || currentMarket === 'f5' || currentMarket === 'moneyline') {{
-                    secSgp.classList.add('hidden');
-                }} else {{
-                    secSgp.classList.remove('hidden');
-                    const sTable = document.getElementById('sgp-table');
-                    sTable.innerHTML = '';
-
-                    const filteredSgps = sgpData.filter(s => activePks.has(s.game_pk));
-                    filteredSgps.slice(0, 25).forEach(s => {{
-                        const tr = document.createElement('tr');
-                        tr.className = "hover:bg-gray-800/60 transition-colors";
-                        tr.innerHTML = `
-                            <td class="py-2.5 px-3.5 font-sans font-bold text-white whitespace-nowrap">${{s.matchup}}</td>
-                            <td class="py-2.5 px-3 text-[11px] text-yellow-400 whitespace-nowrap">${{s.type}}</td>
-                            <td class="py-2.5 px-3 text-gray-200 whitespace-nowrap">${{s.leg_1}}</td>
-                            <td class="py-2.5 px-3 text-gray-200 whitespace-nowrap">${{s.leg_2}}</td>
-                            <td class="py-2.5 px-3.5 text-right text-white">${{s.joint}}%</td>
-                            <td class="py-2.5 px-3.5 text-right text-gray-400">${{s.indep}}%</td>
-                            <td class="py-2.5 px-3.5 text-right font-bold text-emerald-400">+${{s.edge}}%</td>
-                        `;
-                        sTable.appendChild(tr);
-                    }});
-                    document.getElementById('sgp-total-counter').textContent = `${{filteredSgps.length}} SGPs`;
                 }}
             }}
 

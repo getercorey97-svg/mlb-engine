@@ -529,3 +529,15 @@ try:
 except Exception as _e:
     print(f'[PIPELINE DISCOVERY ERROR] {_e}')
 
+
+
+# --- PITCHER PROPS & CONTINUOUS POST-MORTEM HOOKS ---
+try:
+    import subprocess
+    print('[PIPELINE] Executing Calibrated Pitcher Props Synthesis...')
+    subprocess.run(['python', 'engine_pitcher_props.py'], check=False)
+    print('[PIPELINE] Running Factual Post-Mortem Prop Audit (Batters & Pitchers)...')
+    subprocess.run(['python', 'post_mortem_props.py'], check=False)
+except Exception as _props_err:
+    print(f'[PIPELINE PROP ERROR] {_props_err}')
+
