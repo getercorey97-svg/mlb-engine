@@ -973,7 +973,7 @@ def serve_dashboard():
                             card.innerHTML = `
                                 <div>
                                     <div class="flex justify-between items-center mb-2">
-                                        <span class="bg-gray-700 text-gray-300 px-2 py-0.5 rounded text-[10px] font-black tracking-wider">UPCOMING • ${g.game_time_et || "TBD"}</span>
+                                        <span class="bg-gray-700 text-gray-300 px-2 py-0.5 rounded text-[10px] font-black tracking-wider">UPCOMING • ${{g.game_time_et || "TBD"}}</span>
                                         <span class="font-mono text-xs text-yellow-400 font-bold">F5 Line: ${{g.pregame_f5_median}}</span>
                                     </div>
                                     <h3 class="text-base font-black text-white uppercase tracking-tight mb-1">${{g.away_team}} @ ${{g.home_team}}</h3>
