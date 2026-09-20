@@ -757,7 +757,7 @@ def serve_dashboard():
             }
 
             const filteredGames = gamesData.filter(g => currentStage === 'all' || g.stage === currentStage);
-            const activePks = new Set(filteredGames.map(g => g.game_pk));
+            const activePks = new Set(filteredGames.map(g => String(g.game_pk)));
 
             // Games
             if (currentMarket === 'all' || currentMarket === 'games') {
@@ -808,7 +808,7 @@ def serve_dashboard():
                 secPitchers.classList.remove('hidden');
                 const pTable = document.getElementById('pitchers-table');
                 pTable.innerHTML = '';
-                const filteredPitchers = currentStage === 'all' ? pitchersData : pitchersData.filter(p => activePks.has(p.game_pk));
+                const filteredPitchers = currentStage === 'all' ? pitchersData : pitchersData.filter(p => activePks.has(String(p.game_pk)));
                 filteredPitchers.forEach(p => {
                     const tr = document.createElement('tr');
                     tr.className = "hover:bg-gray-800/60 transition-colors";
@@ -833,7 +833,7 @@ def serve_dashboard():
                 secBatters.classList.remove('hidden');
                 const bTable = document.getElementById('batters-table');
                 bTable.innerHTML = '';
-                const filteredBatters = currentStage === 'all' ? battersData : battersData.filter(b => activePks.has(b.game_pk));
+                const filteredBatters = currentStage === 'all' ? battersData : battersData.filter(b => activePks.has(String(b.game_pk)));
                 filteredBatters.slice(0, 40).forEach(b => {
                     const tr = document.createElement('tr');
                     tr.className = "hover:bg-gray-800/60 transition-colors";
