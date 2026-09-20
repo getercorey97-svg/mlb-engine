@@ -14,7 +14,7 @@ def get_db_connection():
     return conn
 
 def fetch_mlb_slate_and_scores():
-    """Ingests official MLB Stats API schedules (past 24h + next 24h) to power Live and Final stages."""
+    """Ingests official MLB schedule strictly for yesterday, today, and tomorrow."""
     now_utc = datetime.now(timezone.utc)
     yesterday = (now_utc - timedelta(days=1)).strftime("%Y-%m-%d")
     today = now_utc.strftime("%Y-%m-%d")
@@ -22,7 +22,7 @@ def fetch_mlb_slate_and_scores():
 
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={yesterday}&endDate={tomorrow}&hydrate=linescore,probablePitcher,decisions"
     try:
-        res = requests.get(url, timeout=5)
+        res = requests.get(url, timeout=6)
         if res.status_code == 200:
             data = res.json()
             games_by_pk = {}
@@ -41,7 +41,6 @@ def serve_dashboard():
 
     tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
 
-    # Load local pregame forecasts
     pregame_models = {}
     if "Model_Forecasts" in tables:
         for r in c.execute("SELECT * FROM Model_Forecasts").fetchall():
@@ -58,19 +57,19 @@ def serve_dashboard():
             if pk:
                 daily_lineups[pk] = row_dict
 
-    # Ingest Live & Completed Game Telemetry from MLB Stats API
     live_schedule = fetch_mlb_slate_and_scores()
 
-    games = []
-    # Merge remote live slate with engine models
-    all_pks = set(list(live_schedule.keys()) + list(pregame_models.keys()) + list(daily_lineups.keys()))
+    # Scope strictly to active slate games (MLB Schedule OR today's Daily Lineups)
+    active_pks = set(live_schedule.keys())
+    for pk in daily_lineups.keys():
+        active_pks.add(pk)
 
-    for pk in all_pks:
+    games = []
+    for pk in active_pks:
         mlb_game = live_schedule.get(pk, {})
         m = pregame_models.get(pk, {})
         d = daily_lineups.get(pk, {})
 
-        # Basic Matchup Info
         if mlb_game:
             teams = mlb_game.get("teams", {})
             away_name = teams.get("away", {}).get("team", {}).get("name", "Away")
@@ -87,7 +86,6 @@ def serve_dashboard():
             status_desc = d.get("lineup_status", "Scheduled")
             linescore = {}
 
-        # Extract Pregame Probabilities
         p_home_pre = float(m.get("prob_home_win") or 0.50)
         p_away_pre = 1.0 - p_home_pre
         exp_a = float(m.get("expected_runs_away") or 4.5)
@@ -96,7 +94,6 @@ def serve_dashboard():
         fav_team = home_name if p_home_pre >= 0.50 else away_name
         fav_prob = max(p_home_pre, p_away_pre)
 
-        # Classify Stage & Deduce In-Game Analytics
         is_final = any(x in status_desc.lower() for x in ["final", "game over", "completed"])
         is_live = any(x in status_desc.lower() for x in ["in progress", "live", "delayed", "manager challenge"])
 
@@ -105,7 +102,6 @@ def serve_dashboard():
         away_actual_runs = linescore.get("teams", {}).get("away", {}).get("runs", 0)
         home_actual_runs = linescore.get("teams", {}).get("home", {}).get("runs", 0)
 
-        # Calculate F5 Actual Runs if game reached 5th inning
         f5_actual_runs = None
         innings_list = linescore.get("innings", [])
         if len(innings_list) >= 5:
@@ -113,18 +109,17 @@ def serve_dashboard():
             f5_h = sum([inn.get("home", {}).get("runs", 0) for inn in innings_list[:5]])
             f5_actual_runs = f5_a + f5_h
 
-        # In-Game Bayesian Dynamic Deduction
         live_prob_home = p_home_pre * 100
         live_exp_away = exp_a
         live_exp_home = exp_h
 
         if is_live and current_inning > 0:
             stage = "live"
-            rem_innings_away = max(0.0, 9.0 - (current_inning - 1) - (1.0 if inning_state.lower() == "bottom" else 0.0))
-            rem_innings_home = max(0.0, 8.5 - (current_inning - 1) - (0.5 if inning_state.lower() == "bottom" else 0.0))
+            rem_away = max(0.0, 9.0 - (current_inning - 1) - (1.0 if inning_state.lower() == "bottom" else 0.0))
+            rem_home = max(0.0, 8.5 - (current_inning - 1) - (0.5 if inning_state.lower() == "bottom" else 0.0))
             
-            live_exp_away = round(away_actual_runs + (exp_a * (rem_innings_away / 9.0)), 2)
-            live_exp_home = round(home_actual_runs + (exp_h * (rem_innings_home / 9.0)), 2)
+            live_exp_away = round(away_actual_runs + (exp_a * (rem_away / 9.0)), 2)
+            live_exp_home = round(home_actual_runs + (exp_h * (rem_home / 9.0)), 2)
             
             diff = live_exp_home - live_exp_away
             live_p_home = 1.0 / (1.0 + 10 ** (-diff / 2.2))
@@ -135,7 +130,6 @@ def serve_dashboard():
         else:
             stage = "upcoming"
 
-        # Post-Mortem Comparison Verification
         hit_ml = None
         actual_winner = None
         if is_final:
@@ -173,7 +167,9 @@ def serve_dashboard():
             "actual_winner": actual_winner
         })
 
-    # Fetch Batter Hit Props
+    stage_order = {"live": 0, "upcoming": 1, "final": 2}
+    games.sort(key=lambda x: stage_order.get(x["stage"], 3))
+
     batters = []
     if "Batter_Hit_Forecasts" in tables:
         raw_batters = [dict(r) for r in c.execute("SELECT * FROM Batter_Hit_Forecasts ORDER BY over_0_5_hit_prob DESC").fetchall()]
@@ -194,7 +190,6 @@ def serve_dashboard():
                 "p_2_5": round(p25 * 100 if p25 <= 1.0 else p25, 1)
             })
 
-    # Fetch Cross-Market SGP Edges
     sgps = []
     if "Correlated_Market_Forecasts" in tables:
         raw_sgp = [dict(r) for r in c.execute("SELECT * FROM Correlated_Market_Forecasts ORDER BY correlation_edge DESC").fetchall()]
@@ -231,13 +226,13 @@ def serve_dashboard():
         <style>
             * {{ -webkit-tap-highlight-color: transparent; touch-action: manipulation; }}
             @keyframes ticker {{
-                0% {{ transform: translateX(100%); }}
+                0% {{ transform: translateX(0); }}
                 100% {{ transform: translateX(-100%); }}
             }}
             .animate-ticker {{
                 display: inline-block;
                 white-space: nowrap;
-                animation: ticker 130s linear infinite; /* Authentically slowed readable ESPN pace */
+                animation: ticker 95s linear infinite;
                 will-change: transform;
             }}
             .ticker-paused {{ animation-play-state: paused !important; }}
@@ -251,31 +246,28 @@ def serve_dashboard():
         </style>
     </head>
     <body class="espn-dark text-gray-200 font-sans antialiased min-h-screen flex flex-col selection:bg-red-600 selection:text-white pb-24 md:pb-12">
-        <!-- Top ESPN BottomLine Scrolling Ticker -->
         <div class="bg-black border-b border-red-700/80 overflow-hidden flex items-center h-10 sticky top-0 z-50 shadow-md">
             <div class="espn-red text-white px-3.5 h-full uppercase tracking-wider flex items-center z-10 shrink-0 font-black text-xs">
                 <span class="inline-block w-2 h-2 rounded-full bg-yellow-400 mr-2 animate-pulse"></span>
                 BOTTOMLINE
             </div>
             <div class="overflow-hidden w-full relative h-full flex items-center" id="ticker-box">
-                <div id="ticker-content" class="animate-ticker text-xs font-mono font-bold text-gray-300">
+                <div id="ticker-content" class="animate-ticker text-xs font-mono font-bold text-gray-300 pl-4">
                     Loading telemetry feed...
                 </div>
             </div>
         </div>
 
-        <!-- Master Header Navigation -->
         <header class="espn-subbar border-b border-gray-800 px-4 py-3 shadow-lg">
             <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
                 <div class="flex items-center gap-3">
                     <span class="espn-red text-white text-xl font-black px-2.5 py-0.5 rounded tracking-tighter italic shadow">ESPN</span>
                     <div>
                         <h1 class="text-lg md:text-2xl font-black text-white tracking-wide uppercase">StatsCenter Quant Hub</h1>
-                        <p class="text-[11px] md:text-xs font-mono text-gray-400">Live Bayesian Game Deduction • Post-Match Factual Audits</p>
+                        <p class="text-[11px] md:text-xs font-mono text-gray-400">Live In-Game Deduction • Post-Match Factual Audits</p>
                     </div>
                 </div>
 
-                <!-- Global Game Stages Filter Pills -->
                 <div class="flex items-center gap-1.5 overflow-x-auto w-full md:w-auto touch-scroll py-1 text-xs font-black uppercase tracking-wider">
                     <button onclick="setGameStage('all')" id="stage-btn-all" class="stage-btn min-h-[40px] px-3.5 py-2 rounded-md bg-red-600 text-white shadow active:scale-95 transition-all">All (<span id="count-all">0</span>)</button>
                     <button onclick="setGameStage('live')" id="stage-btn-live" class="stage-btn min-h-[40px] px-3.5 py-2 rounded-md bg-gray-800 text-gray-400 border border-gray-700 active:scale-95 transition-all">🔴 Live (<span id="count-live">0</span>)</button>
@@ -284,7 +276,6 @@ def serve_dashboard():
                 </div>
             </div>
 
-            <!-- Market Type Navigation Tabs -->
             <div class="max-w-7xl mx-auto mt-3 flex gap-2 overflow-x-auto touch-scroll border-t border-gray-800/80 pt-2.5 text-xs md:text-sm font-bold uppercase no-scrollbar">
                 <button onclick="setBetMarket('all')" id="tab-all" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-red-600 text-white whitespace-nowrap">All Markets</button>
                 <button onclick="setBetMarket('batters')" id="tab-batters" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🎯 Batter Hits</button>
@@ -294,23 +285,20 @@ def serve_dashboard():
             </div>
         </header>
 
-        <!-- Main Display Feed -->
         <main class="max-w-7xl mx-auto p-4 md:p-6 space-y-6 flex-1 w-full">
             <div class="flex justify-between items-center bg-gray-900/90 border border-gray-800 px-3.5 py-2.5 rounded-lg text-xs">
                 <span class="text-gray-400">View: <strong id="filter-label" class="text-yellow-400 uppercase font-mono font-bold tracking-wide">All Slates • All Markets</strong></span>
                 <span class="font-mono text-gray-500 text-[11px]">Database: <strong class="text-emerald-400">mlb_engine.db</strong></span>
             </div>
 
-            <!-- Section 1: Slate Matchups Grid -->
             <section id="section-games" class="space-y-3">
                 <div class="flex items-center justify-between border-b border-gray-800 pb-2">
-                    <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide" id="games-section-title">Matchup Intelligence</h2>
+                    <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Matchup Intelligence</h2>
                     <span class="text-xs font-mono text-gray-400" id="games-total-counter"></span>
                 </div>
                 <div id="games-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5"></div>
             </section>
 
-            <!-- Section 2: Batter Hit Props Table -->
             <section id="section-batters" class="space-y-3">
                 <div class="flex items-center justify-between border-b border-gray-800 pb-2">
                     <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Endogenous Batter Hit Distributions</h2>
@@ -326,7 +314,7 @@ def serve_dashboard():
                                 <th class="py-3 px-3 text-right">xHits</th>
                                 <th class="py-3 px-3.5 text-right font-bold text-emerald-400">Over 0.5</th>
                                 <th class="py-3 px-3.5 text-right font-bold text-cyan-400">Over 1.5</th>
-                                <th class="py-3 px-3 text-right text-gray-400">Over 2.5</th>
+                                <th class="py-3 px-3.5 text-right text-gray-400">Over 2.5</th>
                             </tr>
                         </thead>
                         <tbody id="batters-table" class="divide-y divide-gray-800 font-mono"></tbody>
@@ -334,7 +322,6 @@ def serve_dashboard():
                 </div>
             </section>
 
-            <!-- Section 3: Correlated Same Game Parlays (SGP) Table -->
             <section id="section-sgp" class="space-y-3">
                 <div class="flex items-center justify-between border-b border-gray-800 pb-2">
                     <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Cross-Market Joint Probability Edges</h2>
@@ -374,24 +361,25 @@ def serve_dashboard():
 
             function buildTicker() {{
                 const items = [];
-                // Live games first
                 gamesData.filter(g => g.stage === 'live').forEach(g => {{
-                    items.push(`🔴 LIVE: ${{g.away_team}} ${{g.away_actual_runs}}, ${{g.home_team}} ${{g.home_actual_runs}} (${{g.inning_state}} ${{g.current_inning}}) | Live Proj: ${{g.live_exp_away}} - ${{g.live_exp_home}} | Home Win: ${{g.live_prob_home}}%`);
+                    items.push(`🔴 LIVE: ${{g.away_team}} ${{g.away_actual_runs}}, ${{g.home_team}} ${{g.home_actual_runs}} (${{g.inning_state}} ${{g.current_inning}}) | In-Game Proj: ${{g.live_exp_away}} - ${{g.live_exp_home}} | Home Win: ${{g.live_prob_home}}%`);
                 }});
-                // Finals with outcome audit
                 gamesData.filter(g => g.stage === 'final').forEach(g => {{
                     const badge = g.hit_ml ? 'HIT ✅' : 'MISS ❌';
                     items.push(`🏁 FINAL: ${{g.away_team}} ${{g.away_actual_runs}}, ${{g.home_team}} ${{g.home_actual_runs}} | Model Fav: ${{g.fav_team}} (${{g.fav_prob}}%) -> ${{badge}}`);
                 }});
-                // Top batter props
+                gamesData.filter(g => g.stage === 'upcoming').forEach(g => {{
+                    items.push(`⏳ UPCOMING: ${{g.away_team}} @ ${{g.home_team}} | Fav: ${{g.fav_team}} (${{g.fav_prob}}%) | F5 Line: ${{g.pregame_f5_median}}`);
+                }});
                 battersData.slice(0, 8).forEach(b => {{
                     items.push(`🎯 ${{b.name}} (${{b.team}} #${{b.order}}): ${{b.p_0_5}}% Over 0.5 Hits (${{b.xhits}} xH)`);
                 }});
-                // Top SGPs
                 sgpData.slice(0, 6).forEach(s => {{
                     items.push(`⚡ SGP: ${{s.leg_1}} + ${{s.leg_2}} [Joint: ${{s.joint}}% | +${{s.edge}}% Edge]`);
                 }});
-                document.getElementById('ticker-content').innerHTML = items.join(' &nbsp;&nbsp;&nbsp;•&nbsp;&nbsp;&nbsp; ');
+
+                const content = items.length > 0 ? items.join(' &nbsp;&nbsp;&nbsp;•&nbsp;&nbsp;&nbsp; ') : 'Synchronizing slate linescores...';
+                document.getElementById('ticker-content').innerHTML = content;
             }}
 
             const tickerBox = document.getElementById('ticker-box');
@@ -442,7 +430,6 @@ def serve_dashboard():
                         card.className = "espn-card border rounded-lg p-3.5 shadow-md flex flex-col justify-between";
 
                         if (g.stage === 'live') {{
-                            // LIVE IN-GAME DEDUCTION CARD
                             card.innerHTML = `
                                 <div>
                                     <div class="flex justify-between items-center mb-2">
@@ -463,7 +450,7 @@ def serve_dashboard():
                                             <span class="font-bold text-white font-mono">${{g.home_team}} (${{g.live_prob_home}}%)</span>
                                         </div>
                                         <div class="flex justify-between">
-                                            <span class="text-gray-400">Live Projected Final Runs:</span>
+                                            <span class="text-gray-400">Live Projected Runs:</span>
                                             <span class="font-mono text-yellow-300 font-bold">${{g.live_exp_away}} - ${{g.live_exp_home}}</span>
                                         </div>
                                     </div>
@@ -474,7 +461,6 @@ def serve_dashboard():
                                 </div>
                             `;
                         }} else if (g.stage === 'final') {{
-                            // POST-MORTEM FACTUAL AUDIT CARD
                             const verdictBadge = g.hit_ml 
                                 ? '<span class="bg-emerald-600 text-white px-2 py-0.5 rounded text-[10px] font-black">HIT ✅</span>'
                                 : '<span class="bg-red-700 text-white px-2 py-0.5 rounded text-[10px] font-black">MISS ❌</span>';
@@ -511,7 +497,6 @@ def serve_dashboard():
                                 </div>
                             `;
                         }} else {{
-                            // UPCOMING SLATE CARD
                             card.innerHTML = `
                                 <div>
                                     <div class="flex justify-between items-center mb-2">
@@ -539,10 +524,9 @@ def serve_dashboard():
 
                         container.appendChild(card);
                     }});
-                    document.getElementById('games-total-counter').textContent = `${{filteredGames.length}} Games`;
+                    document.getElementById('games-total-counter').textContent = `${{filteredGames.length}} Matchups`;
                 }}
 
-                // 2. Batters Table
                 const secBatters = document.getElementById('section-batters');
                 if (currentMarket === 'f5' || currentMarket === 'moneyline') {{
                     secBatters.classList.add('hidden');
@@ -569,7 +553,6 @@ def serve_dashboard():
                     document.getElementById('batters-total-counter').textContent = `${{filteredBatters.length}} Batters`;
                 }}
 
-                // 3. SGP Table
                 const secSgp = document.getElementById('section-sgp');
                 if (currentMarket === 'batters' || currentMarket === 'f5' || currentMarket === 'moneyline') {{
                     secSgp.classList.add('hidden');
