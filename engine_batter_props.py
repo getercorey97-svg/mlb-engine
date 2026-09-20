@@ -1,258 +1,149 @@
-import os
-import sys
 import sqlite3
 import numpy as np
-import pandas as pd
-from datetime import datetime
-import warnings
 
-warnings.filterwarnings('ignore')
-
-DEFAULT_PARK_FACTORS = {
-    "Colorado Rockies": 1.38, "Boston Red Sox": 1.09, "Cincinnati Reds": 1.08,
-    "Kansas City Royals": 1.05, "Texas Rangers": 1.04, "Arizona Diamondbacks": 1.04,
-    "Philadelphia Phillies": 1.03, "Washington Nationals": 1.02, "Atlanta Braves": 1.01,
-    "Baltimore Orioles": 1.01, "Chicago Cubs": 1.01, "Los Angeles Angels": 1.00,
-    "Milwaukee Brewers": 1.00, "Minnesota Twins": 1.00, "Toronto Blue Jays": 1.00,
-    "Chicago White Sox": 0.99, "Houston Astros": 0.99, "Pittsburgh Pirates": 0.98,
-    "St. Louis Cardinals": 0.98, "Detroit Tigers": 0.97, "New York Yankees": 0.97,
-    "Cleveland Guardians": 0.96, "Miami Marlins": 0.95, "Oakland Athletics": 0.95,
-    "San Francisco Giants": 0.95, "Tampa Bay Rays": 0.94, "New York Mets": 0.94,
-    "Los Angeles Dodgers": 0.93, "San Diego Padres": 0.92, "Seattle Mariners": 0.91
+TTO_FACTORS = {
+    1: 0.915,
+    2: 1.000,
+    3: 1.165,
+    4: 1.080
 }
 
-ORDER_PA_WEIGHTS = {
-    1: 1.14, 2: 1.11, 3: 1.08, 4: 1.05, 5: 1.02,
-    6: 0.98, 7: 0.95, 8: 0.92, 9: 0.88
-}
+def get_db_connection():
+    conn = sqlite3.connect('mlb_engine.db')
+    conn.row_factory = sqlite3.Row
+    return conn
 
-LEAGUE_AVG_BA = 0.245
-LEAGUE_AVG_K_RATE = 0.222
-LEAGUE_AVG_BB_RATE = 0.082
+def simulate_team_lineup_paths(cursor, game_pk, team_name, opp_sp_modifier, bullpen_fatigue, n_sims=10000):
+    batters = cursor.execute("""
+        SELECT player_name, batting_order 
+        FROM Daily_Batters 
+        WHERE game_pk = ? AND team_name = ? AND is_starter = 1
+        ORDER BY batting_order ASC
+    """, (game_pk, team_name)).fetchall()
 
-def log5_matchup_odds(p_batter: float, p_pitcher: float, p_league: float) -> float:
-    p_b = float(np.clip(p_batter, 0.05, 0.95))
-    p_p = float(np.clip(p_pitcher, 0.05, 0.95))
-    p_l = float(np.clip(p_league, 0.05, 0.95))
-    odds_b = p_b / (1.0 - p_b)
-    odds_p = p_p / (1.0 - p_p)
-    odds_l = p_l / (1.0 - p_l)
-    odds_matchup = (odds_b * odds_p) / odds_l
-    return float(np.clip(odds_matchup / (1.0 + odds_matchup), 0.01, 0.99))
+    if len(batters) < 9:
+        return {}
 
-def apply_bayesian_hit_shrinkage(raw_prob_over_0_5: float, ab_sample: int = 40) -> float:
-    p_clipped = float(np.clip(raw_prob_over_0_5, 0.05, 0.95))
-    logit_raw = np.log(p_clipped / (1.0 - p_clipped))
-    prior_p = 0.605
-    logit_prior = np.log(prior_p / (1.0 - prior_p))
-    w = float(np.clip(ab_sample / (ab_sample + 80), 0.20, 0.85))
-    shrunk_logit = (w * logit_raw) + ((1.0 - w) * logit_prior)
-    shrunk_p = 1.0 / (1.0 + np.exp(-shrunk_logit))
-    return float(np.clip(shrunk_p, 0.20, 0.82))
+    team_row = cursor.execute("SELECT offense_rating FROM Team_Offense WHERE team_name = ?", (team_name,)).fetchone()
+    base_team_offense = team_row['offense_rating'] if team_row else 0.940
 
-def project_endogenous_plate_appearances(batting_order: int, team_expected_runs: float, is_home: bool, win_prob: float) -> tuple:
-    team_pa = 25.5 + (1.25 * team_expected_runs)
-    if is_home and win_prob > 0.50:
-        team_pa -= 3.0 * win_prob
-    base_slot_pa = (team_pa / 9.0) * ORDER_PA_WEIGHTS.get(batting_order, 1.00)
-    proj_pa = float(np.clip(base_slot_pa, 3.0, 5.8))
-    proj_ab = proj_pa * 0.895
-    return round(proj_pa, 2), round(proj_ab, 2)
+    player_stats = {b['batting_order']: {'name': b['player_name'], 'hits': np.zeros(n_sims), 'pa': np.zeros(n_sims), 'ab': np.zeros(n_sims)} for b in batters}
 
-def project_starter_innings(effective_metric: float) -> tuple:
-    projected_outs = float(np.clip(27.0 - (effective_metric * 2.2), 9.0, 21.6))
-    ip_projected = projected_outs / 3.0
-    sp_weight = float(np.clip(ip_projected / 9.0, 0.33, 0.80))
-    pen_weight = round(1.0 - sp_weight, 4)
-    return sp_weight, pen_weight
+    lg_ba = 0.248
+    lg_obp = 0.318
 
-def run_production_batter_props(conn, cursor):
-    print("=" * 65)
-    print(f"[{datetime.now()}] Synthesizing Calibrated Batter Props (True BA Log5)...")
-    print("=" * 65)
+    batter_probs = {}
+    for b in batters:
+        order = b['batting_order']
+        order_skill_adj = 1.0 + (5 - order) * 0.02
+        b_obp = np.clip(lg_obp * base_team_offense * order_skill_adj, 0.220, 0.410)
+        b_ba = np.clip(lg_ba * base_team_offense * order_skill_adj, 0.180, 0.330)
+        batter_probs[order] = {'obp': b_obp, 'ba_on_obp': b_ba / b_obp}
 
-    cursor.executescript('''
-    CREATE TABLE IF NOT EXISTS Batter_Hit_Forecasts (
-        game_pk INTEGER,
-        player_name TEXT,
-        team_name TEXT,
-        batting_order INTEGER,
-        projected_pa REAL,
-        projected_ab REAL,
-        expected_hits REAL,
-        over_0_5_hit_prob REAL,
-        over_1_5_hit_prob REAL,
-        over_2_5_hit_prob REAL,
-        PRIMARY KEY (game_pk, player_name)
-    );
-    CREATE TABLE IF NOT EXISTS Daily_Batters (
-        game_pk INTEGER,
-        player_name TEXT,
-        team_name TEXT,
-        batting_order INTEGER,
-        is_starter INTEGER DEFAULT 1,
-        PRIMARY KEY (game_pk, player_name)
-    );
-    ''')
+    for sim in range(n_sims):
+        lineup_idx = 1
+        starter_bf = 0
+        
+        for inning in range(1, 10):
+            outs = 0
+            while outs < 3:
+                order = lineup_idx
+                player_stats[order]['pa'][sim] += 1
+                starter_bf += 1
+                
+                if starter_bf <= 9:
+                    sp_eff = opp_sp_modifier * TTO_FACTORS[1]
+                elif starter_bf <= 18:
+                    sp_eff = opp_sp_modifier * TTO_FACTORS[2]
+                elif starter_bf <= 24:
+                    sp_eff = opp_sp_modifier * TTO_FACTORS[3]
+                else:
+                    sp_eff = bullpen_fatigue * TTO_FACTORS[4]
 
-    # Purge stale rows
-    cursor.execute("DELETE FROM Batter_Hit_Forecasts;")
+                p_reach = np.clip(batter_probs[order]['obp'] * sp_eff, 0.15, 0.55)
+                
+                if np.random.rand() < p_reach:
+                    player_stats[order]['ab'][sim] += 1
+                    if np.random.rand() < batter_probs[order]['ba_on_obp']:
+                        player_stats[order]['hits'][sim] += 1
+                else:
+                    outs += 1
+                    player_stats[order]['ab'][sim] += 1
 
-    query_games = '''
-    SELECT 
-        d.game_pk,
-        d.home_team,
-        d.away_team,
-        COALESCE(d.home_pitcher, 'Unknown'),
-        COALESCE(d.away_pitcher, 'Unknown'),
-        COALESCE(d.air_density, 1.225),
-        COALESCE(m.predicted_home_runs, 4.50),
-        COALESCE(m.predicted_away_runs, 4.50),
-        COALESCE(m.home_prob, 0.50),
-        COALESCE(m.away_prob, 0.50),
-        COALESCE(ps_h.throws, 'R'),
-        COALESCE(ps_a.throws, 'R'),
-        COALESCE(ps_h.xfip, ps_h.est_era, 4.20),
-        COALESCE(ps_a.xfip, ps_a.est_era, 4.20),
-        COALESCE(ps_h.arsenal_type, 'Balanced'),
-        COALESCE(ps_a.arsenal_type, 'Balanced')
-    FROM Daily_Lineups d
-    LEFT JOIN Model_Forecasts m ON d.game_pk = m.game_pk
-    LEFT JOIN Pitcher_Stats ps_h ON d.home_pitcher LIKE '%' || ps_h.last_name
-    LEFT JOIN Pitcher_Stats ps_a ON d.away_pitcher LIKE '%' || ps_a.last_name
-    WHERE d.status != 'Final';
-    '''
-    cursor.execute(query_games)
-    games = cursor.fetchall()
+                lineup_idx = (lineup_idx % 9) + 1
+
+    return player_stats
+
+def run_batter_props_engine():
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS Batter_Hit_Forecasts (
+            game_pk INTEGER,
+            player_name TEXT,
+            team_name TEXT,
+            batting_order INTEGER,
+            projected_pa REAL,
+            projected_ab REAL,
+            expected_hits REAL,
+            over_0_5_hit_prob REAL,
+            over_1_5_hit_prob REAL,
+            over_2_5_hit_prob REAL,
+            PRIMARY KEY (game_pk, player_name)
+        )
+    """)
+
+    games = c.execute("""
+        SELECT game_pk, away_team, home_team, away_sp, home_sp, 
+               away_sp_modifier, home_sp_modifier, bullpen_fatigue_away, bullpen_fatigue_home
+        FROM Daily_Lineups
+        WHERE lineup_status = 'Confirmed'
+    """).fetchall()
 
     if not games:
-        print("[INFO] No active slates found for batter prop synthesis.")
+        print("[CORRELATED PROPS] No confirmed games found in Daily_Lineups.")
+        conn.close()
         return
 
-    cursor.execute("SELECT player_name, contact_modifier, appearance_count FROM Batter_Modifiers;")
-    batter_mods = {r[0]: (r[1], r[2]) for r in cursor.fetchall()}
+    c.execute("DELETE FROM Batter_Hit_Forecasts")
 
-    cursor.execute("SELECT player_name, team_name, avg, avg_vs_rhp, avg_vs_lhp, k_rate, bb_rate FROM Batter_Stats;")
-    batter_stats = {(r[0], r[1]): (r[2], r[3], r[4], r[5], r[6]) for r in cursor.fetchall()}
+    total_batters = 0
+    for g in games:
+        pk = g['game_pk']
+        home_sp_mod = g['home_sp_modifier'] if g['home_sp_modifier'] else 1.000
+        away_sp_mod = g['away_sp_modifier'] if g['away_sp_modifier'] else 1.000
+        home_bp_fatigue = g['bullpen_fatigue_home'] if g['bullpen_fatigue_home'] else 1.000
+        away_bp_fatigue = g['bullpen_fatigue_away'] if g['bullpen_fatigue_away'] else 1.000
 
-    prop_rows = []
+        away_results = simulate_team_lineup_paths(c, pk, g['away_team'], home_sp_mod, home_bp_fatigue)
+        home_results = simulate_team_lineup_paths(c, pk, g['home_team'], away_sp_mod, away_bp_fatigue)
 
-    for game in games:
-        (pk, home, away, home_p, away_p, rho,
-         pred_home_runs, pred_away_runs, home_prob, away_prob,
-         h_throws, a_throws, h_era, a_era, h_arsenal, a_arsenal) = game
+        for side_data, team_name in [(away_results, g['away_team']), (home_results, g['home_team'])]:
+            for order, stats in side_data.items():
+                pa_mean = float(np.mean(stats['pa']))
+                ab_mean = float(np.mean(stats['ab']))
+                exp_hits = float(np.mean(stats['hits']))
+                p_over_0_5 = float(np.mean(stats['hits'] >= 1))
+                p_over_1_5 = float(np.mean(stats['hits'] >= 2))
+                p_over_2_5 = float(np.mean(stats['hits'] >= 3))
 
-        base_pf = DEFAULT_PARK_FACTORS.get(home, 1.00)
-        # Scaled environmental multiplier prevents altitude over-compounding (max 1.18x)
-        env_hit_scalar = float(np.clip(1.000 + ((base_pf - 1.000) * 0.35) + ((1.225 - rho) * 0.25), 0.85, 1.18))
-
-        w_h_sp, _ = project_starter_innings(h_era)
-        w_a_sp, _ = project_starter_innings(a_era)
-
-        cursor.execute("SELECT player_name, team_name, batting_order FROM Daily_Batters WHERE game_pk = ? ORDER BY batting_order ASC;", (pk,))
-        lineup_batters = cursor.fetchall()
-
-        if not lineup_batters:
-            continue
-
-        for b_name, b_team, b_order in lineup_batters:
-            is_home = (b_team == home)
-            tm_runs = pred_home_runs if is_home else pred_away_runs
-            win_prob = home_prob if is_home else away_prob
-            opp_throws = a_throws if is_home else h_throws
-            opp_era = a_era if is_home else h_era
-            opp_arsenal = a_arsenal if is_home else h_arsenal
-            w_sp = w_a_sp if is_home else w_h_sp
-
-            stats = batter_stats.get((b_name, b_team))
-            if not stats:
-                stats = (0.250, 0.250, 0.250, 0.220, 0.085)
-
-            b_avg, b_rhp, b_lhp, b_k, b_bb = stats
-            mod_tuple = batter_mods.get(b_name, (1.000, 0))
-            b_mod, app_count = mod_tuple[0], mod_tuple[1]
-
-            base_contact = (b_lhp if opp_throws == 'L' else b_rhp) * b_mod
-
-            # Pitch-Arsenal Adjustments
-            if opp_arsenal == 'FourSeam_Sweeper':
-                contact_adj = base_contact * 0.96
-            elif opp_arsenal == 'Sinker_Cutter':
-                contact_adj = base_contact * 1.03
-            else:
-                contact_adj = base_contact
-
-            proj_pa, proj_ab = project_endogenous_plate_appearances(b_order, tm_runs, is_home, win_prob)
-
-            # Direct Batting Average Synthesis (Hits per AB)
-            p_hit_sp = log5_matchup_odds(contact_adj, float(np.clip(opp_era / 17.5, 0.18, 0.32)), LEAGUE_AVG_BA) * env_hit_scalar
-            p_hit_pen = 0.250 * env_hit_scalar
-            p_hit_ab = float(np.clip(w_sp * p_hit_sp + (1.0 - w_sp) * p_hit_pen, 0.14, 0.38))
-
-            expected_hits = round(proj_ab * p_hit_ab, 2)
-
-            # Monte Carlo Simulation of At-Bats
-            rng = np.random.default_rng(seed=int(pk) + int(b_order) * 7)
-            sim_hits = rng.binomial(int(np.round(proj_ab)), p_hit_ab, 5000)
-
-            raw_over_0_5 = float(np.mean(sim_hits >= 1))
-            raw_over_1_5 = float(np.mean(sim_hits >= 2))
-            raw_over_2_5 = float(np.mean(sim_hits >= 3))
-
-            actual_ab_sample = max(15, app_count * 4)
-            shrunk_over_0_5 = round(apply_bayesian_hit_shrinkage(raw_over_0_5, ab_sample=actual_ab_sample), 4)
-            shrunk_over_1_5 = round(raw_over_1_5 * (shrunk_over_0_5 / max(0.01, raw_over_0_5)), 4)
-            shrunk_over_2_5 = round(raw_over_2_5 * (shrunk_over_0_5 / max(0.01, raw_over_0_5)), 4)
-
-            prop_rows.append((
-                pk, b_name, b_team, b_order,
-                proj_pa, proj_ab, expected_hits,
-                shrunk_over_0_5, shrunk_over_1_5, shrunk_over_2_5
-            ))
-
-    cursor.executemany('''
-    INSERT OR REPLACE INTO Batter_Hit_Forecasts 
-    (game_pk, player_name, team_name, batting_order, projected_pa, projected_ab, expected_hits, over_0_5_hit_prob, over_1_5_hit_prob, over_2_5_hit_prob)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-    ''', prop_rows)
+                c.execute("""
+                    INSERT OR REPLACE INTO Batter_Hit_Forecasts (
+                        game_pk, player_name, team_name, batting_order,
+                        projected_pa, projected_ab, expected_hits,
+                        over_0_5_hit_prob, over_1_5_hit_prob, over_2_5_hit_prob
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    pk, stats['name'], team_name, order,
+                    round(pa_mean, 2), round(ab_mean, 2), round(exp_hits, 2),
+                    round(p_over_0_5, 4), round(p_over_1_5, 4), round(p_over_2_5, 4)
+                ))
+                total_batters += 1
 
     conn.commit()
-    print(f"[SUCCESS] Calibrated hit props for {len(prop_rows)} batters into Batter_Hit_Forecasts.")
-
-def run_batter_props_engine(*args, **kwargs):
-    conn, cursor = None, None
-    for arg in args:
-        if isinstance(arg, sqlite3.Connection):
-            conn = arg
-        elif isinstance(arg, sqlite3.Cursor):
-            cursor = arg
-    close_after = False
-    if conn is None:
-        if cursor is not None:
-            conn = cursor.connection
-        else:
-            conn = sqlite3.connect('mlb_engine.db', timeout=30)
-            conn.execute("PRAGMA journal_mode=WAL;")
-            cursor = conn.cursor()
-            close_after = True
-    elif cursor is None:
-        cursor = conn.cursor()
-
-    run_production_batter_props(conn, cursor)
-
-    if close_after:
-        cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-        conn.close()
-
-def main():
-    conn = sqlite3.connect('mlb_engine.db', timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    cursor = conn.cursor()
-
-    run_production_batter_props(conn, cursor)
-
-    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
     conn.close()
+    print(f"[SUCCESS] Calibrated correlated hit props for {total_batters} batters into Batter_Hit_Forecasts.")
 
 if __name__ == "__main__":
-    main()
+    run_batter_props_engine()
