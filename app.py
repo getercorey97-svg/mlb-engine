@@ -419,6 +419,100 @@ def serve_dashboard():
 
     conn.close()
 
+    
+    # ------------------------------------------------------------------
+    # PERFORMANCE & ACCURACY SCORECARD AGGREGATION
+    # ------------------------------------------------------------------
+    accuracy_metrics = {
+        "overall_right": 0, "overall_wrong": 0, "overall_pct": 0.0,
+        "markets": {
+            "moneyline": {"right": 0, "wrong": 0, "pct": 0.0, "label": "Full Game Moneylines"},
+            "f5": {"right": 0, "wrong": 0, "pct": 0.0, "label": "First 5 (F5) Winner"},
+            "batters": {"right": 0, "wrong": 0, "pct": 0.0, "label": "Batter Over 0.5 Hits"},
+            "pitchers": {"right": 0, "wrong": 0, "pct": 0.0, "label": "Pitcher Strikeout Props"}
+        },
+        "strengths": [],
+        "weaknesses": []
+    }
+
+    # Audit Moneylines & F5 from games list
+    for g in games:
+        if g.get("stage") == "final":
+            if g.get("hit_ml") is True:
+                accuracy_metrics["markets"]["moneyline"]["right"] += 1
+            elif g.get("hit_ml") is False:
+                accuracy_metrics["markets"]["moneyline"]["wrong"] += 1
+            
+            f5_a = g.get("f5_actual_away")
+            f5_h = g.get("f5_actual_home")
+            if f5_a is not None and f5_h is not None and f5_a != f5_h:
+                fav_is_home = (g.get("pregame_prob_home", 50) >= 50)
+                if (fav_is_home and f5_h > f5_a) or (not fav_is_home and f5_a > f5_h):
+                    accuracy_metrics["markets"]["f5"]["right"] += 1
+                else:
+                    accuracy_metrics["markets"]["f5"]["wrong"] += 1
+
+    # Audit Batter Hits from Post-Mortem Logs
+    if "Batter_Post_Mortem_Logs" in tables:
+        try:
+            b_cols = [r[1] for r in c.execute("PRAGMA table_info(Batter_Post_Mortem_Logs)").fetchall()]
+            p_col = "over_0_5_prob" if "over_0_5_prob" in b_cols else ("over_0_5_hit_prob" if "over_0_5_hit_prob" in b_cols else "expected_hits")
+            b_logs = c.execute(f"SELECT actual_hits, {p_col} FROM Batter_Post_Mortem_Logs").fetchall()
+            for b in b_logs:
+                act = int(b[0] or 0)
+                prob = float(b[1] or 0.0)
+                pred_over = (prob >= 0.55 or prob >= 1.0)
+                did_hit = (act >= 1)
+                if (pred_over and did_hit) or (not pred_over and not did_hit):
+                    accuracy_metrics["markets"]["batters"]["right"] += 1
+                else:
+                    accuracy_metrics["markets"]["batters"]["wrong"] += 1
+        except Exception:
+            pass
+
+    # Audit Pitcher Ks from Post-Mortem Logs
+    if "Pitcher_Post_Mortem_Logs" in tables:
+        try:
+            p_logs = c.execute("SELECT actual_k, k_line, COALESCE(over_prob, 0.5) FROM Pitcher_Post_Mortem_Logs").fetchall()
+            for p in p_logs:
+                act_k = float(p[0] or 0.0)
+                line = float(p[1] or 4.5)
+                over_p = float(p[2] or 0.5)
+                if act_k != line:
+                    pred_over = (over_p >= 0.50)
+                    went_over = (act_k > line)
+                    if (pred_over and went_over) or (not pred_over and not went_over):
+                        accuracy_metrics["markets"]["pitchers"]["right"] += 1
+                    else:
+                        accuracy_metrics["markets"]["pitchers"]["wrong"] += 1
+        except Exception:
+            pass
+
+    tot_r = 0
+    tot_w = 0
+    for k, m in accuracy_metrics["markets"].items():
+        sub_tot = m["right"] + m["wrong"]
+        if sub_tot > 0:
+            m["pct"] = round((m["right"] / sub_tot) * 100, 1)
+            tot_r += m["right"]
+            tot_w += m["wrong"]
+            if m["pct"] >= 55.0 and sub_tot >= 3:
+                accuracy_metrics["strengths"].append(f"<b>{m['label']}</b>: Operating with a <b>{m['pct']}%</b> win rate ({m['right']} Right, {m['wrong']} Wrong).")
+            elif m["pct"] < 50.0 and sub_tot >= 3:
+                accuracy_metrics["weaknesses"].append(f"<b>{m['label']}</b>: Underperforming at <b>{m['pct']}%</b> ({m['right']} Right, {m['wrong']} Wrong). Downward variance detected.")
+
+    accuracy_metrics["overall_right"] = tot_r
+    accuracy_metrics["overall_wrong"] = tot_w
+    if (tot_r + tot_w) > 0:
+        accuracy_metrics["overall_pct"] = round((tot_r / (tot_r + tot_w)) * 100, 1)
+
+    if not accuracy_metrics["strengths"]:
+        accuracy_metrics["strengths"].append("Awaiting final boxscore audits to establish empirical strength clusters.")
+    if not accuracy_metrics["weaknesses"]:
+        accuracy_metrics["weaknesses"].append("No persistent predictive leaks detected across current graded samples.")
+
+    metrics_json = json.dumps(accuracy_metrics)
+
     games_json = json.dumps(games)
     batters_json = json.dumps(batters)
     pitchers_json = json.dumps(pitchers)
@@ -490,6 +584,7 @@ def serve_dashboard():
                 <button onclick="setBetMarket('moneyline')" id="tab-moneyline" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🏆 Moneylines</button>
                 <button onclick="setBetMarket('pitchers')" id="tab-pitchers" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">⚾ Pitcher Ks (<span id="count-pitchers">0</span>)</button>
                 <button onclick="setBetMarket('batters')" id="tab-batters" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🎯 Batter Hits (<span id="count-batters">0</span>)</button>
+                <button onclick="setBetMarket('accuracy')" id="tab-accuracy" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">📊 Accuracy & Scorecard</button>
                 <button onclick="setBetMarket('sgp')" id="tab-sgp" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">⚡ Correlated SGPs</button>
                 <button onclick="setBetMarket('lab')" id="tab-lab" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-purple-400 hover:text-purple-300 whitespace-nowrap">🔬 Lab (<span id="proposals-badge">0</span>)</button>
             </div>
@@ -558,6 +653,59 @@ def serve_dashboard():
             </section>
 
             <!-- Main Games Section (Integrated Matchup Cards with Paired Props) -->
+            
+            <!-- ACCURACY & DIAGNOSTIC SCORECARD SECTION -->
+            <section id="section-accuracy" class="space-y-5 hidden">
+                <div class="flex items-center justify-between border-b border-gray-800 pb-2">
+                    <div>
+                        <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Prediction Engine Diagnostic Scorecard</h2>
+                        <p class="text-xs text-gray-400 font-mono">Empirical Right vs. Wrong Verification Across Completed Slates</p>
+                    </div>
+                    <span id="scorecard-total-badge" class="px-3 py-1 rounded bg-red-600 text-white font-mono font-bold text-xs">0 Graded</span>
+                </div>
+
+                <!-- OVERALL BANNER CARDS -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+                    <div class="espn-card border rounded-lg p-4 shadow flex flex-col justify-between">
+                        <div class="text-xs uppercase font-sans font-bold text-gray-400 tracking-wider">Overall Accuracy</div>
+                        <div class="flex items-baseline gap-2 mt-2">
+                            <span id="overall-pct-display" class="text-3xl md:text-4xl font-black font-mono text-emerald-400">0.0%</span>
+                            <span class="text-xs font-mono text-gray-400">Win Rate</span>
+                        </div>
+                        <div class="mt-3 text-xs font-mono text-gray-300">
+                            <span id="overall-right-count" class="text-emerald-400 font-bold">0</span> Correct • <span id="overall-wrong-count" class="text-red-400 font-bold">0</span> Incorrect
+                        </div>
+                    </div>
+
+                    <div class="espn-card border rounded-lg p-4 shadow flex flex-col justify-between border-l-4 border-l-emerald-500">
+                        <div class="text-xs uppercase font-sans font-bold text-emerald-400 tracking-wider flex items-center gap-1.5">
+                            <span>🔥 What the Engine Does Good</span>
+                        </div>
+                        <div id="engine-strengths-box" class="mt-2 text-xs text-gray-300 space-y-1 font-sans">
+                            Awaiting post-mortems...
+                        </div>
+                    </div>
+
+                    <div class="espn-card border rounded-lg p-4 shadow flex flex-col justify-between border-l-4 border-l-red-500">
+                        <div class="text-xs uppercase font-sans font-bold text-red-400 tracking-wider flex items-center gap-1.5">
+                            <span>⚠️ What the Engine Does Bad</span>
+                        </div>
+                        <div id="engine-weaknesses-box" class="mt-2 text-xs text-gray-300 space-y-1 font-sans">
+                            Awaiting post-mortems...
+                        </div>
+                    </div>
+                </div>
+
+                <!-- RIGHT VS WRONG COMPARISON BARS -->
+                <div class="espn-card border rounded-lg p-4 shadow space-y-4">
+                    <div class="flex justify-between items-center">
+                        <h3 class="text-xs md:text-sm font-black uppercase text-white tracking-wider">Market Breakdown (Right vs. Wrong Comparison)</h3>
+                        <span class="text-[11px] font-mono text-gray-400">Green = Right | Red = Wrong</span>
+                    </div>
+                    <div id="market-bars-container" class="space-y-4 pt-1"></div>
+                </div>
+            </section>
+
             <section id="section-games" class="space-y-3">
                 <div class="flex items-center justify-between border-b border-gray-800 pb-2">
                     <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Game Matchups, Run Bets & Paired Prop Kinematics</h2>
@@ -646,7 +794,67 @@ def serve_dashboard():
             const gamesData = {games_json};
             const battersData = {batters_json};
             const pitchersData = {pitchers_json};
-            const sgpData = {sgps_json};
+            
+        const metricsData = {metrics_json};
+
+        function renderAccuracyScorecard() {{
+            const secAcc = document.getElementById('section-accuracy');
+            if (!secAcc) return;
+
+            const totEvaluated = metricsData.overall_right + metricsData.overall_wrong;
+            const badge = document.getElementById('scorecard-total-badge');
+            if (badge) badge.textContent = `${{totEvaluated}} Graded Predictions`;
+
+            const pctDisp = document.getElementById('overall-pct-display');
+            if (pctDisp) pctDisp.textContent = `${{metricsData.overall_pct}}%`;
+
+            const rCount = document.getElementById('overall-right-count');
+            if (rCount) rCount.textContent = metricsData.overall_right;
+
+            const wCount = document.getElementById('overall-wrong-count');
+            if (wCount) wCount.textContent = metricsData.overall_wrong;
+
+            const strBox = document.getElementById('engine-strengths-box');
+            if (strBox) strBox.innerHTML = metricsData.strengths.map(s => `<p class="border-b border-gray-800/80 pb-1">• ${{s}}</p>`).join('');
+
+            const wBox = document.getElementById('engine-weaknesses-box');
+            if (wBox) wBox.innerHTML = metricsData.weaknesses.map(w => `<p class="border-b border-gray-800/80 pb-1">• ${{w}}</p>`).join('');
+
+            const barsContainer = document.getElementById('market-bars-container');
+            if (!barsContainer) return;
+            barsContainer.innerHTML = '';
+
+            Object.keys(metricsData.markets).forEach(k => {{
+                const m = metricsData.markets[k];
+                const total = m.right + m.wrong;
+                const rightPct = total > 0 ? ((m.right / total) * 100).toFixed(1) : 0;
+                const wrongPct = total > 0 ? (100 - rightPct).toFixed(1) : 0;
+
+                const barCard = document.createElement('div');
+                barCard.className = "bg-gray-900/80 p-3.5 rounded border border-gray-800 space-y-2";
+                barCard.innerHTML = `
+                    <div class="flex justify-between items-center text-xs">
+                        <span class="font-bold text-white font-sans uppercase">${{m.label}}</span>
+                        <div class="font-mono space-x-2 text-[11px]">
+                            <span class="text-emerald-400 font-bold">${{m.right}} Right (${{rightPct}}%)</span>
+                            <span class="text-gray-500">•</span>
+                            <span class="text-red-400 font-bold">${{m.wrong}} Wrong (${{wrongPct}}%)</span>
+                        </div>
+                    </div>
+                    <div class="w-full bg-gray-800 rounded-full h-3.5 flex overflow-hidden border border-gray-700">
+                        <div class="bg-emerald-500 h-full transition-all duration-500" style="width: ${{rightPct}}%" title="${{m.right}} Right"></div>
+                        <div class="bg-red-500 h-full transition-all duration-500" style="width: ${{wrongPct}}%" title="${{m.wrong}} Wrong"></div>
+                    </div>
+                    <div class="flex justify-between items-center text-[10px] font-mono text-gray-400">
+                        <span>Total Audited: ${{total}}</span>
+                        <span class="${{m.pct >= 55 ? 'text-emerald-400' : 'text-yellow-400'}} font-bold">Accuracy: ${{m.pct}}%</span>
+                    </div>
+                `;
+                barsContainer.appendChild(barCard);
+            }});
+        }}
+
+        const sgpData = {sgps_json};
             let proposalsData = {proposals_json};
             const calibData = {calib_json};
 
@@ -785,6 +993,22 @@ def serve_dashboard():
             }}
 
             function renderAll() {{
+
+                const secAcc = document.getElementById('section-accuracy');
+                if (currentMarket === 'accuracy') {{
+                    if (secGames) secGames.classList.add('hidden');
+                    if (secBatters) secBatters.classList.add('hidden');
+                    if (secPitchers) secPitchers.classList.add('hidden');
+                    if (secSgp) secSgp.classList.add('hidden');
+                    const secLab = document.getElementById('section-lab');
+                    if (secLab) secLab.classList.add('hidden');
+                    if (secAcc) secAcc.classList.remove('hidden');
+                    renderAccuracyScorecard();
+                    return;
+                }} else {{
+                    if (secAcc) secAcc.classList.add('hidden');
+                }}
+
                 const secGames = document.getElementById('section-games');
                 const secPitchers = document.getElementById('section-pitchers');
                 const secBatters = document.getElementById('section-batters');
