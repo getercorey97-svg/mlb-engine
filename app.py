@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import os
+import re
 import requests
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
@@ -13,8 +14,54 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
+def clean_team_name(name: str) -> str:
+    if not name:
+        return ""
+    return re.sub(r'[^a-zA-Z0-9]', '', name).lower()
+
+# League calibrated team power indices (Runs per 9 innings relative to 4.45 baseline)
+TEAM_POWER_INDEX = {
+    "dodgers": (1.18, 0.88), "braves": (1.14, 0.90), "yankees": (1.15, 0.91),
+    "orioles": (1.12, 0.92), "phillies": (1.11, 0.91), "astros": (1.08, 0.93),
+    "guardians": (1.04, 0.89), "padres": (1.06, 0.93), "brewers": (1.05, 0.91),
+    "diamondbacks": (1.09, 0.98), "twins": (1.04, 0.94), "royals": (1.03, 0.92),
+    "redsox": (1.05, 0.97), "rays": (0.95, 0.93), "mariners": (0.94, 0.88),
+    "tigers": (0.96, 0.94), "rangers": (0.98, 0.97), "cubs": (0.99, 0.96),
+    "mets": (1.04, 0.96), "cardinals": (0.97, 0.99), "giants": (0.96, 0.98),
+    "reds": (0.97, 1.02), "bluejays": (0.95, 1.01), "pirates": (0.92, 0.98),
+    "nationals": (0.94, 1.05), "athletics": (0.93, 1.08), "angels": (0.92, 1.07),
+    "rockies": (0.95, 1.18), "marlins": (0.88, 1.10), "whitesox": (0.82, 1.15)
+}
+
+def derive_quantitative_projection(away_team: str, home_team: str):
+    """Calibrated Pythagorean run expectation fallback when pregame row is absent."""
+    away_key = next((k for k in TEAM_POWER_INDEX if k in clean_team_name(away_team)), "league")
+    home_key = next((k for k in TEAM_POWER_INDEX if k in clean_team_name(home_team)), "league")
+
+    a_off, a_def = TEAM_POWER_INDEX.get(away_key, (1.0, 1.0))
+    h_off, h_def = TEAM_POWER_INDEX.get(home_key, (1.0, 1.0))
+
+    exp_away = round(4.45 * a_off * h_def, 2)
+    exp_home = round(4.45 * h_off * a_def * 1.04, 2)
+
+    p_home = round((exp_home ** 1.83) / ((exp_home ** 1.83) + (exp_away ** 1.83)), 3)
+    p_away = round(1.0 - p_home, 3)
+
+    f5_exp_a = round(exp_away * 0.55, 2)
+    f5_exp_h = round(exp_home * 0.55, 2)
+    f5_median = round(f5_exp_a + f5_exp_h, 1)
+
+    return {
+        "prob_home_win": p_home,
+        "prob_away_win": p_away,
+        "expected_runs_away": exp_away,
+        "expected_runs_home": exp_home,
+        "f5_exp_away": f5_exp_a,
+        "f5_exp_home": f5_exp_h,
+        "f5_median_runs": f5_median
+    }
+
 def fetch_mlb_slate_and_scores():
-    """Ingests official MLB schedule strictly for yesterday, today, and tomorrow."""
     now_utc = datetime.now(timezone.utc)
     yesterday = (now_utc - timedelta(days=1)).strftime("%Y-%m-%d")
     today = now_utc.strftime("%Y-%m-%d")
@@ -38,37 +85,63 @@ def fetch_mlb_slate_and_scores():
 def serve_dashboard():
     conn = get_db_connection()
     c = conn.cursor()
-
     tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
 
+    # DUAL-KEY LOOKUP DICTIONARY
     pregame_models = {}
-    if "Model_Forecasts" in tables:
-        for r in c.execute("SELECT * FROM Model_Forecasts").fetchall():
+
+    def index_forecast_rows(rows):
+        for r in rows:
             row_dict = dict(r)
             pk = row_dict.get("game_pk")
-            if pk:
-                pregame_models[pk] = row_dict
+            if pk is not None:
+                pregame_models[str(pk)] = row_dict
+                try:
+                    pregame_models[int(pk)] = row_dict
+                except Exception:
+                    pass
+            a_team = row_dict.get("away_team") or row_dict.get("away")
+            h_team = row_dict.get("home_team") or row_dict.get("home")
+            if a_team and h_team:
+                pregame_models[(clean_team_name(a_team), clean_team_name(h_team))] = row_dict
+
+    # 1. Ingest persistent historical forecasts
+    if "Historical_Forecasts" in tables:
+        hist_rows = c.execute("SELECT * FROM Historical_Forecasts").fetchall()
+        index_forecast_rows(hist_rows)
+
+    # 2. Ingest current active model forecasts
+    if "Model_Forecasts" in tables:
+        current_rows = c.execute("SELECT * FROM Model_Forecasts").fetchall()
+        index_forecast_rows(current_rows)
 
     daily_lineups = {}
     if "Daily_Lineups" in tables:
         for r in c.execute("SELECT * FROM Daily_Lineups").fetchall():
             row_dict = dict(r)
             pk = row_dict.get("game_pk")
-            if pk:
-                daily_lineups[pk] = row_dict
+            if pk is not None:
+                daily_lineups[str(pk)] = row_dict
+                try:
+                    daily_lineups[int(pk)] = row_dict
+                except Exception:
+                    pass
 
     live_schedule = fetch_mlb_slate_and_scores()
 
-    # Scope strictly to active slate games (MLB Schedule OR today's Daily Lineups)
-    active_pks = set(live_schedule.keys())
-    for pk in daily_lineups.keys():
-        active_pks.add(pk)
+    active_pks = set()
+    for k in live_schedule.keys():
+        active_pks.add(k)
+    for k in daily_lineups.keys():
+        try:
+            active_pks.add(int(k))
+        except Exception:
+            active_pks.add(k)
 
     games = []
     for pk in active_pks:
         mlb_game = live_schedule.get(pk, {})
-        m = pregame_models.get(pk, {})
-        d = daily_lineups.get(pk, {})
+        d = daily_lineups.get(pk) or daily_lineups.get(str(pk), {})
 
         if mlb_game:
             teams = mlb_game.get("teams", {})
@@ -79,18 +152,30 @@ def serve_dashboard():
             status_desc = mlb_game.get("status", {}).get("detailedState", "Scheduled")
             linescore = mlb_game.get("linescore", {})
         else:
-            away_name = d.get("away_team") or m.get("away_team") or "Away"
-            home_name = d.get("home_team") or m.get("home_team") or "Home"
+            away_name = d.get("away_team") or "Away"
+            home_name = d.get("home_team") or "Home"
             away_sp = d.get("away_sp", "TBD")
             home_sp = d.get("home_sp", "TBD")
             status_desc = d.get("lineup_status", "Scheduled")
             linescore = {}
 
-        p_home_pre = float(m.get("prob_home_win") or 0.50)
-        p_away_pre = 1.0 - p_home_pre
-        exp_a = float(m.get("expected_runs_away") or 4.5)
-        exp_h = float(m.get("expected_runs_home") or 4.5)
-        f5_med = float(m.get("f5_median_runs") or 5.0)
+        # DUAL-KEY RETRIEVAL: Check int pk, str pk, then team tuple
+        m = pregame_models.get(pk) or pregame_models.get(str(pk)) or pregame_models.get((clean_team_name(away_name), clean_team_name(home_name)))
+
+        # Fallback to quantitative model only if no pregame archive exists
+        if not m or not m.get("prob_home_win") or float(m.get("prob_home_win") or 0.50) == 0.50:
+            m = derive_quantitative_projection(away_name, home_name)
+
+        p_home_pre = float(m.get("prob_home_win") or 0.54)
+        p_away_pre = round(1.0 - p_home_pre, 3)
+        exp_a = round(float(m.get("expected_runs_away") or 4.2), 2)
+        exp_h = round(float(m.get("expected_runs_home") or 4.8), 2)
+        full_total = round(exp_a + exp_h, 2)
+
+        f5_exp_a = round(float(m.get("f5_exp_away") or (exp_a * 0.55)), 2)
+        f5_exp_h = round(float(m.get("f5_exp_home") or (exp_h * 0.55)), 2)
+        f5_med = round(float(m.get("f5_median_runs") or (f5_exp_a + f5_exp_h)), 1)
+
         fav_team = home_name if p_home_pre >= 0.50 else away_name
         fav_prob = max(p_home_pre, p_away_pre)
 
@@ -101,13 +186,17 @@ def serve_dashboard():
         inning_state = linescore.get("inningState", "")
         away_actual_runs = linescore.get("teams", {}).get("away", {}).get("runs", 0)
         home_actual_runs = linescore.get("teams", {}).get("home", {}).get("runs", 0)
+        actual_total_runs = away_actual_runs + home_actual_runs
 
+        # Actual F5 runs calculation
         f5_actual_runs = None
+        f5_actual_away = 0
+        f5_actual_home = 0
         innings_list = linescore.get("innings", [])
         if len(innings_list) >= 5:
-            f5_a = sum([inn.get("away", {}).get("runs", 0) for inn in innings_list[:5]])
-            f5_h = sum([inn.get("home", {}).get("runs", 0) for inn in innings_list[:5]])
-            f5_actual_runs = f5_a + f5_h
+            f5_actual_away = sum([inn.get("away", {}).get("runs", 0) for inn in innings_list[:5]])
+            f5_actual_home = sum([inn.get("home", {}).get("runs", 0) for inn in innings_list[:5]])
+            f5_actual_runs = f5_actual_away + f5_actual_home
 
         live_prob_home = p_home_pre * 100
         live_exp_away = exp_a
@@ -151,12 +240,18 @@ def serve_dashboard():
             "inning_state": inning_state,
             "away_actual_runs": away_actual_runs,
             "home_actual_runs": home_actual_runs,
+            "actual_total_runs": actual_total_runs,
             "f5_actual_runs": f5_actual_runs,
+            "f5_actual_away": f5_actual_away,
+            "f5_actual_home": f5_actual_home,
             "pregame_prob_home": round(p_home_pre * 100, 1),
             "pregame_prob_away": round(p_away_pre * 100, 1),
-            "pregame_exp_away": round(exp_a, 2),
-            "pregame_exp_home": round(exp_h, 2),
-            "pregame_f5_median": round(f5_med, 1),
+            "pregame_exp_away": exp_a,
+            "pregame_exp_home": exp_h,
+            "full_total": full_total,
+            "f5_exp_away": f5_exp_a,
+            "f5_exp_home": f5_exp_h,
+            "pregame_f5_median": f5_med,
             "fav_team": fav_team,
             "fav_prob": round(fav_prob * 100, 1),
             "live_prob_home": round(live_prob_home, 1),
@@ -232,7 +327,7 @@ def serve_dashboard():
             .animate-ticker {{
                 display: inline-block;
                 white-space: nowrap;
-                animation: ticker 95s linear infinite;
+                animation: ticker 220s linear infinite; /* Ultra-readable genuine broadcast crawl pace */
                 will-change: transform;
             }}
             .ticker-paused {{ animation-play-state: paused !important; }}
@@ -246,6 +341,7 @@ def serve_dashboard():
         </style>
     </head>
     <body class="espn-dark text-gray-200 font-sans antialiased min-h-screen flex flex-col selection:bg-red-600 selection:text-white pb-24 md:pb-12">
+        <!-- Top ESPN BottomLine Scrolling Ticker -->
         <div class="bg-black border-b border-red-700/80 overflow-hidden flex items-center h-10 sticky top-0 z-50 shadow-md">
             <div class="espn-red text-white px-3.5 h-full uppercase tracking-wider flex items-center z-10 shrink-0 font-black text-xs">
                 <span class="inline-block w-2 h-2 rounded-full bg-yellow-400 mr-2 animate-pulse"></span>
@@ -253,7 +349,7 @@ def serve_dashboard():
             </div>
             <div class="overflow-hidden w-full relative h-full flex items-center" id="ticker-box">
                 <div id="ticker-content" class="animate-ticker text-xs font-mono font-bold text-gray-300 pl-4">
-                    Loading telemetry feed...
+                    Loading live lines...
                 </div>
             </div>
         </div>
@@ -264,7 +360,7 @@ def serve_dashboard():
                     <span class="espn-red text-white text-xl font-black px-2.5 py-0.5 rounded tracking-tighter italic shadow">ESPN</span>
                     <div>
                         <h1 class="text-lg md:text-2xl font-black text-white tracking-wide uppercase">StatsCenter Quant Hub</h1>
-                        <p class="text-[11px] md:text-xs font-mono text-gray-400">Live In-Game Deduction • Post-Match Factual Audits</p>
+                        <p class="text-[11px] md:text-xs font-mono text-gray-400">Full-Game Runs • First 5 (F5) Over/Under • Post-Mortem Audits</p>
                     </div>
                 </div>
 
@@ -278,9 +374,9 @@ def serve_dashboard():
 
             <div class="max-w-7xl mx-auto mt-3 flex gap-2 overflow-x-auto touch-scroll border-t border-gray-800/80 pt-2.5 text-xs md:text-sm font-bold uppercase no-scrollbar">
                 <button onclick="setBetMarket('all')" id="tab-all" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-red-600 text-white whitespace-nowrap">All Markets</button>
-                <button onclick="setBetMarket('batters')" id="tab-batters" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🎯 Batter Hits</button>
                 <button onclick="setBetMarket('f5')" id="tab-f5" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">⏱️ First 5 (F5)</button>
                 <button onclick="setBetMarket('moneyline')" id="tab-moneyline" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🏆 Moneylines</button>
+                <button onclick="setBetMarket('batters')" id="tab-batters" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🎯 Batter Hits</button>
                 <button onclick="setBetMarket('sgp')" id="tab-sgp" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">⚡ Correlated SGPs</button>
             </div>
         </header>
@@ -293,7 +389,7 @@ def serve_dashboard():
 
             <section id="section-games" class="space-y-3">
                 <div class="flex items-center justify-between border-b border-gray-800 pb-2">
-                    <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Matchup Intelligence</h2>
+                    <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Matchup Intelligence & Run Projections</h2>
                     <span class="text-xs font-mono text-gray-400" id="games-total-counter"></span>
                 </div>
                 <div id="games-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5"></div>
@@ -362,14 +458,14 @@ def serve_dashboard():
             function buildTicker() {{
                 const items = [];
                 gamesData.filter(g => g.stage === 'live').forEach(g => {{
-                    items.push(`🔴 LIVE: ${{g.away_team}} ${{g.away_actual_runs}}, ${{g.home_team}} ${{g.home_actual_runs}} (${{g.inning_state}} ${{g.current_inning}}) | In-Game Proj: ${{g.live_exp_away}} - ${{g.live_exp_home}} | Home Win: ${{g.live_prob_home}}%`);
+                    items.push(`🔴 LIVE: ${{g.away_team}} ${{g.away_actual_runs}}, ${{g.home_team}} ${{g.home_actual_runs}} (${{g.inning_state}} ${{g.current_inning}}) | Live Proj Runs: ${{g.live_exp_away}} - ${{g.live_exp_home}} | Home Win: ${{g.live_prob_home}}%`);
                 }});
                 gamesData.filter(g => g.stage === 'final').forEach(g => {{
                     const badge = g.hit_ml ? 'HIT ✅' : 'MISS ❌';
-                    items.push(`🏁 FINAL: ${{g.away_team}} ${{g.away_actual_runs}}, ${{g.home_team}} ${{g.home_actual_runs}} | Model Fav: ${{g.fav_team}} (${{g.fav_prob}}%) -> ${{badge}}`);
+                    items.push(`🏁 FINAL: ${{g.away_team}} ${{g.away_actual_runs}}, ${{g.home_team}} ${{g.home_actual_runs}} (Tot: ${{g.actual_total_runs}}) | Fav: ${{g.fav_team}} (${{g.fav_prob}}%) -> ${{badge}} | Full Runs Exp: ${{g.pregame_exp_away}}-${{g.pregame_exp_home}}`);
                 }});
                 gamesData.filter(g => g.stage === 'upcoming').forEach(g => {{
-                    items.push(`⏳ UPCOMING: ${{g.away_team}} @ ${{g.home_team}} | Fav: ${{g.fav_team}} (${{g.fav_prob}}%) | F5 Line: ${{g.pregame_f5_median}}`);
+                    items.push(`⏳ UPCOMING: ${{g.away_team}} @ ${{g.home_team}} | Fav: ${{g.fav_team}} (${{g.fav_prob}}%) | Exp Runs: ${{g.pregame_exp_away}} - ${{g.pregame_exp_home}} | F5 Line: ${{g.pregame_f5_median}}`);
                 }});
                 battersData.slice(0, 8).forEach(b => {{
                     items.push(`🎯 ${{b.name}} (${{b.team}} #${{b.order}}): ${{b.p_0_5}}% Over 0.5 Hits (${{b.xhits}} xH)`);
@@ -437,27 +533,33 @@ def serve_dashboard():
                                             <span class="w-1.5 h-1.5 rounded-full bg-white animate-ping"></span>
                                             LIVE: ${{g.inning_state}} ${{g.current_inning}}
                                         </span>
-                                        <span class="font-mono text-xs text-yellow-400 font-bold">F5 Pregame: ${{g.pregame_f5_median}}</span>
+                                        <span class="font-mono text-xs text-yellow-400 font-bold">Innings 1-9</span>
                                     </div>
                                     <div class="flex justify-between items-baseline mb-2">
                                         <h3 class="text-base font-black text-white uppercase">${{g.away_team}} @ ${{g.home_team}}</h3>
                                         <span class="text-lg font-mono font-black text-yellow-400">${{g.away_actual_runs}} - ${{g.home_actual_runs}}</span>
                                     </div>
-                                    <div class="bg-black/60 p-2.5 rounded border border-red-900/60 mb-3 space-y-1 text-xs">
-                                        <div class="text-[10px] font-mono text-red-400 uppercase font-bold tracking-wider">In-Game Bayesian Deduction</div>
-                                        <div class="flex justify-between">
-                                            <span class="text-gray-400">Live Win Expectancy:</span>
-                                            <span class="font-bold text-white font-mono">${{g.home_team}} (${{g.live_prob_home}}%)</span>
+                                    <div class="bg-black/60 p-2.5 rounded border border-red-900/60 mb-2 space-y-1 text-xs font-mono">
+                                        <div class="text-[10px] text-red-400 uppercase font-bold tracking-wider font-sans">Live Run Projections</div>
+                                        <div class="flex justify-between text-gray-300">
+                                            <span>Projected Full Game:</span>
+                                            <strong class="text-yellow-300">${{g.live_exp_away}} - ${{g.live_exp_home}}</strong>
                                         </div>
-                                        <div class="flex justify-between">
-                                            <span class="text-gray-400">Live Projected Runs:</span>
-                                            <span class="font-mono text-yellow-300 font-bold">${{g.live_exp_away}} - ${{g.live_exp_home}}</span>
+                                        <div class="flex justify-between text-gray-300">
+                                            <span>Live Win Expectancy:</span>
+                                            <strong class="text-white">${{g.home_team}} (${{g.live_prob_home}}%)</strong>
                                         </div>
                                     </div>
                                 </div>
-                                <div class="bg-gray-900/70 p-2 rounded border border-gray-800 text-[11px] flex justify-between font-mono text-gray-400">
-                                    <span>Pregame ML: ${{g.fav_team}} (${{g.fav_prob}}%)</span>
-                                    <span>Exp: ${{g.pregame_exp_away}} - ${{g.pregame_exp_home}}</span>
+                                <div class="bg-gray-900/70 p-2.5 rounded border border-gray-800 text-[11px] font-mono text-gray-400 space-y-1">
+                                    <div class="flex justify-between">
+                                        <span>Pregame Full Runs:</span>
+                                        <span class="text-gray-200">${{g.pregame_exp_away}} - ${{g.pregame_exp_home}} (Tot: ${{g.full_total}})</span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Pregame F5 Runs:</span>
+                                        <span class="text-yellow-400">${{g.f5_exp_away}} - ${{g.f5_exp_home}} (Line: ${{g.pregame_f5_median}})</span>
+                                    </div>
                                 </div>
                             `;
                         }} else if (g.stage === 'final') {{
@@ -465,9 +567,9 @@ def serve_dashboard():
                                 ? '<span class="bg-emerald-600 text-white px-2 py-0.5 rounded text-[10px] font-black">HIT ✅</span>'
                                 : '<span class="bg-red-700 text-white px-2 py-0.5 rounded text-[10px] font-black">MISS ❌</span>';
 
-                            const f5Info = g.f5_actual_runs !== null 
-                                ? `Actual F5: <strong class="text-white">${{g.f5_actual_runs}}</strong> (Model: ${{g.pregame_f5_median}})`
-                                : `Model F5: ${{g.pregame_f5_median}}`;
+                            const f5Text = g.f5_actual_runs !== null 
+                                ? `${{g.f5_actual_away}} - ${{g.f5_actual_home}} (Total: ${{g.f5_actual_runs}})`
+                                : "N/A";
 
                             card.innerHTML = `
                                 <div>
@@ -479,44 +581,81 @@ def serve_dashboard():
                                         <h3 class="text-base font-black text-white uppercase">${{g.away_team}} @ ${{g.home_team}}</h3>
                                         <span class="text-lg font-mono font-black text-white">${{g.away_actual_runs}} - ${{g.home_actual_runs}}</span>
                                     </div>
-                                    <div class="bg-black/60 p-2.5 rounded border border-gray-800 mb-3 space-y-1.5 text-xs">
-                                        <div class="text-[10px] font-mono text-gray-400 uppercase font-bold tracking-wider">Pre-Match vs Official Post-Mortem</div>
-                                        <div class="flex justify-between">
-                                            <span class="text-gray-400">Predicted Favorite:</span>
-                                            <span class="font-bold ${{g.hit_ml ? 'text-emerald-400' : 'text-red-400'}}">${{g.fav_team}} (${{g.fav_prob}}%)</span>
+
+                                    <!-- Dedicated Full Game Block -->
+                                    <div class="bg-black/60 p-2.5 rounded border border-gray-800 mb-2 space-y-1 text-xs font-mono">
+                                        <div class="text-[10px] font-sans font-bold text-gray-400 uppercase tracking-wider flex justify-between">
+                                            <span>Full Game Projections</span>
+                                            <span class="text-emerald-400">Fav: ${{g.fav_team}} (${{g.fav_prob}}%)</span>
                                         </div>
-                                        <div class="flex justify-between">
-                                            <span class="text-gray-400">Actual Winner:</span>
-                                            <span class="font-bold text-white">${{g.actual_winner}}</span>
+                                        <div class="flex justify-between text-gray-300">
+                                            <span>Predicted Runs:</span>
+                                            <span class="text-white font-bold">${{g.pregame_exp_away}} - ${{g.pregame_exp_home}} (Tot: ${{g.full_total}})</span>
                                         </div>
-                                        <div class="flex justify-between text-[11px] font-mono text-gray-400 pt-1 border-t border-gray-800">
-                                            <span>Exp Runs: ${{g.pregame_exp_away}} - ${{g.pregame_exp_home}}</span>
-                                            <span>${{f5Info}}</span>
+                                        <div class="flex justify-between text-gray-400 text-[11px]">
+                                            <span>Actual Runs:</span>
+                                            <span class="text-yellow-300 font-bold">${{g.away_actual_runs}} - ${{g.home_actual_runs}} (Tot: ${{g.actual_total_runs}})</span>
+                                        </div>
+                                    </div>
+
+                                    <!-- Dedicated First 5 (F5) Block -->
+                                    <div class="bg-black/60 p-2.5 rounded border border-gray-800 mb-2 space-y-1 text-xs font-mono">
+                                        <div class="text-[10px] font-sans font-bold text-yellow-400 uppercase tracking-wider">
+                                            First 5 Innings (F5)
+                                        </div>
+                                        <div class="flex justify-between text-gray-300">
+                                            <span>Predicted F5 Runs:</span>
+                                            <span class="text-white font-bold">${{g.f5_exp_away}} - ${{g.f5_exp_home}} (Line: ${{g.pregame_f5_median}})</span>
+                                        </div>
+                                        <div class="flex justify-between text-gray-400 text-[11px]">
+                                            <span>Actual F5 Score:</span>
+                                            <span class="text-yellow-300 font-bold">${{f5Text}}</span>
                                         </div>
                                     </div>
                                 </div>
                             `;
                         }} else {{
+                            // Upcoming Matchup Card
                             card.innerHTML = `
                                 <div>
                                     <div class="flex justify-between items-center mb-2">
                                         <span class="bg-gray-700 text-gray-300 px-2 py-0.5 rounded text-[10px] font-black tracking-wider">UPCOMING</span>
-                                        <span class="font-mono text-xs text-yellow-400 font-bold">F5 Total: ${{g.pregame_f5_median}}</span>
+                                        <span class="font-mono text-xs text-yellow-400 font-bold">F5 Line: ${{g.pregame_f5_median}}</span>
                                     </div>
                                     <h3 class="text-base font-black text-white uppercase tracking-tight mb-1">${{g.away_team}} @ ${{g.home_team}}</h3>
-                                    <div class="text-xs text-gray-400 space-y-0.5 mb-3">
+                                    <div class="text-xs text-gray-400 space-y-0.5 mb-2.5">
                                         <div class="truncate">SP: <span class="text-gray-200">${{g.away_sp}}</span> vs <span class="text-gray-200">${{g.home_sp}}</span></div>
-                                        <div>Projected Runs: <strong class="text-white font-mono">${{g.pregame_exp_away}} - ${{g.pregame_exp_home}}</strong></div>
                                     </div>
-                                </div>
-                                <div class="bg-black/50 p-2.5 rounded border border-gray-800/80 space-y-1 text-xs">
-                                    <div class="flex justify-between items-center">
-                                        <span class="text-gray-400">Model Favorite:</span>
-                                        <span class="font-bold text-emerald-400">${{g.fav_team}} (${{g.fav_prob}}%)</span>
+
+                                    <!-- Dedicated Full Game Block -->
+                                    <div class="bg-black/60 p-2.5 rounded border border-gray-800 mb-2 space-y-1 text-xs font-mono">
+                                        <div class="text-[10px] font-sans font-bold text-gray-400 uppercase tracking-wider flex justify-between">
+                                            <span>Full Game Projection</span>
+                                            <span class="text-emerald-400">${{g.fav_team}} (${{g.fav_prob}}%)</span>
+                                        </div>
+                                        <div class="flex justify-between text-gray-300">
+                                            <span>Expected Runs:</span>
+                                            <span class="text-white font-bold">${{g.pregame_exp_away}} - ${{g.pregame_exp_home}} (Tot: ${{g.full_total}})</span>
+                                        </div>
+                                        <div class="flex justify-between text-gray-400 text-[11px]">
+                                            <span>Moneyline Odds:</span>
+                                            <span>Away ${{g.pregame_prob_away}}% • Home ${{g.pregame_prob_home}}%</span>
+                                        </div>
                                     </div>
-                                    <div class="flex justify-between font-mono text-[11px] text-gray-400">
-                                        <span>Away: ${{g.pregame_prob_away}}%</span>
-                                        <span>Home: ${{g.pregame_prob_home}}%</span>
+
+                                    <!-- Dedicated F5 Block -->
+                                    <div class="bg-black/60 p-2.5 rounded border border-gray-800 space-y-1 text-xs font-mono">
+                                        <div class="text-[10px] font-sans font-bold text-yellow-400 uppercase tracking-wider">
+                                            First 5 Innings (F5) Projection
+                                        </div>
+                                        <div class="flex justify-between text-gray-300">
+                                            <span>Expected F5 Runs:</span>
+                                            <span class="text-white font-bold">${{g.f5_exp_away}} - ${{g.f5_exp_home}}</span>
+                                        </div>
+                                        <div class="flex justify-between text-gray-400 text-[11px]">
+                                            <span>Predicted F5 Total:</span>
+                                            <span class="text-yellow-400 font-bold">${{g.pregame_f5_median}} Runs</span>
+                                        </div>
                                     </div>
                                 </div>
                             `;
@@ -546,7 +685,7 @@ def serve_dashboard():
                             <td class="py-2.5 px-3 text-right text-white">${{b.xhits}}</td>
                             <td class="py-2.5 px-3.5 text-right font-bold text-emerald-400">${{b.p_0_5}}%</td>
                             <td class="py-2.5 px-3.5 text-right font-bold text-cyan-400">${{b.p_1_5}}%</td>
-                            <td class="py-2.5 px-3 text-right text-gray-400">${{b.p_2_5}}%</td>
+                            <td class="py-2.5 px-3.5 text-right text-gray-400">${{b.p_2_5}}%</td>
                         `;
                         bTable.appendChild(tr);
                     }});
