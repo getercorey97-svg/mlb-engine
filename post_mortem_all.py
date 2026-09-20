@@ -55,9 +55,14 @@ def run_unified_post_mortem():
 
         if "Model_Forecasts" in tables:
             mf = c.execute("SELECT * FROM Model_Forecasts WHERE game_pk = ?", (pk,)).fetchone()
-            if mf:
-                p_home = float(mf["prob_home_win"] or 0.50)
-                f5_line = float(mf["f5_median_runs"] or 4.5)
+            if mf and "prob_home_win" in mf.keys() and mf["prob_home_win"] is not None:
+                p_home = float(mf["prob_home_win"])
+            else:
+                p_home = 0.50
+            if mf and "f5_median_runs" in mf.keys() and mf["f5_median_runs"] is not None:
+                f5_line = float(mf["f5_median_runs"])
+            else:
+                f5_line = 4.5
                 exp_total_f5 = float(mf["expected_f5_runs"]) if "expected_f5_runs" in mf.keys() and mf["expected_f5_runs"] else 4.5
 
                 pred_home_win = (p_home >= 0.50)
