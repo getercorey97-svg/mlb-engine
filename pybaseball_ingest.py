@@ -113,7 +113,7 @@ def fetch_mlb_pitching_totals(year):
             }
         return pitchers
     except Exception as e:
-        print(f"[WARN] MLB Stats API Pitching pull failed: {e}")
+        print(f"[WARN] MLB Stats API Pitching pull error: {e}")
         return {}
 
 def fetch_mlb_batting_totals(year):
@@ -154,7 +154,7 @@ def fetch_mlb_batting_totals(year):
             }
         return batters
     except Exception as e:
-        print(f"[WARN] MLB Stats API Batting pull failed: {e}")
+        print(f"[WARN] MLB Stats API Batting pull error: {e}")
         return {}
 
 def ingest_pitcher_data(conn):
@@ -200,6 +200,8 @@ def ingest_pitcher_data(conn):
             }
 
     c = conn.cursor()
+    ps_cols = [r[1] for r in c.execute("PRAGMA table_info(Pitcher_Stats)").fetchall()]
+    
     count = 0
     for c_name, p in mlb_pitchers.items():
         name = p["name"]
@@ -225,11 +227,20 @@ def ingest_pitcher_data(conn):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (name, c_name, k_pct, bb_pct, p_bf, p_game, csw_pct, swstr_pct, xera, xba, hardhit, barrel))
 
-        c.execute("""
-            UPDATE Pitcher_Stats
-            SET whiff_rate = ?, pitches_per_bf = ?
-            WHERE clean_name = ? OR pitcher_name = ?
-        """, (round(swstr_pct * 2.1, 3), p_bf, c_name, name))
+        # Resilient Pitcher_Stats update
+        if ps_cols:
+            clauses = []
+            vals = [round(swstr_pct * 2.1, 3), p_bf]
+            for candidate in ['clean_name', 'pitcher_name', 'player_name', 'last_name']:
+                if candidate in ps_cols:
+                    clauses.append(f"{candidate} = ?")
+                    vals.append(c_name if candidate == 'clean_name' else name)
+            if clauses:
+                sql = f"UPDATE Pitcher_Stats SET whiff_rate = ?, pitches_per_bf = ? WHERE " + " OR ".join(clauses)
+                try:
+                    c.execute(sql, tuple(vals))
+                except Exception:
+                    pass
         count += 1
 
     conn.commit()
