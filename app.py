@@ -4,8 +4,8 @@ import os
 import re
 import requests
 from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
 
 app = FastAPI(title="ESPN StatsCenter MLB Engine Hub")
 
@@ -19,7 +19,6 @@ def clean_team_name(name: str) -> str:
         return ""
     return re.sub(r'[^a-zA-Z0-9]', '', name).lower()
 
-# League calibrated team power indices (Runs per 9 innings relative to 4.45 baseline)
 TEAM_POWER_INDEX = {
     "dodgers": (1.18, 0.88), "braves": (1.14, 0.90), "yankees": (1.15, 0.91),
     "orioles": (1.12, 0.92), "phillies": (1.11, 0.91), "astros": (1.08, 0.93),
@@ -34,7 +33,6 @@ TEAM_POWER_INDEX = {
 }
 
 def derive_quantitative_projection(away_team: str, home_team: str):
-    """Calibrated Pythagorean run expectation fallback when pregame row is absent."""
     away_key = next((k for k in TEAM_POWER_INDEX if k in clean_team_name(away_team)), "league")
     home_key = next((k for k in TEAM_POWER_INDEX if k in clean_team_name(home_team)), "league")
 
@@ -81,15 +79,70 @@ def fetch_mlb_slate_and_scores():
         print(f"[MLB API FETCH ERROR] {e}")
     return {}
 
+# ----------------- PROPOSAL PROMOTION & REJECTION APIS -----------------
+
+@app.post("/api/proposals/promote")
+def promote_proposal(proposal_id: int):
+    conn = get_db_connection()
+    c = conn.cursor()
+    row = c.execute("SELECT * FROM Engine_Proposals WHERE id = ?", (proposal_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Proposal not found")
+
+    c.execute("""
+        UPDATE Engine_Proposals 
+        SET status = 'approved', action_taken_at = CURRENT_TIMESTAMP 
+        WHERE id = ?
+    """, (proposal_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "promoted", "id": proposal_id, "feature": row["feature_name"]}
+
+@app.post("/api/proposals/reject")
+def reject_proposal(proposal_id: int):
+    conn = get_db_connection()
+    c = conn.cursor()
+    row = c.execute("SELECT * FROM Engine_Proposals WHERE id = ?", (proposal_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Proposal not found")
+
+    c.execute("""
+        UPDATE Engine_Proposals 
+        SET status = 'rejected', action_taken_at = CURRENT_TIMESTAMP 
+        WHERE id = ?
+    """, (proposal_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "rejected", "id": proposal_id, "feature": row["feature_name"]}
+
+# ----------------- DASHBOARD ROUTE -----------------
+
 @app.get("/", response_class=HTMLResponse)
 def serve_dashboard():
     conn = get_db_connection()
     c = conn.cursor()
     tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
 
-    # DUAL-KEY LOOKUP DICTIONARY
-    pregame_models = {}
+    # Ingest Engine Proposals
+    proposals = []
+    if "Engine_Proposals" in tables:
+        raw_p = c.execute("SELECT * FROM Engine_Proposals ORDER BY proposed_at DESC").fetchall()
+        for p in raw_p:
+            proposals.append({
+                "id": p["id"],
+                "feature": p["feature_name"],
+                "vector": p["causal_vector"],
+                "hypothesis": p["hypothesis"],
+                "brier": round(float(p["brier_improvement"] or 0.0) * 100, 2),
+                "record": p["shadow_record"],
+                "sample": p["sample_size"],
+                "status": p["status"],
+                "date": str(p["proposed_at"])[:10]
+            })
 
+    pregame_models = {}
     def index_forecast_rows(rows):
         for r in rows:
             row_dict = dict(r)
@@ -105,15 +158,10 @@ def serve_dashboard():
             if a_team and h_team:
                 pregame_models[(clean_team_name(a_team), clean_team_name(h_team))] = row_dict
 
-    # 1. Ingest persistent historical forecasts
     if "Historical_Forecasts" in tables:
-        hist_rows = c.execute("SELECT * FROM Historical_Forecasts").fetchall()
-        index_forecast_rows(hist_rows)
-
-    # 2. Ingest current active model forecasts
+        index_forecast_rows(c.execute("SELECT * FROM Historical_Forecasts").fetchall())
     if "Model_Forecasts" in tables:
-        current_rows = c.execute("SELECT * FROM Model_Forecasts").fetchall()
-        index_forecast_rows(current_rows)
+        index_forecast_rows(c.execute("SELECT * FROM Model_Forecasts").fetchall())
 
     daily_lineups = {}
     if "Daily_Lineups" in tables:
@@ -159,10 +207,7 @@ def serve_dashboard():
             status_desc = d.get("lineup_status", "Scheduled")
             linescore = {}
 
-        # DUAL-KEY RETRIEVAL: Check int pk, str pk, then team tuple
         m = pregame_models.get(pk) or pregame_models.get(str(pk)) or pregame_models.get((clean_team_name(away_name), clean_team_name(home_name)))
-
-        # Fallback to quantitative model only if no pregame archive exists
         if not m or not m.get("prob_home_win") or float(m.get("prob_home_win") or 0.50) == 0.50:
             m = derive_quantitative_projection(away_name, home_name)
 
@@ -179,6 +224,16 @@ def serve_dashboard():
         fav_team = home_name if p_home_pre >= 0.50 else away_name
         fav_prob = max(p_home_pre, p_away_pre)
 
+        net_diff = round(exp_h - exp_a, 2)
+        sp_mod_a = float(d.get("away_sp_modifier") or 1.0)
+        sp_mod_h = float(d.get("home_sp_modifier") or 1.0)
+        fatigue_a = float(d.get("bullpen_fatigue_away") or 0.0)
+        fatigue_h = float(d.get("bullpen_fatigue_home") or 0.0)
+
+        v_pitching = round((sp_mod_a - sp_mod_h) * 1.5, 2)
+        v_fatigue = round((fatigue_a - fatigue_h) * 0.8, 2)
+        v_baseline = round(net_diff - (v_pitching + v_fatigue), 2)
+
         is_final = any(x in status_desc.lower() for x in ["final", "game over", "completed"])
         is_live = any(x in status_desc.lower() for x in ["in progress", "live", "delayed", "manager challenge"])
 
@@ -188,7 +243,6 @@ def serve_dashboard():
         home_actual_runs = linescore.get("teams", {}).get("home", {}).get("runs", 0)
         actual_total_runs = away_actual_runs + home_actual_runs
 
-        # Actual F5 runs calculation
         f5_actual_runs = None
         f5_actual_away = 0
         f5_actual_home = 0
@@ -206,14 +260,11 @@ def serve_dashboard():
             stage = "live"
             rem_away = max(0.0, 9.0 - (current_inning - 1) - (1.0 if inning_state.lower() == "bottom" else 0.0))
             rem_home = max(0.0, 8.5 - (current_inning - 1) - (0.5 if inning_state.lower() == "bottom" else 0.0))
-            
             live_exp_away = round(away_actual_runs + (exp_a * (rem_away / 9.0)), 2)
             live_exp_home = round(home_actual_runs + (exp_h * (rem_home / 9.0)), 2)
-            
             diff = live_exp_home - live_exp_away
             live_p_home = 1.0 / (1.0 + 10 ** (-diff / 2.2))
             live_prob_home = round(live_p_home * 100, 1)
-
         elif is_final:
             stage = "final"
         else:
@@ -254,6 +305,10 @@ def serve_dashboard():
             "pregame_f5_median": f5_med,
             "fav_team": fav_team,
             "fav_prob": round(fav_prob * 100, 1),
+            "v_pitching": v_pitching,
+            "v_fatigue": v_fatigue,
+            "v_baseline": v_baseline,
+            "net_diff": net_diff,
             "live_prob_home": round(live_prob_home, 1),
             "live_prob_away": round(100.0 - live_prob_home, 1),
             "live_exp_away": live_exp_away,
@@ -308,6 +363,7 @@ def serve_dashboard():
     games_json = json.dumps(games)
     batters_json = json.dumps(batters)
     sgps_json = json.dumps(sgps)
+    proposals_json = json.dumps(proposals)
 
     html = f"""
     <!DOCTYPE html>
@@ -327,7 +383,7 @@ def serve_dashboard():
             .animate-ticker {{
                 display: inline-block;
                 white-space: nowrap;
-                animation: ticker 220s linear infinite; /* Ultra-readable genuine broadcast crawl pace */
+                animation: ticker 220s linear infinite;
                 will-change: transform;
             }}
             .ticker-paused {{ animation-play-state: paused !important; }}
@@ -341,7 +397,6 @@ def serve_dashboard():
         </style>
     </head>
     <body class="espn-dark text-gray-200 font-sans antialiased min-h-screen flex flex-col selection:bg-red-600 selection:text-white pb-24 md:pb-12">
-        <!-- Top ESPN BottomLine Scrolling Ticker -->
         <div class="bg-black border-b border-red-700/80 overflow-hidden flex items-center h-10 sticky top-0 z-50 shadow-md">
             <div class="espn-red text-white px-3.5 h-full uppercase tracking-wider flex items-center z-10 shrink-0 font-black text-xs">
                 <span class="inline-block w-2 h-2 rounded-full bg-yellow-400 mr-2 animate-pulse"></span>
@@ -360,7 +415,7 @@ def serve_dashboard():
                     <span class="espn-red text-white text-xl font-black px-2.5 py-0.5 rounded tracking-tighter italic shadow">ESPN</span>
                     <div>
                         <h1 class="text-lg md:text-2xl font-black text-white tracking-wide uppercase">StatsCenter Quant Hub</h1>
-                        <p class="text-[11px] md:text-xs font-mono text-gray-400">Full-Game Runs • First 5 (F5) Over/Under • Post-Mortem Audits</p>
+                        <p class="text-[11px] md:text-xs font-mono text-gray-400">Autonomous Edge Discovery • Human-in-the-Loop Promotion Gate</p>
                     </div>
                 </div>
 
@@ -378,6 +433,7 @@ def serve_dashboard():
                 <button onclick="setBetMarket('moneyline')" id="tab-moneyline" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🏆 Moneylines</button>
                 <button onclick="setBetMarket('batters')" id="tab-batters" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🎯 Batter Hits</button>
                 <button onclick="setBetMarket('sgp')" id="tab-sgp" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">⚡ Correlated SGPs</button>
+                <button onclick="setBetMarket('lab')" id="tab-lab" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-purple-400 hover:text-purple-300 whitespace-nowrap">🔬 Lab Proposals (<span id="proposals-badge">0</span>)</button>
             </div>
         </header>
 
@@ -387,6 +443,20 @@ def serve_dashboard():
                 <span class="font-mono text-gray-500 text-[11px]">Database: <strong class="text-emerald-400">mlb_engine.db</strong></span>
             </div>
 
+            <!-- Section 0: Edge Discovery Lab & Promotion Gate -->
+            <section id="section-lab" class="hidden space-y-4">
+                <div class="flex items-center justify-between border-b border-gray-800 pb-2">
+                    <div>
+                        <h2 class="text-base md:text-lg font-black uppercase text-purple-400 tracking-wide">🔬 Quantum Discovery Lab & Promotion Gate</h2>
+                        <p class="text-xs text-gray-400 mt-0.5">Empirical shadow models that improved out-of-sample Brier scores. Awaiting explicit promotion approval.</p>
+                    </div>
+                </div>
+                <div id="proposals-container" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <!-- Dynamic proposal cards -->
+                </div>
+            </section>
+
+            <!-- Section 1: Slate Matchups Grid -->
             <section id="section-games" class="space-y-3">
                 <div class="flex items-center justify-between border-b border-gray-800 pb-2">
                     <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Matchup Intelligence & Run Projections</h2>
@@ -395,6 +465,7 @@ def serve_dashboard():
                 <div id="games-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5"></div>
             </section>
 
+            <!-- Section 2: Batter Hit Props Table -->
             <section id="section-batters" class="space-y-3">
                 <div class="flex items-center justify-between border-b border-gray-800 pb-2">
                     <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Endogenous Batter Hit Distributions</h2>
@@ -418,6 +489,7 @@ def serve_dashboard():
                 </div>
             </section>
 
+            <!-- Section 3: Correlated Same Game Parlays (SGP) Table -->
             <section id="section-sgp" class="space-y-3">
                 <div class="flex items-center justify-between border-b border-gray-800 pb-2">
                     <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Cross-Market Joint Probability Edges</h2>
@@ -446,6 +518,7 @@ def serve_dashboard():
             const gamesData = {games_json};
             const battersData = {batters_json};
             const sgpData = {sgps_json};
+            let proposalsData = {proposals_json};
 
             let currentStage = 'all';
             let currentMarket = 'all';
@@ -454,6 +527,7 @@ def serve_dashboard():
             document.getElementById('count-live').textContent = gamesData.filter(g => g.stage === 'live').length;
             document.getElementById('count-upcoming').textContent = gamesData.filter(g => g.stage === 'upcoming').length;
             document.getElementById('count-final').textContent = gamesData.filter(g => g.stage === 'final').length;
+            document.getElementById('proposals-badge').textContent = proposalsData.filter(p => p.status === 'pending').length;
 
             function buildTicker() {{
                 const items = [];
@@ -507,13 +581,109 @@ def serve_dashboard():
                 renderAll();
             }}
 
+            async function promoteProposal(id) {{
+                try {{
+                    const res = await fetch(`/api/proposals/promote?proposal_id=${{id}}`, {{ method: 'POST' }});
+                    if (res.ok) {{
+                        const p = proposalsData.find(item => item.id === id);
+                        if (p) p.status = 'approved';
+                        document.getElementById('proposals-badge').textContent = proposalsData.filter(p => p.status === 'pending').length;
+                        renderLab();
+                    }}
+                }} catch (e) {{
+                    alert('Error promoting proposal: ' + e);
+                }}
+            }}
+
+            async function rejectProposal(id) {{
+                try {{
+                    const res = await fetch(`/api/proposals/reject?proposal_id=${{id}}`, {{ method: 'POST' }});
+                    if (res.ok) {{
+                        const p = proposalsData.find(item => item.id === id);
+                        if (p) p.status = 'rejected';
+                        document.getElementById('proposals-badge').textContent = proposalsData.filter(p => p.status === 'pending').length;
+                        renderLab();
+                    }}
+                }} catch (e) {{
+                    alert('Error rejecting proposal: ' + e);
+                }}
+            }}
+
+            function renderLab() {{
+                const container = document.getElementById('proposals-container');
+                container.innerHTML = '';
+
+                if (proposalsData.length === 0) {{
+                    container.innerHTML = '<p class="text-sm text-gray-500 font-mono col-span-2">No candidate discoveries recorded. Discovery agent runs overnight.</p>';
+                    return;
+                }}
+
+                proposalsData.forEach(p => {{
+                    let statusBadge = '<span class="bg-yellow-600/80 text-white px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider">Awaiting Promotion</span>';
+                    if (p.status === 'approved') statusBadge = '<span class="bg-emerald-600 text-white px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider">PROMOTED TO CORE ✅</span>';
+                    if (p.status === 'rejected') statusBadge = '<span class="bg-red-800 text-gray-300 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider">REJECTED ❌</span>';
+
+                    const card = document.createElement('div');
+                    card.className = "espn-card border rounded-lg p-4 shadow-md flex flex-col justify-between space-y-3";
+                    card.innerHTML = `
+                        <div>
+                            <div class="flex justify-between items-center mb-1.5">
+                                <span class="text-xs font-mono text-purple-400 font-bold">${{p.vector}}</span>
+                                ${{statusBadge}}
+                            </div>
+                            <h3 class="text-base font-black text-white font-mono uppercase tracking-wide">${{p.feature}}</h3>
+                            <p class="text-xs text-gray-300 mt-1 leading-relaxed">${{p.hypothesis}}</p>
+                            
+                            <div class="grid grid-cols-2 gap-2 mt-3 bg-black/60 p-2.5 rounded border border-gray-800 text-xs font-mono">
+                                <div>
+                                    <span class="text-gray-400 block text-[10px] uppercase">OOS Brier Delta:</span>
+                                    <span class="text-emerald-400 font-black">+${{p.brier}}% Edge</span>
+                                </div>
+                                <div>
+                                    <span class="text-gray-400 block text-[10px] uppercase">Shadow Slate Record:</span>
+                                    <span class="text-white font-bold">${{p.record}}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        ${{p.status === 'pending' ? `
+                        <div class="flex gap-2 pt-2 border-t border-gray-800/80">
+                            <button onclick="promoteProposal(${{p.id}})" class="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-3 rounded text-xs active:scale-95 transition-all">
+                                Promote to Core Pipeline
+                            </button>
+                            <button onclick="rejectProposal(${{p.id}})" class="bg-gray-800 hover:bg-gray-700 text-gray-300 font-bold py-2 px-3 rounded text-xs active:scale-95 transition-all border border-gray-700">
+                                Reject
+                            </button>
+                        </div>
+                        ` : ''}}
+                    `;
+                    container.appendChild(card);
+                }});
+            }}
+
             function renderAll() {{
                 document.getElementById('filter-label').textContent = `${{currentStage}} Slates • ${{currentMarket}} Market`;
+
+                const secLab = document.getElementById('section-lab');
+                const secGames = document.getElementById('section-games');
+                const secBatters = document.getElementById('section-batters');
+                const secSgp = document.getElementById('section-sgp');
+
+                if (currentMarket === 'lab') {{
+                    secLab.classList.remove('hidden');
+                    secGames.classList.add('hidden');
+                    secBatters.classList.add('hidden');
+                    secSgp.classList.add('hidden');
+                    renderLab();
+                    return;
+                }} else {{
+                    secLab.classList.add('hidden');
+                }}
 
                 const filteredGames = gamesData.filter(g => currentStage === 'all' || g.stage === currentStage);
                 const activePks = new Set(filteredGames.map(g => g.game_pk));
 
-                const secGames = document.getElementById('section-games');
+                // 1. Games Grid
                 if (currentMarket === 'batters') {{
                     secGames.classList.add('hidden');
                 }} else {{
@@ -524,6 +694,27 @@ def serve_dashboard():
                     filteredGames.forEach(g => {{
                         const card = document.createElement('div');
                         card.className = "espn-card border rounded-lg p-3.5 shadow-md flex flex-col justify-between";
+
+                        const causalBlock = `
+                            <div class="bg-[#0e131d] p-2.5 rounded border border-gray-800/90 mb-2 space-y-1 text-[11px] font-mono">
+                                <div class="text-[10px] font-sans font-bold text-cyan-400 uppercase tracking-wider flex justify-between">
+                                    <span>Geter Principle: Causal Vectors</span>
+                                    <span class="text-gray-400">Net: ${{g.net_diff > 0 ? '+' + g.net_diff : g.net_diff}}</span>
+                                </div>
+                                <div class="flex justify-between text-gray-300">
+                                    <span>• SP Kinematics Delta:</span>
+                                    <strong class="${{g.v_pitching >= 0 ? 'text-emerald-400' : 'text-red-400'}}">${{g.v_pitching > 0 ? '+' + g.v_pitching : g.v_pitching}} R</strong>
+                                </div>
+                                <div class="flex justify-between text-gray-300">
+                                    <span>• Bullpen Biological Fatigue:</span>
+                                    <strong class="${{g.v_fatigue >= 0 ? 'text-emerald-400' : 'text-red-400'}}">${{g.v_fatigue > 0 ? '+' + g.v_fatigue : g.v_fatigue}} R</strong>
+                                </div>
+                                <div class="flex justify-between text-gray-400">
+                                    <span>• Atmospheric & Base Run Value:</span>
+                                    <span>${{g.v_baseline > 0 ? '+' + g.v_baseline : g.v_baseline}} R</span>
+                                </div>
+                            </div>
+                        `;
 
                         if (g.stage === 'live') {{
                             card.innerHTML = `
@@ -539,6 +730,7 @@ def serve_dashboard():
                                         <h3 class="text-base font-black text-white uppercase">${{g.away_team}} @ ${{g.home_team}}</h3>
                                         <span class="text-lg font-mono font-black text-yellow-400">${{g.away_actual_runs}} - ${{g.home_actual_runs}}</span>
                                     </div>
+                                    ${{causalBlock}}
                                     <div class="bg-black/60 p-2.5 rounded border border-red-900/60 mb-2 space-y-1 text-xs font-mono">
                                         <div class="text-[10px] text-red-400 uppercase font-bold tracking-wider font-sans">Live Run Projections</div>
                                         <div class="flex justify-between text-gray-300">
@@ -581,8 +773,7 @@ def serve_dashboard():
                                         <h3 class="text-base font-black text-white uppercase">${{g.away_team}} @ ${{g.home_team}}</h3>
                                         <span class="text-lg font-mono font-black text-white">${{g.away_actual_runs}} - ${{g.home_actual_runs}}</span>
                                     </div>
-
-                                    <!-- Dedicated Full Game Block -->
+                                    ${{causalBlock}}
                                     <div class="bg-black/60 p-2.5 rounded border border-gray-800 mb-2 space-y-1 text-xs font-mono">
                                         <div class="text-[10px] font-sans font-bold text-gray-400 uppercase tracking-wider flex justify-between">
                                             <span>Full Game Projections</span>
@@ -597,8 +788,6 @@ def serve_dashboard():
                                             <span class="text-yellow-300 font-bold">${{g.away_actual_runs}} - ${{g.home_actual_runs}} (Tot: ${{g.actual_total_runs}})</span>
                                         </div>
                                     </div>
-
-                                    <!-- Dedicated First 5 (F5) Block -->
                                     <div class="bg-black/60 p-2.5 rounded border border-gray-800 mb-2 space-y-1 text-xs font-mono">
                                         <div class="text-[10px] font-sans font-bold text-yellow-400 uppercase tracking-wider">
                                             First 5 Innings (F5)
@@ -615,7 +804,6 @@ def serve_dashboard():
                                 </div>
                             `;
                         }} else {{
-                            // Upcoming Matchup Card
                             card.innerHTML = `
                                 <div>
                                     <div class="flex justify-between items-center mb-2">
@@ -626,8 +814,7 @@ def serve_dashboard():
                                     <div class="text-xs text-gray-400 space-y-0.5 mb-2.5">
                                         <div class="truncate">SP: <span class="text-gray-200">${{g.away_sp}}</span> vs <span class="text-gray-200">${{g.home_sp}}</span></div>
                                     </div>
-
-                                    <!-- Dedicated Full Game Block -->
+                                    ${{causalBlock}}
                                     <div class="bg-black/60 p-2.5 rounded border border-gray-800 mb-2 space-y-1 text-xs font-mono">
                                         <div class="text-[10px] font-sans font-bold text-gray-400 uppercase tracking-wider flex justify-between">
                                             <span>Full Game Projection</span>
@@ -642,8 +829,6 @@ def serve_dashboard():
                                             <span>Away ${{g.pregame_prob_away}}% • Home ${{g.pregame_prob_home}}%</span>
                                         </div>
                                     </div>
-
-                                    <!-- Dedicated F5 Block -->
                                     <div class="bg-black/60 p-2.5 rounded border border-gray-800 space-y-1 text-xs font-mono">
                                         <div class="text-[10px] font-sans font-bold text-yellow-400 uppercase tracking-wider">
                                             First 5 Innings (F5) Projection
@@ -666,7 +851,7 @@ def serve_dashboard():
                     document.getElementById('games-total-counter').textContent = `${{filteredGames.length}} Matchups`;
                 }}
 
-                const secBatters = document.getElementById('section-batters');
+                // 2. Batters Table
                 if (currentMarket === 'f5' || currentMarket === 'moneyline') {{
                     secBatters.classList.add('hidden');
                 }} else {{
@@ -685,14 +870,14 @@ def serve_dashboard():
                             <td class="py-2.5 px-3 text-right text-white">${{b.xhits}}</td>
                             <td class="py-2.5 px-3.5 text-right font-bold text-emerald-400">${{b.p_0_5}}%</td>
                             <td class="py-2.5 px-3.5 text-right font-bold text-cyan-400">${{b.p_1_5}}%</td>
-                            <td class="py-2.5 px-3.5 text-right text-gray-400">${{b.p_2_5}}%</td>
+                            <td class="py-2.5 px-3 text-right text-gray-400">${{b.p_2_5}}%</td>
                         `;
                         bTable.appendChild(tr);
                     }});
                     document.getElementById('batters-total-counter').textContent = `${{filteredBatters.length}} Batters`;
                 }}
 
-                const secSgp = document.getElementById('section-sgp');
+                // 3. SGP Table
                 if (currentMarket === 'batters' || currentMarket === 'f5' || currentMarket === 'moneyline') {{
                     secSgp.classList.add('hidden');
                 }} else {{

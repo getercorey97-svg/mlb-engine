@@ -519,3 +519,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# --- AUTONOMOUS DISCOVERY AGENT HOOK ---
+try:
+    import subprocess
+    subprocess.run(['python', 'discovery_agent.py'], check=False)
+    print('[PIPELINE] Autonomous discovery agent cycle executed successfully.')
+except Exception as _e:
+    print(f'[PIPELINE DISCOVERY ERROR] {_e}')
+
