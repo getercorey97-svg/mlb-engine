@@ -21,23 +21,44 @@ def run_pitcher_props():
     conn = get_db_connection()
     c = conn.cursor()
 
-    games = c.execute("""
-        SELECT game_pk, away_team, home_team, away_sp, home_sp, umpire_k_mod
+    # Dynamic Column Resolution for Daily_Lineups
+    dl_cols = [r[1] for r in c.execute("PRAGMA table_info(Daily_Lineups)").fetchall()]
+    if not dl_cols:
+        print("[PITCHER PROPS] Daily_Lineups table not found.")
+        conn.close()
+        return
+
+    away_col = "away_pitcher" if "away_pitcher" in dl_cols else ("away_sp" if "away_sp" in dl_cols else None)
+    home_col = "home_pitcher" if "home_pitcher" in dl_cols else ("home_sp" if "home_sp" in dl_cols else None)
+    status_col = "status" if "status" in dl_cols else ("lineup_status" if "lineup_status" in dl_cols else None)
+    ump_col = "umpire_k_mod" if "umpire_k_mod" in dl_cols else None
+
+    where_clause = f"WHERE {status_col} != 'Final'" if status_col else ""
+    query = f"""
+        SELECT game_pk, away_team, home_team, 
+               {away_col if away_col else "''"} AS away_sp, 
+               {home_col if home_col else "''"} AS home_sp,
+               {ump_col if ump_col else "1.000"} AS umpire_k_mod
         FROM Daily_Lineups
-        WHERE lineup_status IN ('Confirmed', 'Pending')
-    """).fetchall()
+        {where_clause}
+    """
+    games = c.execute(query).fetchall()
 
     if not games:
-        print("[PITCHER PROPS] No active games found in Daily_Lineups.")
+        print("[PITCHER PROPS] No scheduled matchups found in Daily_Lineups.")
         conn.close()
         return
 
     c.execute("DELETE FROM Pitcher_K_Forecasts")
 
+    # Dynamic Column Resolution for Pitcher_Stats
+    ps_cols = [r[1] for r in c.execute("PRAGMA table_info(Pitcher_Stats)").fetchall()]
+    p_name_col = "pitcher_name" if "pitcher_name" in ps_cols else ("player_name" if "player_name" in ps_cols else "last_name")
+
     total_pitchers = 0
     for g in games:
         pk = g["game_pk"]
-        ump_k_mod = float(g["umpire_k_mod"]) if "umpire_k_mod" in g.keys() and g["umpire_k_mod"] else 1.000
+        ump_k_mod = float(g["umpire_k_mod"]) if g["umpire_k_mod"] else 1.000
 
         pairings = [
             (g["away_sp"], g["away_team"], g["home_team"]),
@@ -45,14 +66,16 @@ def run_pitcher_props():
         ]
 
         for sp_name, team, opp_team in pairings:
-            if not sp_name or sp_name == "TBD":
+            if not sp_name or sp_name in ("TBD", "Unknown", ""):
                 continue
 
-            sp_row = c.execute("""
+            # Query Pitcher Kinematics with flexible name matching
+            sp_row = c.execute(f"""
                 SELECT k_modifier, whiff_rate, pitches_per_bf, sample_starts 
                 FROM Pitcher_Stats 
-                WHERE pitcher_name = ?
-            """, (sp_name,)).fetchone()
+                WHERE {p_name_col} = ? OR ? LIKE '%' || {p_name_col}
+                LIMIT 1
+            """, (sp_name, sp_name)).fetchone()
 
             k_mod = float(sp_row["k_modifier"]) if sp_row and sp_row["k_modifier"] else 1.000
             p_bf = float(sp_row["pitches_per_bf"]) if sp_row and sp_row["pitches_per_bf"] else 3.90
@@ -60,20 +83,26 @@ def run_pitcher_props():
 
             sp_base_k = np.clip(p_whiff * 0.92, 0.12, 0.38) * k_mod
 
-            lineup_rows = c.execute("""
-                SELECT AVG(k_rate) as avg_k 
-                FROM Daily_Batters 
-                WHERE game_pk = ? AND team_name = ? AND is_starter = 1
-            """, (pk, opp_team)).fetchone()
-            
-            opp_k_rate = float(lineup_rows["avg_k"]) if lineup_rows and lineup_rows["avg_k"] else LEAGUE_K_RATE
+            # Fetch Opposing Lineup Average K% if Daily_Batters exists
+            opp_k_rate = LEAGUE_K_RATE
+            tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "Daily_Batters" in tables:
+                db_cols = [r[1] for r in c.execute("PRAGMA table_info(Daily_Batters)").fetchall()]
+                if "k_rate" in db_cols:
+                    lineup_rows = c.execute("""
+                        SELECT AVG(k_rate) as avg_k 
+                        FROM Daily_Batters 
+                        WHERE game_pk = ? AND team_name = ?
+                    """, (pk, opp_team)).fetchone()
+                    if lineup_rows and lineup_rows["avg_k"]:
+                        opp_k_rate = float(lineup_rows["avg_k"])
 
             matchup_k_rate = calculate_log5_k(sp_base_k, opp_k_rate) * ump_k_mod
 
             expected_pitches = 88.0
             expected_bf = expected_pitches / p_bf
 
-            # Kinematic fatigue TTOP penalty after pitch 65
+            # Fatigue TTOP Penalty past pitch 65
             fatigue_penalty = -0.0015 * max(0.0, expected_pitches - 65.0)
             adjusted_k_rate = max(0.05, matchup_k_rate + fatigue_penalty)
 
