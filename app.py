@@ -798,7 +798,7 @@ def serve_dashboard():
                 secLab.classList.toggle('hidden', currentMarket !== 'lab');
 
                 const filteredGames = gamesData.filter(g => currentStage === 'all' || g.stage === currentStage);
-                const activePks = new Set(filteredGames.map(g => g.game_pk));
+                const activePks = new Set(filteredGames.map(g => String(g.game_pk || g.pk || g.gamePk || "")));
 
                 // 1. RENDER GAME MATCHUP CARDS WITH PAIRED PITCHER & BATTER PROPS
                 if (currentMarket === 'all' || currentMarket === 'f5' || currentMarket === 'moneyline') {{
@@ -1023,7 +1023,7 @@ def serve_dashboard():
                 if (currentMarket === 'pitchers') {{
                     const pTable = document.getElementById('pitchers-table');
                     pTable.innerHTML = '';
-                    const filteredPitchers = pitchersData.filter(p => activePks.has(p.game_pk));
+                    const filteredPitchers = pitchersData.filter(p => activePks.has(String(p.game_pk || p.pk || p.gamePk || "")));
                     filteredPitchers.forEach(p => {{
                         const tr = document.createElement('tr');
                         tr.className = "hover:bg-gray-800/60 transition-colors";
@@ -1055,7 +1055,7 @@ def serve_dashboard():
                 if (currentMarket === 'batters') {{
                     const bTable = document.getElementById('batters-table');
                     bTable.innerHTML = '';
-                    const filteredBatters = battersData.filter(b => activePks.has(b.game_pk));
+                    const filteredBatters = battersData.filter(b => activePks.has(String(b.game_pk || b.pk || b.gamePk || "")));
                     filteredBatters.slice(0, 45).forEach(b => {{
                         const tr = document.createElement('tr');
                         tr.className = "hover:bg-gray-800/60 transition-colors";
@@ -1086,7 +1086,7 @@ def serve_dashboard():
                 if (currentMarket === 'sgp') {{
                     const sTable = document.getElementById('sgp-table');
                     sTable.innerHTML = '';
-                    const filteredSgps = sgpData.filter(s => activePks.has(s.game_pk));
+                    const filteredSgps = sgpData.filter(s => activePks.has(String(s.game_pk || s.pk || s.gamePk || "")));
                     filteredSgps.slice(0, 30).forEach(s => {{
                         const tr = document.createElement('tr');
                         tr.className = "hover:bg-gray-800/60 transition-colors";
