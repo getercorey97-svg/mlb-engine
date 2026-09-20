@@ -59,7 +59,7 @@ def serve_dashboard():
 
     live_schedule = fetch_mlb_slate_and_scores()
 
-    # Scope strictly to active 3-day window to prevent historical archives from inflating Upcoming counts
+    # Scope strictly to active 3-day window
     active_pks = set(live_schedule.keys()) if live_schedule else set(daily_lineups.keys())
 
     games = []
@@ -165,15 +165,23 @@ def serve_dashboard():
     stage_order = {"live": 0, "upcoming": 1, "final": 2}
     games.sort(key=lambda x: stage_order.get(x["stage"], 3))
 
-    # 2. Pitcher Strikeout Props with Post-Mortem Logs
+    # 2. Pitcher Strikeout Props with Schema-Safe Post-Mortem Join
     pitchers = []
     if "Pitcher_K_Forecasts" in tables:
-        raw_k = c.execute("""
-            SELECT f.*, p.actual_k, p.actual_pitches, p.over_hit
-            FROM Pitcher_K_Forecasts f
-            LEFT JOIN Pitcher_Post_Mortem_Logs p ON f.game_pk = p.game_pk AND f.pitcher_name = p.pitcher_name
-            ORDER BY f.expected_k DESC
-        """).fetchall() if "Pitcher_Post_Mortem_Logs" in tables else c.execute("SELECT * FROM Pitcher_K_Forecasts ORDER BY expected_k DESC").fetchall()
+        pk_cols = [r[1] for r in c.execute("PRAGMA table_info(Pitcher_Post_Mortem_Logs)").fetchall()] if "Pitcher_Post_Mortem_Logs" in tables else []
+        act_k_col = "p.actual_k" if "actual_k" in pk_cols else "NULL as actual_k"
+        act_p_col = "p.actual_pitches" if "actual_pitches" in pk_cols else "NULL as actual_pitches"
+
+        if "Pitcher_Post_Mortem_Logs" in tables:
+            raw_k = c.execute(f"""
+                SELECT f.*, {act_k_col}, {act_p_col}
+                FROM Pitcher_K_Forecasts f
+                LEFT JOIN Pitcher_Post_Mortem_Logs p ON f.game_pk = p.game_pk AND f.pitcher_name = p.pitcher_name
+                ORDER BY f.expected_k DESC
+            """).fetchall()
+        else:
+            raw_k = c.execute("SELECT * FROM Pitcher_K_Forecasts ORDER BY expected_k DESC").fetchall()
+
         for r in raw_k:
             d_k = dict(r)
             pitchers.append({
@@ -190,15 +198,23 @@ def serve_dashboard():
                 "actual_pitches": d_k.get("actual_pitches")
             })
 
-    # 3. Batter Hit Props with Post-Mortem Logs
+    # 3. Batter Hit Props with Schema-Safe Post-Mortem Join (Resolves hit_over_0_5 issue)
     batters = []
     if "Batter_Hit_Forecasts" in tables:
-        raw_b = c.execute("""
-            SELECT b.*, p.actual_hits, p.actual_ab, p.hit_over_0_5
-            FROM Batter_Hit_Forecasts b
-            LEFT JOIN Batter_Post_Mortem_Logs p ON b.game_pk = p.game_pk AND b.player_name = p.player_name
-            ORDER BY b.over_0_5_hit_prob DESC
-        """).fetchall() if "Batter_Post_Mortem_Logs" in tables else c.execute("SELECT * FROM Batter_Hit_Forecasts ORDER BY over_0_5_hit_prob DESC").fetchall()
+        bp_cols = [r[1] for r in c.execute("PRAGMA table_info(Batter_Post_Mortem_Logs)").fetchall()] if "Batter_Post_Mortem_Logs" in tables else []
+        act_h_col = "p.actual_hits" if "actual_hits" in bp_cols else "NULL as actual_hits"
+        act_ab_col = "p.actual_ab" if "actual_ab" in bp_cols else "NULL as actual_ab"
+
+        if "Batter_Post_Mortem_Logs" in tables:
+            raw_b = c.execute(f"""
+                SELECT b.*, {act_h_col}, {act_ab_col}
+                FROM Batter_Hit_Forecasts b
+                LEFT JOIN Batter_Post_Mortem_Logs p ON b.game_pk = p.game_pk AND b.player_name = p.player_name
+                ORDER BY b.over_0_5_hit_prob DESC
+            """).fetchall()
+        else:
+            raw_b = c.execute("SELECT * FROM Batter_Hit_Forecasts ORDER BY over_0_5_hit_prob DESC").fetchall()
+
         for r in raw_b:
             d_b = dict(r)
             batters.append({
@@ -428,7 +444,7 @@ def serve_dashboard():
 
             function buildTicker() {{
                 const items = [];
-                // Live games first
+                // Live games
                 gamesData.filter(g => g.stage === 'live').forEach(g => {{
                     items.push(`🔴 LIVE: ${{g.away_team}} ${{g.away_actual_runs}}, ${{g.home_team}} ${{g.home_actual_runs}} (${{g.inning_state}} ${{g.current_inning}}) | Live Win: ${{g.home_team}} ${{g.live_prob_home}}% | Proj Runs: ${{g.live_exp_away}} - ${{g.live_exp_home}}`);
                 }});
