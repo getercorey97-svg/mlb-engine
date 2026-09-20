@@ -96,7 +96,7 @@ def serve_dashboard():
             if rd.get("game_pk"): daily_lineups[rd["game_pk"]] = rd
 
     live_schedule = fetch_mlb_slate_and_scores()
-    active_pks = set(list(live_schedule.keys()) + list(daily_lineups.keys()))
+    active_pks = set(live_schedule.keys()) if live_schedule else set(daily_lineups.keys())
 
     games = []
     for pk in active_pks:
