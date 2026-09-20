@@ -11,8 +11,7 @@ from pybaseball import (
     statcast_pitcher_exitvelo_barrels,
     statcast_pitcher_arsenal_stats,
     statcast_batter_expected_stats,
-    statcast_batter_exitvelo_barrels,
-    statcast_batter_bat_tracking
+    statcast_batter_exitvelo_barrels
 )
 
 cache.enable()
@@ -139,11 +138,12 @@ def ingest_pitcher_data(conn):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (name, c_name, k_pct, bb_pct, p_per_bf, p_per_g, csw_pct, swstr_pct, xera, xba, hardhit, barrel))
 
+        # Update Pitcher_Stats with clean_name support
         c.execute("""
             UPDATE Pitcher_Stats
             SET whiff_rate = ?, pitches_per_bf = ?
-            WHERE pitcher_name = ? OR clean_name = ?
-        """, (round(swstr_pct * 2.1, 3), p_per_bf, name, c_name))
+            WHERE clean_name = ? OR pitcher_name = ?
+        """, (round(swstr_pct * 2.1, 3), p_per_bf, c_name, name))
 
     conn.commit()
     print(f"[SUCCESS] Ingested advanced pitching metrics for {len(fg_pitch)} pitchers.")
@@ -156,7 +156,7 @@ def ingest_batter_data(conn):
         print(f"[WARN] FanGraphs batting pull failed: {e}")
         return
 
-    print("[PYBASEBALL] Querying Statcast Batter Expected Stats & Bat Tracking...")
+    print("[PYBASEBALL] Querying Statcast Batter Expected Stats & Exit Velo...")
     try:
         savant_b_exp = statcast_batter_expected_stats(CURRENT_YEAR, minPA=1)
         savant_b_ev = statcast_batter_exitvelo_barrels(CURRENT_YEAR, minBBE=1)

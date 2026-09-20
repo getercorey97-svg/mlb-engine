@@ -63,6 +63,7 @@ def run_pitcher_props():
 
     ps_cols = [r[1] for r in c.execute("PRAGMA table_info(Pitcher_Stats)").fetchall()]
     p_name_col = "pitcher_name" if "pitcher_name" in ps_cols else ("player_name" if "player_name" in ps_cols else "last_name")
+    has_clean_name = "clean_name" in ps_cols
 
     total_pitchers = 0
     for g in games:
@@ -84,7 +85,7 @@ def run_pitcher_props():
             expected_pitches = 88.0
             sp_base_k = LEAGUE_K_RATE
 
-            # 1. Primary Source: Ingest Pybaseball / Statcast Advanced Table
+            # 1. Primary Source: Pitcher_Advanced_Metrics
             adv_row = None
             if has_adv:
                 adv_row = c.execute("""
@@ -94,13 +95,21 @@ def run_pitcher_props():
                     LIMIT 1
                 """, (c_name, sp_name)).fetchone()
 
-            # 2. Check Empirical Learning Modifiers in Pitcher_Stats
-            sp_row = c.execute(f"""
-                SELECT k_modifier, whiff_rate, pitches_per_bf 
-                FROM Pitcher_Stats 
-                WHERE {p_name_col} = ? OR clean_name = ? OR ? LIKE '%' || {p_name_col}
-                LIMIT 1
-            """, (sp_name, c_name, sp_name)).fetchone()
+            # 2. Resilient Pitcher_Stats Query
+            if has_clean_name:
+                sp_row = c.execute(f"""
+                    SELECT k_modifier, whiff_rate, pitches_per_bf 
+                    FROM Pitcher_Stats 
+                    WHERE {p_name_col} = ? OR clean_name = ? OR ? LIKE '%' || {p_name_col}
+                    LIMIT 1
+                """, (sp_name, c_name, sp_name)).fetchone()
+            else:
+                sp_row = c.execute(f"""
+                    SELECT k_modifier, whiff_rate, pitches_per_bf 
+                    FROM Pitcher_Stats 
+                    WHERE {p_name_col} = ? OR ? LIKE '%' || {p_name_col}
+                    LIMIT 1
+                """, (sp_name, sp_name)).fetchone()
 
             if sp_row and sp_row["k_modifier"]:
                 k_mod = float(sp_row["k_modifier"])
@@ -130,7 +139,7 @@ def run_pitcher_props():
             matchup_k_rate = calculate_log5_k(sp_base_k, opp_k_rate) * ump_k_mod
             expected_bf = expected_pitches / p_bf
 
-            # Fatigue Penalty past pitch 65
+            # Fatigue TTOP Penalty past pitch 65
             fatigue_penalty = -0.0015 * max(0.0, expected_pitches - 65.0)
             adjusted_k_rate = max(0.05, matchup_k_rate + fatigue_penalty)
 
