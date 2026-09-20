@@ -22,29 +22,42 @@ def run_cross_market_covariance():
     """)
     c.execute("DELETE FROM Correlated_Market_Forecasts")
 
-    games = c.execute("""
-        SELECT d.game_pk, d.away_team, d.home_team, 
-               m.prob_home_win, m.expected_runs_away, m.expected_runs_home, m.f5_median_runs
-        FROM Daily_Lineups d
-        INNER JOIN Model_Forecasts m ON d.game_pk = m.game_pk
-        WHERE d.lineup_status = 'Confirmed'
-    """).fetchall()
+    # Inspect columns dynamically
+    m_cols = [r[1] for r in c.execute("PRAGMA table_info(Model_Forecasts)").fetchall()]
+    
+    # Identify probability and expected run columns dynamically
+    prob_col = next((col for col in m_cols if 'home' in col.lower() and ('prob' in col.lower() or 'win' in col.lower())), None)
+    if not prob_col:
+        prob_col = next((col for col in m_cols if 'prob' in col.lower() or 'win' in col.lower()), None)
+    
+    exp_away = next((col for col in m_cols if 'away' in col.lower() and ('run' in col.lower() or 'exp' in col.lower())), None)
+    exp_home = next((col for col in m_cols if 'home' in col.lower() and ('run' in col.lower() or 'exp' in col.lower()) and col != prob_col), None)
 
-    if not games:
-        print("[CORRELATION ENGINE] No verified models ready for cross-market analysis.")
-        conn.close()
-        return
+    forecast_rows = c.execute("SELECT * FROM Model_Forecasts").fetchall()
+    forecasts = {row['game_pk']: dict(row) for row in forecast_rows}
+
+    # Match games from Daily_Batters
+    games = c.execute("SELECT DISTINCT game_pk FROM Daily_Batters").fetchall()
 
     inserts = []
-    
     for g in games:
         pk = g['game_pk']
-        away = g['away_team']
-        home = g['home_team']
-        p_home_fg = g['prob_home_win']
+        teams = [r[0] for r in c.execute("SELECT DISTINCT team_name FROM Daily_Batters WHERE game_pk = ?", (pk,)).fetchall()]
+        if len(teams) < 2:
+            continue
+        
+        away, home = teams[0], teams[1]
+        m = forecasts.get(pk, {})
+        
+        # Extract model probabilities
+        p_home_fg = float(m.get(prob_col, 0.50)) if prob_col else 0.50
         p_away_fg = 1.0 - p_home_fg
-        exp_total = g['expected_runs_away'] + g['expected_runs_home']
+        
+        runs_a = float(m.get(exp_away, 4.5)) if exp_away else 4.5
+        runs_h = float(m.get(exp_home, 4.5)) if exp_home else 4.5
+        exp_total = runs_a + runs_h
 
+        # Correlation 1: ML + Total Copula
         p_over_8_5 = 1.0 / (1.0 + np.exp(-0.45 * (exp_total - 8.5)))
         rho_away_over = 0.18
         p_away_and_over = (p_away_fg * p_over_8_5) + (rho_away_over * np.sqrt(p_away_fg * (1 - p_away_fg) * p_over_8_5 * (1 - p_over_8_5)))
@@ -58,6 +71,7 @@ def run_cross_market_covariance():
             round(float(edge_away_over), 4)
         ))
 
+        # Correlation 2: Top Batter Hit + Team ML SGP
         top_batters = c.execute("""
             SELECT player_name, team_name, over_0_5_hit_prob, batting_order
             FROM Batter_Hit_Forecasts
@@ -75,7 +89,7 @@ def run_cross_market_covariance():
             uncorrelated = p_hit * p_team_win
             edge_sgp = joint_hit_win - uncorrelated
 
-            if edge_sgp > 0.03:
+            if edge_sgp > 0.02:
                 inserts.append((
                     pk, away, home, 'Batter Hit + Team ML',
                     f"{b_name} Over 0.5 Hits", f"{b_team} ML",

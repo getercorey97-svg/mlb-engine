@@ -13,19 +13,31 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
-def simulate_team_lineup_paths(cursor, game_pk, team_name, opp_sp_modifier, bullpen_fatigue, n_sims=10000):
+def get_team_offense_rating(cursor, team_name):
+    """Safely extracts team offense rating regardless of exact table column naming."""
+    try:
+        cols = [r[1] for r in cursor.execute("PRAGMA table_info(Team_Offense)").fetchall()]
+        val_col = next((c for c in cols if c.lower() not in ['team_name', 'id', 'updated_at']), None)
+        if val_col:
+            row = cursor.execute(f"SELECT {val_col} FROM Team_Offense WHERE team_name = ?", (team_name,)).fetchone()
+            if row and row[0]:
+                return float(row[0])
+    except Exception:
+        pass
+    return 0.940
+
+def simulate_team_lineup_paths(cursor, game_pk, team_name, opp_sp_modifier, bullpen_fatigue, n_sims=5000):
     batters = cursor.execute("""
         SELECT player_name, batting_order 
         FROM Daily_Batters 
-        WHERE game_pk = ? AND team_name = ? AND is_starter = 1
+        WHERE game_pk = ? AND team_name = ?
         ORDER BY batting_order ASC
     """, (game_pk, team_name)).fetchall()
 
     if len(batters) < 9:
         return {}
 
-    team_row = cursor.execute("SELECT offense_rating FROM Team_Offense WHERE team_name = ?", (team_name,)).fetchone()
-    base_team_offense = team_row['offense_rating'] if team_row else 0.940
+    base_team_offense = get_team_offense_rating(cursor, team_name)
 
     player_stats = {b['batting_order']: {'name': b['player_name'], 'hits': np.zeros(n_sims), 'pa': np.zeros(n_sims), 'ab': np.zeros(n_sims)} for b in batters}
 
@@ -94,32 +106,28 @@ def run_batter_props_engine():
         )
     """)
 
-    games = c.execute("""
-        SELECT game_pk, away_team, home_team, away_sp, home_sp, 
-               away_sp_modifier, home_sp_modifier, bullpen_fatigue_away, bullpen_fatigue_home
-        FROM Daily_Lineups
-        WHERE lineup_status = 'Confirmed'
-    """).fetchall()
+    c.execute("DELETE FROM Batter_Hit_Forecasts")
 
+    games = c.execute("SELECT DISTINCT game_pk FROM Daily_Batters").fetchall()
     if not games:
-        print("[CORRELATED PROPS] No confirmed games found in Daily_Lineups.")
+        print("[CORRELATED PROPS] No active games found in Daily_Batters.")
         conn.close()
         return
 
-    c.execute("DELETE FROM Batter_Hit_Forecasts")
-
     total_batters = 0
-    for g in games:
-        pk = g['game_pk']
-        home_sp_mod = g['home_sp_modifier'] if g['home_sp_modifier'] else 1.000
-        away_sp_mod = g['away_sp_modifier'] if g['away_sp_modifier'] else 1.000
-        home_bp_fatigue = g['bullpen_fatigue_home'] if g['bullpen_fatigue_home'] else 1.000
-        away_bp_fatigue = g['bullpen_fatigue_away'] if g['bullpen_fatigue_away'] else 1.000
+    pks = [g['game_pk'] for g in games]
 
-        away_results = simulate_team_lineup_paths(c, pk, g['away_team'], home_sp_mod, home_bp_fatigue)
-        home_results = simulate_team_lineup_paths(c, pk, g['home_team'], away_sp_mod, away_bp_fatigue)
+    for pk in pks:
+        teams = [r[0] for r in c.execute("SELECT DISTINCT team_name FROM Daily_Batters WHERE game_pk = ?", (pk,)).fetchall()]
+        if len(teams) < 2:
+            continue
+        
+        away_team, home_team = teams[0], teams[1]
+        
+        away_results = simulate_team_lineup_paths(c, pk, away_team, 1.0, 1.0)
+        home_results = simulate_team_lineup_paths(c, pk, home_team, 1.0, 1.0)
 
-        for side_data, team_name in [(away_results, g['away_team']), (home_results, g['home_team'])]:
+        for side_data, team_name in [(away_results, away_team), (home_results, home_team)]:
             for order, stats in side_data.items():
                 pa_mean = float(np.mean(stats['pa']))
                 ab_mean = float(np.mean(stats['ab']))
