@@ -1,9 +1,15 @@
-name: MLB Engine & Live Monitor Pipeline
+name: Unified MLB Engine Pipeline
 
 on:
   schedule:
-    # Multiple slates: 15:00, 18:00, 21:00, 00:00, 03:00 UTC
-    - cron: '0 15,18,21,0,3 * * *'
+    # 06:00 UTC (2:00 AM EDT): Overnight post-mortem, completed linescore ingest, EWMA learning
+    - cron: '0 6 * * *'
+    # 15:00 UTC (11:00 AM EDT): Morning schedule ingest, probable starters, initial 50k Monte Carlo
+    - cron: '0 15 * * *'
+    # 19:30 UTC (3:30 PM EDT): Afternoon slate lineup verification & initial batter hit props
+    - cron: '30 19 * * *'
+    # 22:30 UTC (6:30 PM EDT): Main slate lineup lock, 270+ batter props & cross-market SGPs
+    - cron: '30 22 * * *'
   workflow_dispatch:
 
 permissions:
@@ -15,6 +21,9 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -27,7 +36,7 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            pip install pandas numpy requests scikit-learn xgboost lightgbm pybaseball
+            pip install requests urllib3 numpy pandas scipy scikit-learn xgboost fastapi uvicorn
           fi
 
       - name: Purge Bytecode Cache Before Run
@@ -39,7 +48,8 @@ jobs:
       - name: Run Unified Orchestration Pipeline
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-        run: python run_pipeline.py
+        run: |
+          python run_pipeline.py
 
       - name: Run Dedicated F5 & Pitcher Props Engine
         run: |
@@ -65,17 +75,20 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
           find . -name "*.pyc" -delete 2>/dev/null || true
-          
-          # Stage documentation, operational database, full-game, and F5 prop outputs
+
+          # Pull any remote code changes before staging database artifacts
+          git fetch origin main
+          git pull --rebase --autostash origin main || true
+
+          # Stage documentation, operational database, and forecast outputs
           [ -f README.md ] && git add README.md
           [ -f PREDICTIONS_TODAY.md ] && git add PREDICTIONS_TODAY.md
           [ -f F5_PREDICTIONS_TODAY.md ] && git add F5_PREDICTIONS_TODAY.md
           [ -f mlb_engine.db ] && git add mlb_engine.db
           [ -f mlb_forecasts_2026.csv ] && git add mlb_forecasts_2026.csv
-          
+
           if ! git diff-index --quiet HEAD; then
             git commit -m "Auto-update full-game, F5 props, README, and operational database [skip ci]"
-            git pull --rebase --autostash
             git push origin main
           else
             echo "No changes to commit."
