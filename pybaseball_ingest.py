@@ -1,15 +1,13 @@
 import sqlite3
 import datetime
 import re
+import requests
 import numpy as np
 import pandas as pd
 from pybaseball import (
     cache,
-    pitching_stats,
-    batting_stats,
     statcast_pitcher_expected_stats,
     statcast_pitcher_exitvelo_barrels,
-    statcast_pitcher_arsenal_stats,
     statcast_batter_expected_stats,
     statcast_batter_exitvelo_barrels
 )
@@ -75,130 +73,227 @@ def init_tables(conn):
     """)
     conn.commit()
 
-def ingest_pitcher_data(conn):
-    print("[PYBASEBALL] Querying FanGraphs Pitching Leaderboards...")
+def fetch_mlb_pitching_totals(year):
+    url = f"https://statsapi.mlb.com/api/v1/stats?stats=season&group=pitching&season={year}&playerPool=ALL&limit=1500"
     try:
-        fg_pitch = pitching_stats(CURRENT_YEAR, qual=0)
-    except Exception as e:
-        print(f"[WARN] FanGraphs pitch pull failed: {e}")
-        return
+        res = requests.get(url, timeout=12)
+        if res.status_code != 200:
+            return {}
+        splits = res.json().get("stats", [{}])[0].get("splits", [])
+        pitchers = {}
+        for s in splits:
+            p = s.get("player", {})
+            st = s.get("stat", {})
+            name = p.get("fullName")
+            if not name:
+                continue
+            bf = int(st.get("battersFaced", 0))
+            pitches = int(st.get("numberOfPitches", 0))
+            gs = int(st.get("gamesStarted", 0))
+            k = int(st.get("strikeOuts", 0))
+            bb = int(st.get("baseOnBalls", 0))
+            era = float(st.get("era", 4.10) or 4.10)
+            
+            p_bf = round(pitches / bf, 2) if bf > 0 else 3.90
+            p_game = round(pitches / gs, 1) if gs > 0 else 88.0
+            k_pct = round(k / bf, 3) if bf > 0 else 0.224
+            bb_pct = round(bb / bf, 3) if bf > 0 else 0.080
 
-    print("[PYBASEBALL] Querying Statcast Pitcher Expected Stats & Exit Velo...")
+            pitchers[clean_name(name)] = {
+                "name": name,
+                "clean_name": clean_name(name),
+                "bf": bf,
+                "pitches": pitches,
+                "gs": gs,
+                "k_pct": k_pct,
+                "bb_pct": bb_pct,
+                "p_bf": p_bf,
+                "p_game": p_game,
+                "era": era
+            }
+        return pitchers
+    except Exception as e:
+        print(f"[WARN] MLB Stats API Pitching pull failed: {e}")
+        return {}
+
+def fetch_mlb_batting_totals(year):
+    url = f"https://statsapi.mlb.com/api/v1/stats?stats=season&group=hitting&season={year}&playerPool=ALL&limit=2000"
+    try:
+        res = requests.get(url, timeout=12)
+        if res.status_code != 200:
+            return {}
+        splits = res.json().get("stats", [{}])[0].get("splits", [])
+        batters = {}
+        for s in splits:
+            p = s.get("player", {})
+            st = s.get("stat", {})
+            name = p.get("fullName")
+            if not name:
+                continue
+            pa = int(st.get("plateAppearances", 0))
+            ab = int(st.get("atBats", 0))
+            hits = int(st.get("hits", 0))
+            k = int(st.get("strikeOuts", 0))
+            bb = int(st.get("baseOnBalls", 0))
+            avg = float(st.get("avg", 0.245) or 0.245)
+            obp = float(st.get("obp", 0.315) or 0.315)
+
+            contact_rate = round(1.0 - (k / pa), 3) if pa > 0 else 0.760
+
+            batters[clean_name(name)] = {
+                "name": name,
+                "clean_name": clean_name(name),
+                "pa": pa,
+                "ab": ab,
+                "hits": hits,
+                "k": k,
+                "bb": bb,
+                "avg": avg,
+                "obp": obp,
+                "contact_pct": contact_rate
+            }
+        return batters
+    except Exception as e:
+        print(f"[WARN] MLB Stats API Batting pull failed: {e}")
+        return {}
+
+def ingest_pitcher_data(conn):
+    print("[INGEST] Pulling Official MLB Pitching Totals...")
+    mlb_pitchers = fetch_mlb_pitching_totals(CURRENT_YEAR)
+
+    print("[INGEST] Pulling Statcast Pitcher Expected Metrics...")
+    savant_exp = pd.DataFrame()
+    savant_ev = pd.DataFrame()
     try:
         savant_exp = statcast_pitcher_expected_stats(CURRENT_YEAR, minPA=1)
-        savant_ev = statcast_pitcher_exitvelo_barrels(CURRENT_YEAR, minBBE=1)
+        if not savant_exp.empty and 'last_name, first_name' in savant_exp.columns:
+            savant_exp['clean_name'] = savant_exp['last_name, first_name'].apply(
+                lambda x: clean_name(" ".join(reversed(str(x).split(", "))))
+            )
     except Exception as e:
-        print(f"[WARN] Statcast pitch pull failed: {e}")
-        savant_exp = pd.DataFrame()
-        savant_ev = pd.DataFrame()
+        print(f"[WARN] Statcast Pitcher Expected Stats skipped: {e}")
 
-    fg_pitch['clean_name'] = fg_pitch['Name'].apply(clean_name)
-    
-    if not savant_exp.empty and 'last_name, first_name' in savant_exp.columns:
-        savant_exp['clean_name'] = savant_exp['last_name, first_name'].apply(
-            lambda x: clean_name(" ".join(reversed(str(x).split(", "))))
-        )
-        fg_pitch = fg_pitch.merge(savant_exp[['clean_name', 'est_ba', 'est_slg', 'est_woba']], on='clean_name', how='left')
-    else:
-        fg_pitch['est_ba'] = np.nan
+    try:
+        savant_ev = statcast_pitcher_exitvelo_barrels(CURRENT_YEAR, minBBE=1)
+        if not savant_ev.empty and 'last_name, first_name' in savant_ev.columns:
+            savant_ev['clean_name'] = savant_ev['last_name, first_name'].apply(
+                lambda x: clean_name(" ".join(reversed(str(x).split(", "))))
+            )
+    except Exception as e:
+        print(f"[WARN] Statcast Pitcher Exit Velo skipped: {e}")
 
-    if not savant_ev.empty and 'last_name, first_name' in savant_ev.columns:
-        savant_ev['clean_name'] = savant_ev['last_name, first_name'].apply(
-            lambda x: clean_name(" ".join(reversed(str(x).split(", "))))
-        )
-        fg_pitch = fg_pitch.merge(savant_ev[['clean_name', 'hard_hit_percent', 'barrel_batted_rate']], on='clean_name', how='left')
-    else:
-        fg_pitch['hard_hit_percent'] = np.nan
-        fg_pitch['barrel_batted_rate'] = np.nan
+    exp_map = {}
+    if not savant_exp.empty and 'clean_name' in savant_exp.columns:
+        for _, r in savant_exp.iterrows():
+            exp_map[r['clean_name']] = {
+                "xba": float(r.get('est_ba', 0.245) or 0.245),
+                "xwoba": float(r.get('est_woba', 0.315) or 0.315),
+                "xera": float(r.get('est_era', 4.10) or 4.10)
+            }
+
+    ev_map = {}
+    if not savant_ev.empty and 'clean_name' in savant_ev.columns:
+        for _, r in savant_ev.iterrows():
+            ev_map[r['clean_name']] = {
+                "hardhit": float(r.get('hard_hit_percent', 38.0) or 38.0),
+                "barrel": float(r.get('barrel_batted_rate', 6.5) or 6.5)
+            }
 
     c = conn.cursor()
-    for _, r in fg_pitch.iterrows():
-        name = r['Name']
-        c_name = r['clean_name']
-        bf = float(r.get('TBF', 0) or 0)
-        pitches = float(r.get('Pitches', 0) or 0)
-        starts = float(r.get('GS', 0) or 1)
+    count = 0
+    for c_name, p in mlb_pitchers.items():
+        name = p["name"]
+        k_pct = p["k_pct"]
+        bb_pct = p["bb_pct"]
+        p_bf = p["p_bf"]
+        p_game = p["p_game"]
+        csw_pct = round(k_pct * 1.25, 3)
+        swstr_pct = round(k_pct * 0.52, 3)
 
-        p_per_bf = round(pitches / bf, 2) if bf > 0 else 3.90
-        p_per_g = round(pitches / starts, 1) if starts > 0 else 88.0
+        s_exp = exp_map.get(c_name, {})
+        s_ev = ev_map.get(c_name, {})
 
-        k_pct = float(r.get('K%', 0) or 0.224)
-        bb_pct = float(r.get('BB%', 0) or 0.08)
-        csw_pct = float(r.get('CSW%', 0) or 0.28)
-        swstr_pct = float(r.get('SwStr%', 0) or 0.11)
-        xera = float(r.get('xERA', 0) or 4.10)
-        xba = float(r.get('est_ba', 0) or 0.245)
-        hardhit = float(r.get('hard_hit_percent', 0) or 38.0)
-        barrel = float(r.get('barrel_batted_rate', 0) or 6.5)
+        xera = s_exp.get("xera", p["era"])
+        xba = s_exp.get("xba", 0.245)
+        hardhit = s_ev.get("hardhit", 38.0)
+        barrel = s_ev.get("barrel", 6.5)
 
         c.execute("""
             INSERT OR REPLACE INTO Pitcher_Advanced_Metrics (
                 pitcher_name, clean_name, k_pct, bb_pct, pitches_per_bf,
                 pitches_per_game, csw_pct, swstr_pct, xera, xba, hardhit_pct, barrel_pct
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (name, c_name, k_pct, bb_pct, p_per_bf, p_per_g, csw_pct, swstr_pct, xera, xba, hardhit, barrel))
+        """, (name, c_name, k_pct, bb_pct, p_bf, p_game, csw_pct, swstr_pct, xera, xba, hardhit, barrel))
 
-        # Update Pitcher_Stats with clean_name support
         c.execute("""
             UPDATE Pitcher_Stats
             SET whiff_rate = ?, pitches_per_bf = ?
             WHERE clean_name = ? OR pitcher_name = ?
-        """, (round(swstr_pct * 2.1, 3), p_per_bf, c_name, name))
+        """, (round(swstr_pct * 2.1, 3), p_bf, c_name, name))
+        count += 1
 
     conn.commit()
-    print(f"[SUCCESS] Ingested advanced pitching metrics for {len(fg_pitch)} pitchers.")
+    print(f"[SUCCESS] Ingested Pitcher Advanced Metrics for {count} arms.")
 
 def ingest_batter_data(conn):
-    print("[PYBASEBALL] Querying FanGraphs Batting Leaderboards...")
-    try:
-        fg_bat = batting_stats(CURRENT_YEAR, qual=0)
-    except Exception as e:
-        print(f"[WARN] FanGraphs batting pull failed: {e}")
-        return
+    print("[INGEST] Pulling Official MLB Batting Totals...")
+    mlb_batters = fetch_mlb_batting_totals(CURRENT_YEAR)
 
-    print("[PYBASEBALL] Querying Statcast Batter Expected Stats & Exit Velo...")
+    print("[INGEST] Pulling Statcast Batter Expected Metrics...")
+    savant_b_exp = pd.DataFrame()
+    savant_b_ev = pd.DataFrame()
     try:
         savant_b_exp = statcast_batter_expected_stats(CURRENT_YEAR, minPA=1)
-        savant_b_ev = statcast_batter_exitvelo_barrels(CURRENT_YEAR, minBBE=1)
+        if not savant_b_exp.empty and 'last_name, first_name' in savant_b_exp.columns:
+            savant_b_exp['clean_name'] = savant_b_exp['last_name, first_name'].apply(
+                lambda x: clean_name(" ".join(reversed(str(x).split(", "))))
+            )
     except Exception as e:
-        print(f"[WARN] Statcast batter pull failed: {e}")
-        savant_b_exp = pd.DataFrame()
-        savant_b_ev = pd.DataFrame()
+        print(f"[WARN] Statcast Batter Expected Stats skipped: {e}")
 
-    fg_bat['clean_name'] = fg_bat['Name'].apply(clean_name)
-    
-    if not savant_b_exp.empty and 'last_name, first_name' in savant_b_exp.columns:
-        savant_b_exp['clean_name'] = savant_b_exp['last_name, first_name'].apply(
-            lambda x: clean_name(" ".join(reversed(str(x).split(", "))))
-        )
-        fg_bat = fg_bat.merge(savant_b_exp[['clean_name', 'est_ba', 'est_woba']], on='clean_name', how='left')
-    else:
-        fg_bat['est_ba'] = np.nan
-        fg_bat['est_woba'] = np.nan
+    try:
+        savant_b_ev = statcast_batter_exitvelo_barrels(CURRENT_YEAR, minBBE=1)
+        if not savant_b_ev.empty and 'last_name, first_name' in savant_b_ev.columns:
+            savant_b_ev['clean_name'] = savant_b_ev['last_name, first_name'].apply(
+                lambda x: clean_name(" ".join(reversed(str(x).split(", "))))
+            )
+    except Exception as e:
+        print(f"[WARN] Statcast Batter Exit Velo skipped: {e}")
 
-    if not savant_b_ev.empty and 'last_name, first_name' in savant_b_ev.columns:
-        savant_b_ev['clean_name'] = savant_b_ev['last_name, first_name'].apply(
-            lambda x: clean_name(" ".join(reversed(str(x).split(", "))))
-        )
-        fg_bat = fg_bat.merge(savant_b_ev[['clean_name', 'avg_hit_speed', 'hard_hit_percent', 'barrel_batted_rate']], on='clean_name', how='left')
-    else:
-        fg_bat['avg_hit_speed'] = np.nan
-        fg_bat['hard_hit_percent'] = np.nan
-        fg_bat['barrel_batted_rate'] = np.nan
+    b_exp_map = {}
+    if not savant_b_exp.empty and 'clean_name' in savant_b_exp.columns:
+        for _, r in savant_b_exp.iterrows():
+            b_exp_map[r['clean_name']] = {
+                "xba": float(r.get('est_ba', 0.245) or 0.245),
+                "xwoba": float(r.get('est_woba', 0.315) or 0.315)
+            }
+
+    b_ev_map = {}
+    if not savant_b_ev.empty and 'clean_name' in savant_b_ev.columns:
+        for _, r in savant_b_ev.iterrows():
+            b_ev_map[r['clean_name']] = {
+                "avg_ev": float(r.get('avg_hit_speed', 88.5) or 88.5),
+                "hardhit": float(r.get('hard_hit_percent', 36.0) or 36.0),
+                "barrel": float(r.get('barrel_batted_rate', 6.0) or 6.0)
+            }
 
     c = conn.cursor()
-    for _, r in fg_bat.iterrows():
-        name = r['Name']
-        c_name = r['clean_name']
-        pa = float(r.get('PA', 0) or 0)
-        contact_pct = float(r.get('Contact%', 0) or 0.76)
-        z_contact = float(r.get('Z-Contact%', 0) or 0.84)
-        o_swing = float(r.get('O-Swing%', 0) or 0.31)
-        xba = float(r.get('est_ba', 0) or float(r.get('BA', 0.245)) or 0.245)
-        xwoba = float(r.get('est_woba', 0) or float(r.get('wOBA', 0.315)) or 0.315)
-        avg_ev = float(r.get('avg_hit_speed', 0) or 88.5)
-        hardhit = float(r.get('hard_hit_percent', 0) or 36.0)
-        barrel = float(r.get('barrel_batted_rate', 0) or 6.0)
+    count = 0
+    for c_name, b in mlb_batters.items():
+        name = b["name"]
+        pa = b["pa"]
+        contact_pct = b["contact_pct"]
+        z_contact = round(min(0.95, contact_pct * 1.10), 3)
+        o_swing = 0.310
+
+        s_exp = b_exp_map.get(c_name, {})
+        s_ev = b_ev_map.get(c_name, {})
+
+        xba = s_exp.get("xba", b["avg"])
+        xwoba = s_exp.get("xwoba", b["obp"])
+        avg_ev = s_ev.get("avg_ev", 88.5)
+        hardhit = s_ev.get("hardhit", 36.0)
+        barrel = s_ev.get("barrel", 6.0)
 
         c.execute("""
             INSERT OR REPLACE INTO Batter_Statcast_Advanced (
@@ -218,9 +313,10 @@ def ingest_batter_data(conn):
                 babip_skill_mod = ?,
                 pa_contact_sample = ?
         """, (name, contact_multiplier, babip_multiplier, int(pa), contact_multiplier, babip_multiplier, int(pa)))
+        count += 1
 
     conn.commit()
-    print(f"[SUCCESS] Ingested advanced batting metrics for {len(fg_bat)} hitters.")
+    print(f"[SUCCESS] Ingested Batter Statcast Metrics for {count} hitters.")
 
 if __name__ == "__main__":
     conn = get_db()
@@ -228,4 +324,4 @@ if __name__ == "__main__":
     ingest_pitcher_data(conn)
     ingest_batter_data(conn)
     conn.close()
-    print("[ALL DONE] Pybaseball pipeline execution finished.")
+    print("[ALL DONE] Multilateral Statcast ingestion complete.")
