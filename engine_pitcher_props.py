@@ -15,13 +15,12 @@ def calculate_log5_k(pitcher_k_rate, lineup_k_rate, lg_k=LEAGUE_K_RATE):
     b = float(lineup_k_rate)
     num = (p * b) / lg_k
     denom = num + (((1.0 - p) * (1.0 - b)) / (1.0 - lg_k))
-    return float(np.clip(num / denom, 0.08, 0.45))
+    return float(np.clip(num / denom, 0.08, 0.48))
 
 def run_pitcher_props():
     conn = get_db_connection()
     c = conn.cursor()
 
-    # Dynamic Column Resolution for Daily_Lineups
     dl_cols = [r[1] for r in c.execute("PRAGMA table_info(Daily_Lineups)").fetchall()]
     if not dl_cols:
         print("[PITCHER PROPS] Daily_Lineups table not found.")
@@ -51,7 +50,6 @@ def run_pitcher_props():
 
     c.execute("DELETE FROM Pitcher_K_Forecasts")
 
-    # Dynamic Column Resolution for Pitcher_Stats
     ps_cols = [r[1] for r in c.execute("PRAGMA table_info(Pitcher_Stats)").fetchall()]
     p_name_col = "pitcher_name" if "pitcher_name" in ps_cols else ("player_name" if "player_name" in ps_cols else "last_name")
 
@@ -69,21 +67,27 @@ def run_pitcher_props():
             if not sp_name or sp_name in ("TBD", "Unknown", ""):
                 continue
 
-            # Query Pitcher Kinematics with flexible name matching
+            # Ingest Latent State from Kalman Filter Table
+            c.execute("INSERT OR IGNORE INTO Pitcher_Kalman_State (pitcher_name, latent_k_modifier, variance_p, process_noise_q) VALUES (?, 1.000, 0.040, 0.0025)", (sp_name,))
+            kalman_row = c.execute("SELECT latent_k_modifier, variance_p, process_noise_q FROM Pitcher_Kalman_State WHERE pitcher_name = ?", (sp_name,)).fetchone()
+            
+            # Prior State Projection: Variance increases with time/gap
+            latent_k_mod = float(kalman_row["latent_k_modifier"])
+            p_prior = float(kalman_row["variance_p"]) + float(kalman_row["process_noise_q"])
+
             sp_row = c.execute(f"""
-                SELECT k_modifier, whiff_rate, pitches_per_bf, sample_starts 
+                SELECT whiff_rate, pitches_per_bf 
                 FROM Pitcher_Stats 
                 WHERE {p_name_col} = ? OR ? LIKE '%' || {p_name_col}
                 LIMIT 1
             """, (sp_name, sp_name)).fetchone()
 
-            k_mod = float(sp_row["k_modifier"]) if sp_row and sp_row["k_modifier"] else 1.000
             p_bf = float(sp_row["pitches_per_bf"]) if sp_row and sp_row["pitches_per_bf"] else 3.90
             p_whiff = float(sp_row["whiff_rate"]) if sp_row and sp_row["whiff_rate"] else 0.245
 
-            sp_base_k = np.clip(p_whiff * 0.92, 0.12, 0.38) * k_mod
+            # Base strikeout capability modified by latent state
+            sp_base_k = np.clip(p_whiff * 0.92, 0.12, 0.38) * latent_k_mod
 
-            # Fetch Opposing Lineup Average K% if Daily_Batters exists
             opp_k_rate = LEAGUE_K_RATE
             tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
             if "Daily_Batters" in tables:
@@ -102,7 +106,7 @@ def run_pitcher_props():
             expected_pitches = 88.0
             expected_bf = expected_pitches / p_bf
 
-            # Fatigue TTOP Penalty past pitch 65
+            # Kinematic fatigue curve: TTOP degradation past pitch 65
             fatigue_penalty = -0.0015 * max(0.0, expected_pitches - 65.0)
             adjusted_k_rate = max(0.05, matchup_k_rate + fatigue_penalty)
 
@@ -127,7 +131,7 @@ def run_pitcher_props():
 
     conn.commit()
     conn.close()
-    print(f"[SUCCESS] Synthesized {total_pitchers} Pitcher Strikeout Projections into Pitcher_K_Forecasts.")
+    print(f"[KALMAN ENGINE] Successfully forecasted {total_pitchers} starting pitcher strikeout lines.")
 
 if __name__ == "__main__":
     run_pitcher_props()

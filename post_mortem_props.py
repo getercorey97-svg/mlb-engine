@@ -8,30 +8,17 @@ def audit_props_slate():
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
 
-    # Pre-flight Check: Ensure columns exist in Batter_Modifiers
-    bm_cols = [r[1] for r in c.execute("PRAGMA table_info(Batter_Modifiers)").fetchall()]
-    if "sample_pa" not in bm_cols:
-        c.execute("ALTER TABLE Batter_Modifiers ADD COLUMN sample_pa INTEGER DEFAULT 0")
-    if "contact_modifier" not in bm_cols:
-        c.execute("ALTER TABLE Batter_Modifiers ADD COLUMN contact_modifier REAL DEFAULT 1.000")
-    if "last_updated" not in bm_cols:
-        c.execute("ALTER TABLE Batter_Modifiers ADD COLUMN last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-    conn.commit()
-
-    # Determine unique game IDs to audit
     tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
     game_pks = set()
     if "Batter_Hit_Forecasts" in tables:
         for r in c.execute("SELECT DISTINCT game_pk FROM Batter_Hit_Forecasts").fetchall():
-            if r["game_pk"]:
-                game_pks.add(r["game_pk"])
+            if r["game_pk"]: game_pks.add(r["game_pk"])
     if "Pitcher_K_Forecasts" in tables:
         for r in c.execute("SELECT DISTINCT game_pk FROM Pitcher_K_Forecasts").fetchall():
-            if r["game_pk"]:
-                game_pks.add(r["game_pk"])
+            if r["game_pk"]: game_pks.add(r["game_pk"])
 
     if not game_pks:
-        print("[POST-MORTEM] No active prop records found to audit.")
+        print("[POST-MORTEM] No active prop slates found to audit.")
         conn.close()
         return
 
@@ -39,22 +26,20 @@ def audit_props_slate():
     audited_batters = 0
     audited_pitchers = 0
 
-    ps_cols = [r[1] for r in c.execute("PRAGMA table_info(Pitcher_Stats)").fetchall()]
-    p_name_col = "pitcher_name" if "pitcher_name" in ps_cols else ("player_name" if "player_name" in ps_cols else "last_name")
-
     for pk in game_pks:
         url = f"https://statsapi.mlb.com/api/v1/game/{pk}/boxscore"
         try:
             res = requests.get(url, timeout=6)
-            if res.status_code != 200:
-                continue
+            if res.status_code != 200: continue
             box = res.json()
         except Exception:
             continue
 
         teams = box.get("teams", {})
 
-        # 1. Audit Batter Hits
+        # ==================================================================
+        # 1. AUDIT BATTER HITS VIA TWO-TIER DECOUPLED BAYESIAN SHRINKAGE
+        # ==================================================================
         if "Batter_Hit_Forecasts" in tables:
             batter_rows = c.execute("SELECT * FROM Batter_Hit_Forecasts WHERE game_pk = ?", (pk,)).fetchall()
             for b in batter_rows:
@@ -64,6 +49,7 @@ def audit_props_slate():
                 actual_hits = None
                 actual_ab = 0
                 actual_pa = 0
+                actual_so = 0
 
                 for side in ["away", "home"]:
                     p_dict = teams.get(side, {}).get("players", {})
@@ -73,12 +59,12 @@ def audit_props_slate():
                             if b_stats:
                                 actual_hits = int(b_stats.get("hits", 0))
                                 actual_ab = int(b_stats.get("atBats", 0))
+                                actual_so = int(b_stats.get("strikeOuts", 0))
                                 actual_pa = actual_ab + int(b_stats.get("baseOnBalls", 0)) + int(b_stats.get("hitByPitch", 0))
                             break
-                    if actual_hits is not None:
-                        break
+                    if actual_hits is not None: break
 
-                if actual_hits is not None:
+                if actual_hits is not None and actual_pa > 0:
                     exp_hits = float(b["expected_hits"] or 0.0)
                     p_over = float(b["over_0_5_hit_prob"] or 0.0)
                     hit_error = round(actual_hits - exp_hits, 2)
@@ -97,24 +83,50 @@ def audit_props_slate():
                         p_over, hit_error, brier, over_hit
                     ))
 
-                    # Empirical Bayes Updates
-                    c.execute("INSERT OR IGNORE INTO Batter_Modifiers (player_name, sample_pa, contact_modifier) VALUES (?, 0, 1.000)", (player_name,))
-                    b_mod = c.execute("SELECT sample_pa, contact_modifier FROM Batter_Modifiers WHERE player_name = ?", (player_name,)).fetchone()
-                    n = (b_mod["sample_pa"] or 0) + actual_pa
-                    old_mod = b_mod["contact_modifier"] or 1.000
+                    # Two-Tier Decoupled Bayesian Update:
+                    # Tier 1: Contact Skill (Stabilizes at N ~ 120 PA)
+                    # Tier 2: BABIP Luck (Stabilizes at N ~ 750 PA)
+                    prior = c.execute("""
+                        SELECT pa_contact_sample, contact_skill_mod, pa_babip_sample, babip_skill_mod 
+                        FROM Batter_Decoupled_Priors 
+                        WHERE player_name = ?
+                    """, (player_name,)).fetchone()
 
-                    observed_ratio = (actual_hits / max(0.5, exp_hits)) if actual_pa > 0 else 1.0
-                    weight = actual_pa / (actual_pa + 80.0)
-                    new_mod = round((1.0 - weight) * old_mod + (weight * observed_ratio), 3)
+                    n_c = (prior["pa_contact_sample"] or 0) + actual_pa
+                    old_c_mod = float(prior["contact_skill_mod"] or 1.0)
+                    
+                    n_b = (prior["pa_babip_sample"] or 0) + actual_ab
+                    old_b_mod = float(prior["babip_skill_mod"] or 1.0)
+
+                    # Contact performance (avoiding strikeouts)
+                    observed_contact_ratio = 1.15 if actual_so == 0 else (0.85 if actual_so >= 2 else 1.0)
+                    w_c = actual_pa / (actual_pa + 120.0)
+                    new_c_mod = round((1.0 - w_c) * old_c_mod + (w_c * observed_contact_ratio), 3)
+
+                    # Ball-in-play BABIP luck performance
+                    bip = max(1, actual_ab - actual_so)
+                    observed_babip_ratio = actual_hits / max(0.3, bip * 0.290)
+                    w_b = actual_ab / (actual_ab + 750.0)
+                    new_b_mod = round((1.0 - w_b) * old_b_mod + (w_b * observed_babip_ratio), 3)
 
                     c.execute("""
-                        UPDATE Batter_Modifiers 
-                        SET sample_pa = ?, contact_modifier = ?, last_updated = CURRENT_TIMESTAMP 
+                        UPDATE Batter_Decoupled_Priors 
+                        SET pa_contact_sample = ?, contact_skill_mod = ?,
+                            pa_babip_sample = ?, babip_skill_mod = ?,
+                            last_game_pk = ?, last_updated = CURRENT_TIMESTAMP 
                         WHERE player_name = ?
-                    """, (n, new_mod, player_name))
+                    """, (n_c, new_c_mod, n_b, new_b_mod, pk, player_name))
+
+                    c.execute("""
+                        INSERT INTO Prop_Learning_Calibration_Audit 
+                        (eval_date, market_type, entity_name, game_pk, predicted_val, actual_val, line_val, error_delta, brier_score, pre_update_mod, post_update_mod)
+                        VALUES (?, 'batter_hit', ?, ?, ?, ?, 0.5, ?, ?, ?, ?)
+                    """, (today_str, player_name, pk, exp_hits, actual_hits, hit_error, brier, old_c_mod, new_c_mod))
                     audited_batters += 1
 
-        # 2. Audit Pitcher Ks
+        # ==================================================================
+        # 2. AUDIT PITCHER STRIKEOUTS VIA 1D KALMAN STATE-SPACE FILTER
+        # ==================================================================
         if "Pitcher_K_Forecasts" in tables:
             pitcher_rows = c.execute("SELECT * FROM Pitcher_K_Forecasts WHERE game_pk = ?", (pk,)).fetchall()
             for p in pitcher_rows:
@@ -135,8 +147,7 @@ def audit_props_slate():
                                 actual_k = int(pitch_stats.get("strikeOuts", 0))
                                 act_bf = int(pitch_stats.get("battersFaced", 0))
                             break
-                    if actual_k is not None:
-                        break
+                    if actual_k is not None: break
 
                 if actual_k is not None and act_pitches > 0:
                     exp_k = float(p["expected_k"])
@@ -161,36 +172,43 @@ def audit_props_slate():
                         k_error, brier, over_hit
                     ))
 
-                    # EWMA Calibration on Pitcher_Stats
-                    sp_row = c.execute(f"""
-                        SELECT k_modifier, sample_starts, pitches_per_bf 
-                        FROM Pitcher_Stats 
-                        WHERE {p_name_col} = ? OR ? LIKE '%' || {p_name_col}
-                        LIMIT 1
-                    """, (sp_name, sp_name)).fetchone()
+                    # 1D Kalman Filter Measurement Update:
+                    # Latent State theta: true strikeout modifier
+                    # Observation z: actual_k / max(0.5, exp_k)
+                    # Observation Variance R: inversely proportional to batters faced
+                    c.execute("INSERT OR IGNORE INTO Pitcher_Kalman_State (pitcher_name, latent_k_modifier, variance_p, process_noise_q) VALUES (?, 1.000, 0.040, 0.0025)", (sp_name,))
+                    k_row = c.execute("SELECT latent_k_modifier, variance_p, process_noise_q FROM Pitcher_Kalman_State WHERE pitcher_name = ?", (sp_name,)).fetchone()
 
-                    if sp_row:
-                        starts = sp_row["sample_starts"] or 1
-                        curr_k_mod = sp_row["k_modifier"] or 1.000
-                        curr_p_bf = sp_row["pitches_per_bf"] or 3.90
+                    theta_prior = float(k_row["latent_k_modifier"])
+                    p_prior = float(k_row["variance_p"]) + float(k_row["process_noise_q"])
 
-                        alpha = 1.0 / math.sqrt(starts + 1)
-                        k_ratio = actual_k / max(0.5, exp_k)
-                        new_k_mod = round((1.0 - alpha) * curr_k_mod + (alpha * k_ratio), 3)
+                    # Measurement noise R decreases when pitcher faces more batters
+                    r_noise = max(0.020, 1.25 / max(10, act_bf))
+                    z_obs = actual_k / max(0.5, exp_k)
 
-                        game_p_bf = act_pitches / max(1, act_bf)
-                        new_p_bf = round((0.85 * curr_p_bf) + (0.15 * game_p_bf), 2)
+                    # Kalman Gain calculation
+                    k_gain = p_prior / (p_prior + r_noise)
 
-                        c.execute(f"""
-                            UPDATE Pitcher_Stats 
-                            SET k_modifier = ?, pitches_per_bf = ?, sample_starts = sample_starts + 1 
-                            WHERE {p_name_col} = ? OR ? LIKE '%' || {p_name_col}
-                        """, (new_k_mod, new_p_bf, sp_name, sp_name))
+                    # State update
+                    theta_post = round(theta_prior + k_gain * (z_obs - theta_prior), 3)
+                    p_post = round((1.0 - k_gain) * p_prior, 4)
+
+                    c.execute("""
+                        UPDATE Pitcher_Kalman_State 
+                        SET latent_k_modifier = ?, variance_p = ?, last_game_pk = ?, last_updated = CURRENT_TIMESTAMP 
+                        WHERE pitcher_name = ?
+                    """, (theta_post, p_post, pk, sp_name))
+
+                    c.execute("""
+                        INSERT INTO Prop_Learning_Calibration_Audit 
+                        (eval_date, market_type, entity_name, game_pk, predicted_val, actual_val, line_val, error_delta, brier_score, pre_update_mod, post_update_mod)
+                        VALUES (?, 'pitcher_k', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (today_str, sp_name, pk, exp_k, actual_k, k_line, k_error, brier, theta_prior, theta_post))
                     audited_pitchers += 1
 
     conn.commit()
     conn.close()
-    print(f"[SUCCESS] Post-mortem prop audit complete ({audited_batters} batters, {audited_pitchers} pitchers updated).")
+    print(f"[POST-MORTEM] Completed audit: {audited_batters} batters calibrated via Decoupled Bayes, {audited_pitchers} pitchers calibrated via Kalman Filter.")
 
 if __name__ == "__main__":
     audit_props_slate()
