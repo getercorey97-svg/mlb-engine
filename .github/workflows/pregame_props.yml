@@ -1,0 +1,65 @@
+name: Dynamic Fluid Pre-Game Prop Ingestion
+
+on:
+  schedule:
+    # Runs every 15 minutes between 15:00 UTC (11:00 AM EDT) and 04:30 UTC (12:30 AM EDT)
+    - cron: '*/15 15-23,0-4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  evaluate-and-synthesize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests numpy pandas scipy
+          fi
+
+      - name: Evaluate 30-Min Fluid Window Against SQLite Start Times
+        id: gatekeeper
+        run: |
+          python pregame_gatekeeper.py
+        continue-on-error: true
+
+      - name: Ingest Lineups & Synthesize Hit Forecasts
+        if: steps.gatekeeper.outcome == 'success'
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          python lineup_verifier.py
+          python engine_batter_props.py
+
+      - name: Commit and Push Timestamped Forecasts
+        if: steps.gatekeeper.outcome == 'success'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin main
+          git reset origin/main
+
+          [ -f mlb_engine.db ] && git add mlb_engine.db
+
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "Fluid pre-game auto-synthesis [skip ci]"
+            git push origin main
+          else
+            echo "No database changes to commit."
+          fi

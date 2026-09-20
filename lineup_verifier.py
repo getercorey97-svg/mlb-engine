@@ -1,76 +1,101 @@
 import sqlite3
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
-def verify_starting_lineups():
-    print("Executing Extraction: Starting Lineup Verification...")
-    
-    today = datetime.now().strftime('%Y-%m-%d')
-    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today}&hydrate=lineups"
-    
+def get_db_connection():
+    conn = sqlite3.connect("mlb_engine.db")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def format_start_times(iso_utc_str):
+    if not iso_utc_str:
+        now_utc = datetime.now(timezone.utc)
+        return now_utc.isoformat(), now_utc.astimezone(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT"), (now_utc - timedelta(minutes=30)).isoformat()
+
+    dt_utc = datetime.fromisoformat(iso_utc_str.replace("Z", "+00:00"))
+    dt_et = dt_utc.astimezone(ZoneInfo("America/New_York"))
+    time_et_str = dt_et.strftime("%I:%M %p EDT")
+    gatekeeper_utc = (dt_utc - timedelta(minutes=30)).isoformat()
+
+    return dt_utc.isoformat(), time_et_str, gatekeeper_utc
+
+def populate_slate_and_lineups():
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    now_utc = datetime.now(timezone.utc)
+    today = now_utc.strftime("%Y-%m-%d")
+    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={today}&endDate={today}&hydrate=lineups,probablePitcher,status"
+
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-    except requests.RequestException as e:
-        print(f"Error fetching schedule data: {e}")
+        res = requests.get(url, timeout=10).json()
+    except Exception as e:
+        print(f"[LINEUP VERIFIER ERROR] Could not reach MLB Stats API: {e}")
+        conn.close()
         return
 
-    conn = sqlite3.connect('mlb_engine.db')
-    cursor = conn.cursor()
-    
-    for date_data in data.get('dates', []):
-        for game in date_data.get('games', []):
-            game_pk = game.get('gamePk')
-            if not game_pk:
-                continue
-            
-            teams = game.get('teams', {})
-            game_lineups = game.get('lineups', {})
-            
-            away_data = teams.get('away', {})
-            home_data = teams.get('home', {})
-            
-            away_lineup = away_data.get('lineup', []) or game_lineups.get("awayPlayers", []) or game_lineups.get("away", []) or []
-            home_lineup = home_data.get('lineup', []) or game_lineups.get("homePlayers", []) or game_lineups.get("home", []) or []
-            
-            # A game's lineup status is only confirmed if BOTH teams have submitted their 9 batters
-            if len(away_lineup) >= 9 and len(home_lineup) >= 9:
-                status = "Confirmed"
-                away_team_name = teams.get('away', {}).get('team', {}).get('name', 'Away')
-                home_team_name = teams.get('home', {}).get('team', {}).get('name', 'Home')
+    total_batters = 0
+    total_games = 0
 
-                cursor.execute("DELETE FROM Daily_Batters WHERE game_pk = ?", (game_pk,))
+    for date_entry in res.get("dates", []):
+        for g in date_entry.get("games", []):
+            pk = g["gamePk"]
+            game_date_raw = g.get("gameDate")
+            dt_utc_str, time_et_str, gatekeeper_str = format_start_times(game_date_raw)
 
-                for idx, player in enumerate(away_lineup[:9], 1):
-                    p_name = player.get('fullName') or player.get('name') or (player.get('person', {}).get('fullName') if isinstance(player.get('person'), dict) else str(player))
-                    if p_name:
-                        cursor.execute("""
-                            INSERT OR REPLACE INTO Daily_Batters (game_pk, player_name, team_name, batting_order, is_starter)
-                            VALUES (?, ?, ?, ?, 1)
-                        """, (game_pk, p_name, away_team_name, idx))
+            status_desc = g.get("status", {}).get("detailedState", "Scheduled")
+            teams = g.get("teams", {})
+            away_team = teams.get("away", {}).get("team", {}).get("name", "Away")
+            home_team = teams.get("home", {}).get("team", {}).get("name", "Home")
+            away_sp = teams.get("away", {}).get("probablePitcher", {}).get("fullName", "TBD")
+            home_sp = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
+            lineups = g.get("lineups", {})
 
-                for idx, player in enumerate(home_lineup[:9], 1):
-                    p_name = player.get('fullName') or player.get('name') or (player.get('person', {}).get('fullName') if isinstance(player.get('person'), dict) else str(player))
-                    if p_name:
-                        cursor.execute("""
-                            INSERT OR REPLACE INTO Daily_Batters (game_pk, player_name, team_name, batting_order, is_starter)
-                            VALUES (?, ?, ?, ?, 1)
-                        """, (game_pk, p_name, home_team_name, idx))
-            else:
-                status = "Pending/TBD"
-            
-            cursor.execute('''
-            UPDATE Daily_Lineups 
-            SET lineup_status = ? 
-            WHERE game_pk = ?
-            ''', (status, game_pk))
-            
-            print(f"Game {game_pk} Lineup Status: {status} (Away: {len(away_lineup)}, Home: {len(home_lineup)})")
+            # 1. Update Daily_Lineups with full timestamp parameters
+            c.execute("""
+                INSERT OR REPLACE INTO Daily_Lineups 
+                (game_pk, away_team, home_team, away_sp, home_sp, lineup_status, 
+                 game_datetime_utc, game_time_et, gatekeeper_trigger_utc, ingested_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (pk, away_team, home_team, away_sp, home_sp, status_desc, dt_utc_str, time_et_str, gatekeeper_str))
+            total_games += 1
+
+            # 2. Ingest confirmed or projected 1-9 batting orders
+            for side in ["away", "home"]:
+                team_name = away_team if side == "away" else home_team
+                confirmed_lineup = lineups.get(f"{side}Players", [])
+
+                if confirmed_lineup:
+                    for slot, player in enumerate(confirmed_lineup[:9], 1):
+                        p_name = player.get("fullName", f"Batter {slot}")
+                        c.execute("""
+                            INSERT OR REPLACE INTO Daily_Batters 
+                            (game_pk, player_name, team_name, batting_order, is_starter, is_confirmed, game_datetime_utc, game_time_et)
+                            VALUES (?, ?, ?, ?, 1, 1, ?, ?)
+                        """, (pk, p_name, team_name, slot, dt_utc_str, time_et_str))
+                        total_batters += 1
+                else:
+                    team_id = teams.get(side, {}).get("team", {}).get("id")
+                    if team_id:
+                        try:
+                            roster_url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/roster?rosterType=active"
+                            r_data = requests.get(roster_url, timeout=5).json()
+                            hitters = [p["person"]["fullName"] for p in r_data.get("roster", []) if p.get("position", {}).get("code") != "1"]
+                            for slot in range(1, 10):
+                                name = hitters[slot - 1] if len(hitters) >= slot else f"{team_name} Hitter #{slot}"
+                                c.execute("""
+                                    INSERT OR REPLACE INTO Daily_Batters 
+                                    (game_pk, player_name, team_name, batting_order, is_starter, is_confirmed, game_datetime_utc, game_time_et)
+                                    VALUES (?, ?, ?, ?, 1, 0, ?, ?)
+                                """, (pk, name, team_name, slot, dt_utc_str, time_et_str))
+                                total_batters += 1
+                        except Exception:
+                            pass
 
     conn.commit()
     conn.close()
-    print("Lineup verification status locked in Daily_Lineups table.")
+    print(f"[LINEUP INGESTION] Synchronized {total_games} matchups and {total_batters} batters with start timestamps.")
 
 if __name__ == "__main__":
-    verify_starting_lineups()
+    populate_slate_and_lineups()
