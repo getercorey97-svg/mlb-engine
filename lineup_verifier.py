@@ -90,12 +90,14 @@ def populate_slate_and_lineups():
         conn.close()
         return
 
+    active_pks = []
     total_batters = 0
     total_games = 0
 
     for date_entry in res.get("dates", []):
         for g in date_entry.get("games", []):
             pk = g["gamePk"]
+            active_pks.append(pk)
             game_date_raw = g.get("gameDate")
             dt_utc_str, time_et_str, gatekeeper_str = format_start_times(game_date_raw)
 
@@ -147,9 +149,15 @@ def populate_slate_and_lineups():
                         except Exception:
                             pass
 
+    # Prune any stale games and batters not on today's active schedule
+    if active_pks:
+        placeholders = ",".join("?" for _ in active_pks)
+        c.execute(f"DELETE FROM Daily_Batters WHERE game_pk NOT IN ({placeholders})", active_pks)
+        c.execute(f"DELETE FROM Daily_Lineups WHERE game_pk NOT IN ({placeholders})", active_pks)
+
     conn.commit()
     conn.close()
-    print(f"[LINEUP INGESTION] Synchronized {total_games} matchups and {total_batters} batters with start times.")
+    print(f"[LINEUP INGESTION] Synchronized {total_games} matchups and {total_batters} batters. Pruned non-slate entries.")
 
 if __name__ == "__main__":
     populate_slate_and_lineups()

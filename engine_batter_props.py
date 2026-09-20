@@ -1,7 +1,6 @@
 import sqlite3
 import numpy as np
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 def get_db_connection():
     conn = sqlite3.connect("mlb_engine.db")
@@ -59,16 +58,20 @@ def run_batter_props_engine():
     auto_repair_batter_forecast_schema(conn)
     c = conn.cursor()
 
+    # Query only batters linked to active slate games with scheduled start times
     batters = c.execute("""
-        SELECT game_pk, player_name, team_name, batting_order, 
-               COALESCE(game_datetime_utc, '') as game_datetime_utc, 
-               COALESCE(game_time_et, 'TBD') as game_time_et
-        FROM Daily_Batters
-        ORDER BY game_pk, batting_order
+        SELECT b.game_pk, b.player_name, b.team_name, b.batting_order, 
+               b.game_datetime_utc, b.game_time_et
+        FROM Daily_Batters b
+        JOIN Daily_Lineups l ON b.game_pk = l.game_pk
+        WHERE b.is_starter = 1 
+          AND b.game_time_et IS NOT NULL 
+          AND b.game_time_et != 'TBD'
+        ORDER BY b.game_pk, b.batting_order
     """).fetchall()
 
     if not batters:
-        print("[BATTER ENGINE] No batters found in Daily_Batters to process.")
+        print("[BATTER ENGINE] No eligible batters found for active slate.")
         conn.close()
         return
 
@@ -87,21 +90,17 @@ def run_batter_props_engine():
         game_dt_utc = b["game_datetime_utc"]
         game_time_et = b["game_time_et"]
 
-        # Pull persistent Empirical Bayes Contact Modifier if logged
         b_mod = c.execute("SELECT contact_modifier FROM Batter_Modifiers WHERE player_name = ?", (player_name,)).fetchone()
         c_mod = float(b_mod["contact_modifier"]) if b_mod and b_mod["contact_modifier"] else 1.000
 
-        # Project PA & AB based on lineup slot hierarchy
         proj_pa = round(max(3.6, 4.65 - (0.11 * slot)), 2)
         proj_ab = round(proj_pa * 0.89, 2)
 
-        # Baseline MLB contact rate scaled by contact modifier
         hit_rate = np.clip(0.248 * c_mod, 0.120, 0.380)
         exp_hits = round(proj_ab * hit_rate, 2)
 
         p_0_5, p_1_5, p_2_5 = calculate_binomial_hit_probs(proj_ab, hit_rate)
 
-        # Exact 14 columns matching exact 14 parameter bindings
         c.execute("""
             INSERT OR REPLACE INTO Batter_Hit_Forecasts (
                 game_pk, player_name, team_name, batting_order,
@@ -119,7 +118,7 @@ def run_batter_props_engine():
 
     conn.commit()
     conn.close()
-    print(f"[SUCCESS] Synthesized {generated_count} calibrated Batter Hit lines with start times.")
+    print(f"[SUCCESS] Synthesized {generated_count} calibrated Batter Hit lines for today's active games.")
 
 if __name__ == "__main__":
     run_batter_props_engine()
