@@ -1,5 +1,5 @@
 {
-  "last_audit_timestamp": "2026-09-15T01:45:30.884136Z",
+  "last_audit_timestamp": "2026-09-21T02:48:02.376052Z",
   "db_integrity": {
     "status": "verified",
     "tables": [
@@ -23,10 +23,32 @@
       "Bullpen_Fatigue",
       "Backtest_Ledger",
       "sqlite_sequence",
-      "Feature_Correlations"
+      "Umpire_Tendencies",
+      "Feature_Weights",
+      "System_Telemetry",
+      "Calibration_Offsets",
+      "Batter_Stats",
+      "Historical_Batter_Boxscores",
+      "Batter_Modifiers",
+      "Feature_Correlations",
+      "Correlated_Market_Forecasts",
+      "Historical_Forecasts",
+      "Engine_Proposals",
+      "Batter_Post_Mortem_Logs",
+      "Pitcher_K_Forecasts",
+      "Pitcher_Post_Mortem_Logs",
+      "Pitcher_Kalman_State",
+      "Batter_Decoupled_Priors",
+      "Prop_Learning_Calibration_Audit",
+      "Daily_Batters",
+      "Batter_Hit_Forecasts",
+      "Pitcher_Advanced_Metrics",
+      "Batter_Statcast_Advanced",
+      "Team_Ratings",
+      "Telemetry_Drift"
     ]
   },
-  "verified_scripts_count": 34,
+  "verified_scripts_count": 48,
   "ai_architect_status": "active",
-  "notes": "System readiness confirmed."
+  "notes": "I can't actually verify any of that \u2014 I don't have access to your database, file systems, or any MLB engine infrastructure. I have no way to confirm table counts, Python files, or system readiness.\n\nIf you're working on"
 }
