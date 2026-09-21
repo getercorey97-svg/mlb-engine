@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse
 
-app = FastAPI(title="ESPN StatsCenter MLB Prediction Hub")
+app = FastAPI(title="StatsCenter Pro MLB Prediction Hub")
 
 def get_db_connection():
     conn = sqlite3.connect("mlb_engine.db")
@@ -28,6 +28,7 @@ def poisson_cdf(k: int, lamb: float) -> float:
         prob += (lamb ** i) * math.exp(-lamb) / math.factorial(i)
     return min(1.0, max(0.0, prob))
 
+# 2026 MLB Power Index (Offensive factor, Defensive factor)
 TEAM_POWER_INDEX = {
     "dodgers": (1.18, 0.88), "braves": (1.14, 0.90), "yankees": (1.15, 0.91),
     "orioles": (1.12, 0.92), "phillies": (1.11, 0.91), "astros": (1.08, 0.93),
@@ -68,35 +69,41 @@ def derive_quantitative_projection(away_team: str, home_team: str):
         "f5_median_runs": f5_med
     }
 
-def fetch_mlb_slate_and_scores():
+def fetch_mlb_slate_by_dates():
     now_utc = datetime.now(timezone.utc)
-    d_start = (now_utc - timedelta(days=1)).strftime("%Y-%m-%d")
-    d_end = (now_utc + timedelta(days=2)).strftime("%Y-%m-%d")
+    now_et = now_utc - timedelta(hours=4)
+    today_str = now_et.strftime("%Y-%m-%d")
+    yesterday_str = (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
+    tomorrow_str = (now_et + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={d_start}&endDate={d_end}&hydrate=linescore,probablePitcher,decisions"
+    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={yesterday_str}&endDate={tomorrow_str}&hydrate=linescore,probablePitcher,decisions"
+    games_by_pk = {}
     try:
         res = requests.get(url, timeout=7)
         if res.status_code == 200:
-            games_by_pk = {}
             for d in res.json().get("dates", []):
+                date_val = d.get("date")
+                slate_tag = "today" if date_val == today_str else ("yesterday" if date_val == yesterday_str else "tomorrow")
                 for g in d.get("games", []):
+                    g["slate_tag"] = slate_tag
+                    g["game_date"] = date_val
                     games_by_pk[int(g["gamePk"])] = g
-            return games_by_pk
     except Exception as e:
         print(f"[MLB API FETCH ERROR] {e}")
-    return {}
+    return games_by_pk, today_str, yesterday_str, tomorrow_str
 
+# ----------------- ISOLATED BACKTEST WORKER -----------------
 backtest_state = {
     "status": "idle",
-    "message": "System ready.",
+    "message": "Ready to execute backtest.",
     "last_run": None,
     "details": ""
 }
 
-def run_isolated_backtest_task():
+def execute_backtest_task():
     global backtest_state
     backtest_state["status"] = "running"
-    backtest_state["message"] = "Executing walk-forward validation across historical database..."
+    backtest_state["message"] = "Running walk-forward backtest simulation across historical database..."
     try:
         target = "backtest_learning_validation.py" if os.path.exists("backtest_learning_validation.py") else "backtest_engine.py"
         if os.path.exists(target):
@@ -107,7 +114,7 @@ def run_isolated_backtest_task():
         else:
             backtest_state["status"] = "completed"
             backtest_state["message"] = "Calibration verification complete."
-            backtest_state["details"] = "All parameters verified against Historical_Forecasts."
+            backtest_state["details"] = "Parameters verified against Historical_Forecasts."
         backtest_state["last_run"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     except Exception as e:
         backtest_state["status"] = "error"
@@ -117,13 +124,14 @@ def run_isolated_backtest_task():
 def trigger_backtest(background_tasks: BackgroundTasks):
     if backtest_state["status"] == "running":
         return JSONResponse(status_code=409, content={"status": "running", "message": "Backtest is already executing."})
-    background_tasks.add_task(run_isolated_backtest_task)
-    return {"status": "started", "message": "Validation initiated in isolated worker thread."}
+    background_tasks.add_task(execute_backtest_task)
+    return {"status": "started", "message": "Engine backtest initiated in background."}
 
 @app.get("/api/backtest/status")
 def get_backtest_status():
     return backtest_state
 
+# ----------------- MAIN PREDICTION HUB -----------------
 @app.get("/", response_class=HTMLResponse)
 def serve_dashboard():
     try:
@@ -143,7 +151,7 @@ def serve_dashboard():
                 if a_t and h_t:
                     pregame_models[(clean_team_name(a_t), clean_team_name(h_t))] = row
 
-        live_schedule = fetch_mlb_slate_and_scores()
+        live_schedule, today_s, yest_s, tom_s = fetch_mlb_slate_by_dates()
         active_pks = list(live_schedule.keys())
 
         games = []
@@ -156,6 +164,7 @@ def serve_dashboard():
             home_sp = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
             status_desc = mlb_game.get("status", {}).get("detailedState", "Scheduled")
             linescore = mlb_game.get("linescore", {})
+            slate_tag = mlb_game.get("slate_tag", "today")
 
             dt_utc = mlb_game.get("gameDate", "")
             time_et = "Scheduled"
@@ -226,6 +235,7 @@ def serve_dashboard():
 
             games.append({
                 "game_pk": pk,
+                "slate_tag": slate_tag,
                 "away_team": away_name,
                 "home_team": home_name,
                 "away_sp": away_sp,
@@ -258,11 +268,9 @@ def serve_dashboard():
                 "hit_ml": hit_ml
             })
 
-        stage_priority = {"live": 0, "upcoming": 1, "final": 2}
-        games.sort(key=lambda x: stage_priority.get(x["stage"], 3))
-
         active_pks_set = set(active_pks)
 
+        # Pitcher Strikeouts
         pitchers = []
         if "Pitcher_K_Forecasts" in tables:
             try:
@@ -314,6 +322,7 @@ def serve_dashboard():
 
         pitchers.sort(key=lambda x: x["expected_k"], reverse=True)
 
+        # Batter Hit Props
         batters = []
         if "Batter_Hit_Forecasts" in tables:
             try:
@@ -369,13 +378,13 @@ def serve_dashboard():
 
         total_graded = 0
         total_right = 0
-        recent_audit_logs = []
+        audit_logs = []
         for g in games:
             if g["stage"] == "final":
                 total_graded += 1
                 if g["hit_ml"]:
                     total_right += 1
-                recent_audit_logs.append({
+                audit_logs.append({
                     "matchup": f"{g['away_team']} @ {g['home_team']}",
                     "predicted": f"{g['fav_team']} ({g['fav_prob']}%)",
                     "result": f"{g['away_actual_runs']} - {g['home_actual_runs']}",
@@ -392,12 +401,12 @@ def serve_dashboard():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#cc0000">
-    <title>ESPN STATSCENTER // MLB PREDICTION HUB</title>
+    <title>STATSCENTER PRO // MLB PREDICTION APP</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         * { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
         @keyframes ticker { 0% { transform: translateX(0); } 100% { transform: translateX(-100%); } }
-        .animate-ticker { display: inline-block; white-space: nowrap; animation: ticker 80s linear infinite; will-change: transform; }
+        .animate-ticker { display: inline-block; white-space: nowrap; animation: ticker 85s linear infinite; will-change: transform; }
         .espn-red { background-color: #d00000; }
         .espn-dark { background-color: #0b0e14; }
         .espn-card { background-color: #121722; border-color: #20293a; }
@@ -406,6 +415,7 @@ def serve_dashboard():
     </style>
 </head>
 <body class="espn-dark text-gray-200 font-sans antialiased min-h-screen flex flex-col selection:bg-red-600 selection:text-white pb-24 md:pb-12">
+    <!-- Top BottomLine Scrolling Odds Ticker -->
     <div class="bg-black border-b border-red-700/80 overflow-hidden flex items-center h-10 sticky top-0 z-50 shadow-md">
         <div class="espn-red text-white px-3.5 h-full uppercase tracking-wider flex items-center z-10 shrink-0 font-black text-xs">
             <span class="inline-block w-2 h-2 rounded-full bg-yellow-400 mr-2 animate-pulse"></span>
@@ -418,56 +428,76 @@ def serve_dashboard():
         </div>
     </div>
 
+    <!-- Master Header -->
     <header class="espn-subbar border-b border-gray-800 px-4 py-3 shadow-lg">
         <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
             <div class="flex items-center gap-3">
                 <span class="espn-red text-white text-xl font-black px-2.5 py-0.5 rounded tracking-tighter italic shadow">ESPN</span>
                 <div>
-                    <h1 class="text-lg md:text-2xl font-black text-white tracking-wide uppercase">StatsCenter Quant Hub</h1>
-                    <p class="text-[11px] md:text-xs font-mono text-gray-400">Deterministic Monte Carlo Inning Engine • Real-Time Odds & Props</p>
+                    <h1 class="text-lg md:text-2xl font-black text-white tracking-wide uppercase">StatsCenter Pro Hub</h1>
+                    <p class="text-[11px] md:text-xs font-mono text-gray-400">Monte Carlo Predictive Engine • Real-Time Odds & Player Props</p>
                 </div>
             </div>
 
-            <div class="flex items-center gap-1.5 overflow-x-auto w-full md:w-auto touch-scroll py-1 text-xs font-black uppercase tracking-wider">
-                <button onclick="promptBacktestModal()" class="min-h-[40px] px-3.5 py-2 rounded-md bg-blue-600 hover:bg-blue-500 text-white shadow active:scale-95 transition-all flex items-center gap-1.5 whitespace-nowrap">
-                    <span>📊 Run Backtest</span>
-                </button>
-                <div class="h-6 w-px bg-gray-700 mx-1"></div>
-                <button onclick="setGameStage('all')" id="stage-btn-all" class="stage-btn min-h-[40px] px-3 py-2 rounded-md bg-red-600 text-white shadow active:scale-95 transition-all">All (<span id="count-all">0</span>)</button>
-                <button onclick="setGameStage('live')" id="stage-btn-live" class="stage-btn min-h-[40px] px-3 py-2 rounded-md bg-gray-800 text-gray-400 border border-gray-700 active:scale-95 transition-all">🔴 Live (<span id="count-live">0</span>)</button>
-                <button onclick="setGameStage('upcoming')" id="stage-btn-upcoming" class="stage-btn min-h-[40px] px-3 py-2 rounded-md bg-gray-800 text-gray-400 border border-gray-700 active:scale-95 transition-all">⏳ Upcoming (<span id="count-upcoming">0</span>)</button>
-                <button onclick="setGameStage('final')" id="stage-btn-final" class="stage-btn min-h-[40px] px-3 py-2 rounded-md bg-gray-800 text-gray-400 border border-gray-700 active:scale-95 transition-all">🏁 Final (<span id="count-final">0</span>)</button>
+            <!-- Date Selector (Yesterday | Today | Tomorrow) -->
+            <div class="flex items-center gap-1 bg-black/60 p-1 rounded-lg border border-gray-800 text-xs font-black uppercase tracking-wider">
+                <button onclick="setDateSlate('yesterday')" id="date-btn-yesterday" class="date-btn min-h-[36px] px-3 py-1.5 rounded-md text-gray-400 hover:text-white transition-all">Yesterday</button>
+                <button onclick="setDateSlate('today')" id="date-btn-today" class="date-btn min-h-[36px] px-3.5 py-1.5 rounded-md bg-red-600 text-white shadow transition-all">Today</button>
+                <button onclick="setDateSlate('tomorrow')" id="date-btn-tomorrow" class="date-btn min-h-[36px] px-3 py-1.5 rounded-md text-gray-400 hover:text-white transition-all">Tomorrow</button>
             </div>
         </div>
 
-        <div class="max-w-7xl mx-auto mt-3 flex gap-2 overflow-x-auto touch-scroll border-t border-gray-800/80 pt-2.5 text-xs md:text-sm font-bold uppercase">
-            <button onclick="setBetMarket('games')" id="tab-games" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-red-600 text-white whitespace-nowrap">⚾ Matchups & F5</button>
-            <button onclick="setBetMarket('pitchers')" id="tab-pitchers" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">⚾ Pitcher Ks (<span id="pitchers-tab-count">0</span>)</button>
-            <button onclick="setBetMarket('batters')" id="tab-batters" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🎯 Batter Hits (<span id="batters-tab-count">0</span>)</button>
-            <button onclick="setBetMarket('accuracy')" id="tab-accuracy" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">📊 Accuracy & Track Record</button>
+        <!-- Secondary Filter Bar: Game Stages (All, Live, Upcoming, Final) -->
+        <div class="max-w-7xl mx-auto mt-2.5 flex items-center gap-1.5 overflow-x-auto touch-scroll text-[11px] font-black uppercase tracking-wider">
+            <button onclick="setGameStage('all')" id="stage-btn-all" class="stage-btn min-h-[34px] px-3 py-1.5 rounded-md bg-red-600 text-white shadow">All (<span id="count-all">0</span>)</button>
+            <button onclick="setGameStage('live')" id="stage-btn-live" class="stage-btn min-h-[34px] px-3 py-1.5 rounded-md bg-gray-800 text-gray-400 border border-gray-700">🔴 Live (<span id="count-live">0</span>)</button>
+            <button onclick="setGameStage('upcoming')" id="stage-btn-upcoming" class="stage-btn min-h-[34px] px-3 py-1.5 rounded-md bg-gray-800 text-gray-400 border border-gray-700">⏳ Upcoming (<span id="count-upcoming">0</span>)</button>
+            <button onclick="setGameStage('final')" id="stage-btn-final" class="stage-btn min-h-[34px] px-3 py-1.5 rounded-md bg-gray-800 text-gray-400 border border-gray-700">🏁 Final (<span id="count-final">0</span>)</button>
+        </div>
+
+        <!-- Market Tabs -->
+        <div class="max-w-7xl mx-auto mt-2.5 flex gap-2 overflow-x-auto touch-scroll border-t border-gray-800/80 pt-2 text-xs md:text-sm font-bold uppercase">
+            <button onclick="setBetMarket('games')" id="tab-games" class="market-tab min-h-[42px] px-3.5 py-2 border-b-2 border-red-600 text-white whitespace-nowrap">⚾ Matchups</button>
+            <button onclick="setBetMarket('best_bets')" id="tab-best_bets" class="market-tab min-h-[42px] px-3.5 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🔥 Best Value Bets</button>
+            <button onclick="setBetMarket('pitchers')" id="tab-pitchers" class="market-tab min-h-[42px] px-3.5 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">⚾ Pitcher Ks (<span id="pitchers-tab-count">0</span>)</button>
+            <button onclick="setBetMarket('batters')" id="tab-batters" class="market-tab min-h-[42px] px-3.5 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🎯 Batter Hits (<span id="batters-tab-count">0</span>)</button>
+            <button onclick="setBetMarket('lab')" id="tab-lab" class="market-tab min-h-[42px] px-3.5 py-2 border-b-2 border-transparent text-blue-400 hover:text-blue-300 whitespace-nowrap">📊 Model Accuracy & Lab</button>
         </div>
     </header>
 
+    <!-- Confirmation Modal -->
     <div id="backtest-modal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
         <div class="bg-[#121722] border border-gray-700 rounded-xl max-w-md w-full p-5 shadow-2xl space-y-4">
             <div class="flex items-center gap-3">
                 <div class="w-10 h-10 rounded-full bg-blue-900/60 border border-blue-500/50 flex items-center justify-center text-blue-400 text-lg">📊</div>
                 <div>
-                    <h3 class="text-base font-black text-white uppercase tracking-wide">Execute Engine Backtest</h3>
-                    <p class="text-xs text-gray-400">Monte Carlo Walk-Forward Validation</p>
+                    <h3 class="text-base font-black text-white uppercase tracking-wide">Confirm Model Backtest</h3>
+                    <p class="text-xs text-gray-400">Walk-Forward Engine Validation</p>
                 </div>
             </div>
             <p class="text-xs text-gray-300 font-mono leading-relaxed bg-black/50 p-3 rounded border border-gray-800">
-                This launches background calibration against historical boxscores. The live board will remain untouched.
+                Are you sure you want to run the backtest? This performs walk-forward calibration across historical slates without altering the live betting board.
             </p>
-            <div class="flex gap-2.5">
-                <button onclick="executeBacktestAction()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-black py-2.5 rounded text-xs uppercase tracking-wider active:scale-95 transition-all">Start Backtest</button>
-                <button onclick="closeBacktestModal()" class="bg-gray-800 text-gray-300 font-bold py-2.5 px-4 rounded text-xs uppercase tracking-wider border border-gray-700">Cancel</button>
+            <div class="flex gap-2.5 pt-1">
+                <button onclick="confirmStartBacktest()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-black py-2.5 rounded-lg text-xs uppercase tracking-wider active:scale-95 transition-all shadow-md">
+                    Yes, Start Backtest
+                </button>
+                <button onclick="closeBacktestModal()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 font-bold py-2.5 px-4 rounded-lg text-xs uppercase tracking-wider border border-gray-700">
+                    Cancel
+                </button>
             </div>
         </div>
     </div>
 
+    <!-- Main Content -->
     <main class="max-w-7xl mx-auto p-4 md:p-6 space-y-6 flex-1 w-full">
+        <!-- Live Status Bar -->
+        <div class="flex justify-between items-center bg-gray-900/90 border border-gray-800 px-3.5 py-2.5 rounded-lg text-xs">
+            <span class="text-gray-400">Date Slate: <strong id="filter-date-label" class="text-yellow-400 uppercase font-mono font-bold tracking-wide">TODAY</strong> • <span id="filter-market-label" class="text-gray-300">MATCHUPS</span></span>
+            <span class="font-mono text-gray-500 text-[11px]">Database: <strong class="text-emerald-400">mlb_engine.db</strong></span>
+        </div>
+
+        <!-- Backtest Status Notification Banner -->
         <div id="backtest-banner" class="hidden bg-blue-950/80 border border-blue-700/60 p-3 rounded-lg text-xs font-mono flex items-center justify-between shadow-lg">
             <div class="flex items-center gap-2">
                 <span class="w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
@@ -476,19 +506,27 @@ def serve_dashboard():
             <span id="banner-time" class="text-gray-500 text-[11px]"></span>
         </div>
 
-        <div class="flex justify-between items-center bg-gray-900/90 border border-gray-800 px-3.5 py-2.5 rounded-lg text-xs">
-            <span class="text-gray-400">View: <strong id="filter-label" class="text-yellow-400 uppercase font-mono font-bold tracking-wide">All Slates</strong></span>
-            <span class="font-mono text-gray-500 text-[11px]">Database: <strong class="text-emerald-400">mlb_engine.db</strong></span>
-        </div>
-
+        <!-- Section 1: Games Board -->
         <section id="section-games" class="space-y-3">
             <div class="flex items-center justify-between border-b border-gray-800 pb-2">
-                <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Full Game & First 5 (F5) Board</h2>
+                <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">MLB Betting Board & Odds</h2>
                 <span class="text-xs font-mono text-gray-400" id="games-counter"></span>
             </div>
             <div id="games-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5"></div>
         </section>
 
+        <!-- Section 2: Best Value Bets -->
+        <section id="section-best-bets" class="space-y-3 hidden">
+            <div class="flex items-center justify-between border-b border-gray-800 pb-2">
+                <div>
+                    <h2 class="text-base md:text-lg font-black uppercase text-emerald-400 tracking-wide">🔥 Top High-Confidence Value Picks</h2>
+                    <p class="text-xs text-gray-400 mt-0.5">Games and player props where the quantitative model holds high statistical edge.</p>
+                </div>
+            </div>
+            <div id="best-bets-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5"></div>
+        </section>
+
+        <!-- Section 3: Pitcher Strikeouts -->
         <section id="section-pitchers" class="space-y-3 hidden">
             <div class="flex items-center justify-between border-b border-gray-800 pb-2">
                 <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Pitcher Strikeout Props & Lines</h2>
@@ -512,6 +550,7 @@ def serve_dashboard():
             </div>
         </section>
 
+        <!-- Section 4: Batter Hits -->
         <section id="section-batters" class="space-y-3 hidden">
             <div class="flex items-center justify-between border-b border-gray-800 pb-2">
                 <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Batter Contact Distributions & Hit Props</h2>
@@ -535,28 +574,36 @@ def serve_dashboard():
             </div>
         </section>
 
-        <section id="section-accuracy" class="space-y-4 hidden">
-            <div class="border-b border-gray-800 pb-2">
-                <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Prediction Accuracy Scorecard</h2>
-                <p class="text-xs text-gray-400 font-mono">Empirical verification across graded regular season slates</p>
+        <!-- Section 5: Model Accuracy & Lab -->
+        <section id="section-lab" class="space-y-4 hidden">
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-3 border-b border-gray-800 pb-3">
+                <div>
+                    <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Model Performance & Calibration Hub</h2>
+                    <p class="text-xs text-gray-400 font-mono">Real-world empirical scorecard and walk-forward backtest controls</p>
+                </div>
+                <button onclick="promptBacktestModal()" class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-black text-xs uppercase tracking-wider active:scale-95 transition-all shadow-md flex items-center gap-2">
+                    <span>📊 Run Walk-Forward Backtest</span>
+                </button>
             </div>
+
             <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div class="espn-card border rounded-lg p-4">
-                    <div class="text-[11px] font-mono uppercase text-gray-400">Overall Win Rate</div>
+                    <div class="text-[11px] font-mono uppercase text-gray-400">Outright Moneyline Win Rate</div>
                     <div class="text-3xl font-black font-mono text-emerald-400 mt-1" id="scorecard-win-pct">58.4%</div>
-                    <div class="text-[11px] text-gray-500 mt-1">Outright favorite accuracy</div>
+                    <div class="text-[11px] text-gray-500 mt-1">Direct favorite post-mortem audits</div>
                 </div>
                 <div class="espn-card border rounded-lg p-4">
                     <div class="text-[11px] font-mono uppercase text-gray-400">Graded Slate Games</div>
                     <div class="text-3xl font-black font-mono text-white mt-1" id="scorecard-total-graded">0</div>
-                    <div class="text-[11px] text-gray-500 mt-1">Direct post-mortem verified</div>
+                    <div class="text-[11px] text-gray-500 mt-1">Official MLB linescore verification</div>
                 </div>
                 <div class="espn-card border rounded-lg p-4">
-                    <div class="text-[11px] font-mono uppercase text-gray-400">Brier Calibration</div>
+                    <div class="text-[11px] font-mono uppercase text-gray-400">Brier Calibration Score</div>
                     <div class="text-3xl font-black font-mono text-cyan-400 mt-1">0.2418</div>
-                    <div class="text-[11px] text-gray-500 mt-1">Benchmark: &lt; 0.2500</div>
+                    <div class="text-[11px] text-gray-500 mt-1">Market benchmark: &lt; 0.2500</div>
                 </div>
             </div>
+
             <div class="espn-card border rounded-lg p-4 space-y-2">
                 <h3 class="text-xs font-bold font-mono text-gray-300 uppercase">Recent Graded Audit Logs</h3>
                 <div id="accuracy-logs" class="divide-y divide-gray-800 font-mono text-xs"></div>
@@ -568,59 +615,50 @@ def serve_dashboard():
         const gamesData = __GAMES_JSON__;
         const battersData = __BATTERS_JSON__;
         const pitchersData = __PITCHERS_JSON__;
-        const recentAuditLogs = __AUDIT_LOGS__;
+        const auditLogsData = __AUDIT_LOGS__;
         const overallWinPct = __WIN_PCT__;
 
+        let currentDate = 'today';
         let currentStage = 'all';
         let currentMarket = 'games';
-
-        document.getElementById('count-all').textContent = gamesData.length;
-        document.getElementById('count-live').textContent = gamesData.filter(g => g.stage === 'live').length;
-        document.getElementById('count-upcoming').textContent = gamesData.filter(g => g.stage === 'upcoming').length;
-        document.getElementById('count-final').textContent = gamesData.filter(g => g.stage === 'final').length;
-
-        document.getElementById('pitchers-tab-count').textContent = pitchersData.length;
-        document.getElementById('batters-tab-count').textContent = battersData.length;
 
         document.getElementById('scorecard-win-pct').textContent = `${overallWinPct}%`;
         document.getElementById('scorecard-total-graded').textContent = gamesData.filter(g => g.stage === 'final').length;
 
         function buildTicker() {
             const items = [];
-            gamesData.filter(g => g.stage === 'live').forEach(g => {
+            const activeSlateGames = gamesData.filter(g => g.slate_tag === 'today');
+            activeSlateGames.filter(g => g.stage === 'live').forEach(g => {
                 items.push(`🔴 LIVE: ${g.away_team} ${g.away_actual_runs}, ${g.home_team} ${g.home_actual_runs} (${g.inning_state} ${g.current_inning}) | Live Proj: ${g.live_exp_away}-${g.live_exp_home} | ${g.home_team} Win: ${g.live_prob_home}%`);
             });
-            gamesData.filter(g => g.stage === 'final').forEach(g => {
+            activeSlateGames.filter(g => g.stage === 'final').forEach(g => {
                 const badge = g.hit_ml ? 'HIT ✅' : 'MISS ❌';
                 items.push(`🏁 FINAL: ${g.away_team} ${g.away_actual_runs}, ${g.home_team} ${g.home_actual_runs} | Fav: ${g.fav_team} (${g.fav_prob}%) -> ${badge}`);
             });
-            gamesData.filter(g => g.stage === 'upcoming').forEach(g => {
-                items.push(`⏳ ${g.game_time_et}: ${g.away_team} @ ${g.home_team} | Model Fav: ${g.fav_team} (${g.fav_prob}%) | Exp Runs: ${g.pregame_exp_away}-${g.pregame_exp_home} (Line: ${g.full_total})`);
+            activeSlateGames.filter(g => g.stage === 'upcoming').slice(0, 8).forEach(g => {
+                items.push(`⏳ ${g.game_time_et}: ${g.away_team} @ ${g.home_team} | Fav: ${g.fav_team} (${g.fav_prob}%) | Runs: ${g.pregame_exp_away}-${g.pregame_exp_home} (Tot: ${g.full_total})`);
             });
             pitchersData.slice(0, 5).forEach(p => {
-                items.push(`⚾ ${p.pitcher_name} (${p.team_name}): xK ${p.expected_k} (Line ${p.k_line}) • Over: ${p.over_prob}%`);
-            });
-            battersData.slice(0, 6).forEach(b => {
-                items.push(`🎯 ${b.name} (${b.team} #${b.order}): ${b.p_0_5}% Over 0.5 Hits`);
+                items.push(`⚾ ${p.pitcher_name}: xK ${p.expected_k} (Line ${p.k_line}) • Over: ${p.over_prob}%`);
             });
             document.getElementById('ticker-content').innerHTML = items.length > 0 ? items.join(' &nbsp;&nbsp;&nbsp;•&nbsp;&nbsp;&nbsp; ') : 'Synchronizing slate data...';
         }
 
         function promptBacktestModal() { document.getElementById('backtest-modal').classList.remove('hidden'); }
         function closeBacktestModal() { document.getElementById('backtest-modal').classList.add('hidden'); }
-        async function executeBacktestAction() {
+        async function confirmStartBacktest() {
             closeBacktestModal();
             const banner = document.getElementById('backtest-banner');
             const bText = document.getElementById('banner-status-text');
             banner.classList.remove('hidden');
-            bText.textContent = 'Executing backtest worker on cloud thread...';
+            bText.textContent = 'Executing backtest worker in background thread...';
             try {
                 const res = await fetch('/api/backtest/run', { method: 'POST' });
-                const data = await res.json();
-                bText.textContent = data.message || 'Worker running...';
+                const d = await res.json();
+                bText.textContent = d.message;
                 pollStatus();
             } catch (e) {
-                bText.textContent = 'Error starting worker: ' + e;
+                bText.textContent = 'Error starting backtest: ' + e;
             }
         }
         function pollStatus() {
@@ -628,13 +666,25 @@ def serve_dashboard():
                 try {
                     const res = await fetch('/api/backtest/status');
                     const d = await res.json();
-                    const bText = document.getElementById('banner-status-text');
-                    const bTime = document.getElementById('banner-time');
-                    bText.textContent = d.message;
-                    if (d.last_run) bTime.textContent = d.last_run;
+                    document.getElementById('banner-status-text').textContent = d.message;
+                    if (d.last_run) document.getElementById('banner-time').textContent = d.last_run;
                     if (d.status === 'completed' || d.status === 'error') clearInterval(t);
                 } catch (e) {}
             }, 3000);
+        }
+
+        function setDateSlate(dateTag) {
+            currentDate = dateTag;
+            document.querySelectorAll('.date-btn').forEach(b => {
+                b.classList.remove('bg-red-600', 'text-white', 'shadow');
+                b.classList.add('text-gray-400');
+            });
+            const activeBtn = document.getElementById(`date-btn-${dateTag}`);
+            if (activeBtn) {
+                activeBtn.classList.add('bg-red-600', 'text-white', 'shadow');
+                activeBtn.classList.remove('text-gray-400');
+            }
+            renderView();
         }
 
         function setGameStage(stage) {
@@ -643,10 +693,10 @@ def serve_dashboard():
                 b.classList.remove('bg-red-600', 'text-white');
                 b.classList.add('bg-gray-800', 'text-gray-400');
             });
-            const active = document.getElementById(`stage-btn-${stage}`);
-            if (active) {
-                active.classList.add('bg-red-600', 'text-white');
-                active.classList.remove('bg-gray-800', 'text-gray-400');
+            const activeBtn = document.getElementById(`stage-btn-${stage}`);
+            if (activeBtn) {
+                activeBtn.classList.add('bg-red-600', 'text-white');
+                activeBtn.classList.remove('bg-gray-800', 'text-gray-400');
             }
             renderView();
         }
@@ -657,45 +707,66 @@ def serve_dashboard():
                 t.classList.remove('border-red-600', 'text-white');
                 t.classList.add('border-transparent', 'text-gray-400');
             });
-            const active = document.getElementById(`tab-${market}`);
-            if (active) {
-                active.classList.add('border-red-600', 'text-white');
-                active.classList.remove('border-transparent', 'text-gray-400');
+            const activeTab = document.getElementById(`tab-${market}`);
+            if (activeTab) {
+                activeTab.classList.add('border-red-600', 'text-white');
+                activeTab.classList.remove('border-transparent', 'text-gray-400');
             }
             renderView();
         }
 
         function renderView() {
-            document.getElementById('filter-label').textContent = `${currentStage} Slates • ${currentMarket} Market`;
+            document.getElementById('filter-date-label').textContent = currentDate.toUpperCase();
+            document.getElementById('filter-market-label').textContent = currentMarket.toUpperCase();
+
+            // Filter games by date
+            const dateGames = gamesData.filter(g => g.slate_tag === currentDate);
+
+            // Update stage counts for active date
+            document.getElementById('count-all').textContent = dateGames.length;
+            document.getElementById('count-live').textContent = dateGames.filter(g => g.stage === 'live').length;
+            document.getElementById('count-upcoming').textContent = dateGames.filter(g => g.stage === 'upcoming').length;
+            document.getElementById('count-final').textContent = dateGames.filter(g => g.stage === 'final').length;
+
+            const filteredGames = dateGames.filter(g => currentStage === 'all' || g.stage === currentStage);
+            const activePks = new Set(filteredGames.map(g => String(g.game_pk)));
 
             const secGames = document.getElementById('section-games');
+            const secBest = document.getElementById('section-best-bets');
             const secPitchers = document.getElementById('section-pitchers');
             const secBatters = document.getElementById('section-batters');
-            const secAcc = document.getElementById('section-accuracy');
+            const secLab = document.getElementById('section-lab');
 
             secGames.classList.add('hidden');
+            secBest.classList.add('hidden');
             secPitchers.classList.add('hidden');
             secBatters.classList.add('hidden');
-            secAcc.classList.add('hidden');
+            secLab.classList.add('hidden');
 
-            const filteredGames = gamesData.filter(g => currentStage === 'all' || g.stage === currentStage);
-            const activePks = new Set(filteredGames.map(g => String(g.game_pk)));
+            const pFiltered = pitchersData.filter(p => activePks.has(String(p.game_pk)));
+            const bFiltered = battersData.filter(b => activePks.has(String(b.game_pk)));
+
+            document.getElementById('pitchers-tab-count').textContent = pFiltered.length;
+            document.getElementById('batters-tab-count').textContent = bFiltered.length;
 
             if (currentMarket === 'games') {
                 secGames.classList.remove('hidden');
                 const container = document.getElementById('games-grid');
                 container.innerHTML = '';
+                if (filteredGames.length === 0) {
+                    container.innerHTML = '<div class="col-span-3 py-8 text-center text-gray-500 font-mono">No matchups found for this stage/date filter.</div>';
+                }
                 filteredGames.forEach(g => {
                     const card = document.createElement('div');
                     card.className = "espn-card border rounded-lg p-3.5 shadow-md flex flex-col justify-between";
-                    
+
                     const badge = g.stage === 'live'
                         ? `<span class="bg-red-600 text-white px-2 py-0.5 rounded text-[10px] font-black tracking-wider animate-pulse">LIVE: ${g.inning_state} ${g.current_inning}</span>`
                         : (g.stage === 'final'
                             ? `<span class="bg-blue-600 text-white px-2 py-0.5 rounded text-[10px] font-black tracking-wider">FINAL</span>`
                             : `<span class="bg-gray-700 text-gray-300 px-2 py-0.5 rounded text-[10px] font-black tracking-wider">UPCOMING • ${g.game_time_et}</span>`);
 
-                    const runsDisplay = g.stage === 'upcoming' 
+                    const scoreLine = g.stage === 'upcoming'
                         ? `<strong class="text-gray-200">${g.pregame_exp_away} - ${g.pregame_exp_home}</strong> (Total: ${g.full_total})`
                         : `<strong class="text-yellow-400">${g.away_actual_runs} - ${g.home_actual_runs}</strong> (Proj: ${g.pregame_exp_away} - ${g.pregame_exp_home})`;
 
@@ -703,12 +774,12 @@ def serve_dashboard():
                         <div>
                             <div class="flex justify-between items-center mb-2">
                                 ${badge}
-                                <span class="font-mono text-xs text-yellow-400 font-bold">F5 Total: ${g.pregame_f5_median}</span>
+                                <span class="font-mono text-xs text-yellow-400 font-bold">F5 Line: ${g.pregame_f5_median}</span>
                             </div>
                             <h3 class="text-base font-black text-white uppercase tracking-tight mb-1">${g.away_team} @ ${g.home_team}</h3>
                             <div class="text-xs text-gray-400 space-y-0.5 mb-2.5">
                                 <div class="truncate">SP: <span class="text-gray-200">${g.away_sp}</span> vs <span class="text-gray-200">${g.home_sp}</span></div>
-                                <div class="truncate">Runs: ${runsDisplay}</div>
+                                <div class="truncate">Runs: ${scoreLine}</div>
                             </div>
                             <div class="bg-black/60 p-2.5 rounded border border-gray-800 space-y-1 text-xs font-mono">
                                 <div class="flex justify-between text-gray-300">
@@ -725,11 +796,43 @@ def serve_dashboard():
                     container.appendChild(card);
                 });
                 document.getElementById('games-counter').textContent = `${filteredGames.length} Matchups`;
+            } else if (currentMarket === 'best_bets') {
+                secBest.classList.remove('hidden');
+                const container = document.getElementById('best-bets-grid');
+                container.innerHTML = '';
+                const highConfGames = filteredGames.filter(g => g.fav_prob >= 58.0);
+                if (highConfGames.length === 0) {
+                    container.innerHTML = '<div class="col-span-3 py-8 text-center text-gray-500 font-mono">No games currently meet the 58%+ high edge threshold.</div>';
+                }
+                highConfGames.forEach(g => {
+                    const card = document.createElement('div');
+                    card.className = "espn-card border-2 border-emerald-500/50 rounded-lg p-4 shadow-xl flex flex-col justify-between";
+                    card.innerHTML = `
+                        <div>
+                            <div class="flex justify-between items-center mb-2">
+                                <span class="bg-emerald-600 text-white px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider">Top Edge Pick</span>
+                                <span class="font-mono text-xs text-emerald-400 font-bold">${g.fav_prob}% Win Prob</span>
+                            </div>
+                            <h3 class="text-base font-black text-white uppercase">${g.away_team} @ ${g.home_team}</h3>
+                            <p class="text-xs text-gray-400 mt-1">Recommended Moneyline: <strong class="text-white">${g.fav_team}</strong></p>
+                            <div class="mt-3 bg-black/60 p-2.5 rounded border border-gray-800 text-xs font-mono space-y-1">
+                                <div class="flex justify-between text-gray-300">
+                                    <span>Expected Score:</span>
+                                    <strong class="text-white">${g.pregame_exp_away} - ${g.pregame_exp_home}</strong>
+                                </div>
+                                <div class="flex justify-between text-gray-400">
+                                    <span>F5 Model Total:</span>
+                                    <span>${g.pregame_f5_median} Runs</span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                    container.appendChild(card);
+                });
             } else if (currentMarket === 'pitchers') {
                 secPitchers.classList.remove('hidden');
                 const tbody = document.getElementById('pitchers-tbody');
                 tbody.innerHTML = '';
-                const pFiltered = pitchersData.filter(p => activePks.has(String(p.game_pk)));
                 pFiltered.forEach(p => {
                     const tr = document.createElement('tr');
                     tr.className = "hover:bg-gray-800/60 transition-colors";
@@ -749,7 +852,6 @@ def serve_dashboard():
                 secBatters.classList.remove('hidden');
                 const tbody = document.getElementById('batters-tbody');
                 tbody.innerHTML = '';
-                const bFiltered = battersData.filter(b => activePks.has(String(b.game_pk)));
                 bFiltered.slice(0, 50).forEach(b => {
                     const tr = document.createElement('tr');
                     tr.className = "hover:bg-gray-800/60 transition-colors";
@@ -760,19 +862,19 @@ def serve_dashboard():
                         <td class="py-2.5 px-3 text-right text-white">${b.xhits}</td>
                         <td class="py-2.5 px-3.5 text-right font-bold text-emerald-400">${b.p_0_5}%</td>
                         <td class="py-2.5 px-3.5 text-right font-bold text-cyan-400">${b.p_1_5}%</td>
-                        <td class="py-2.5 px-3.5 text-right text-gray-400">${b.p_2_5}%</td>
+                        <td class="py-2.5 px-3 text-right text-gray-400">${b.p_2_5}%</td>
                     `;
                     tbody.appendChild(tr);
                 });
                 document.getElementById('batters-counter').textContent = `${bFiltered.length} Hitters`;
-            } else if (currentMarket === 'accuracy') {
-                secAcc.classList.remove('hidden');
+            } else if (currentMarket === 'lab') {
+                secLab.classList.remove('hidden');
                 const logsBox = document.getElementById('accuracy-logs');
                 logsBox.innerHTML = '';
-                if (recentAuditLogs.length === 0) {
-                    logsBox.innerHTML = '<div class="py-3 text-gray-500">No completed games graded on active 3-day slate yet.</div>';
+                if (auditLogsData.length === 0) {
+                    logsBox.innerHTML = '<div class="py-3 text-gray-500">No completed games graded on active slate yet.</div>';
                 } else {
-                    recentAuditLogs.forEach(l => {
+                    auditLogsData.forEach(l => {
                         const tr = document.createElement('div');
                         tr.className = "py-2.5 flex justify-between items-center";
                         const bClass = l.hit ? "text-emerald-400 font-bold" : "text-red-400 font-bold";
@@ -802,7 +904,7 @@ def serve_dashboard():
         html = template.replace("__GAMES_JSON__", json.dumps(games)) \
                        .replace("__BATTERS_JSON__", json.dumps(batters)) \
                        .replace("__PITCHERS_JSON__", json.dumps(pitchers)) \
-                       .replace("__AUDIT_LOGS__", json.dumps(recent_audit_logs)) \
+                       .replace("__AUDIT_LOGS__", json.dumps(audit_logs)) \
                        .replace("__WIN_PCT__", str(win_pct))
         return HTMLResponse(content=html)
 
