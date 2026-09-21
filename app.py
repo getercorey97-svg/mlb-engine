@@ -2,13 +2,13 @@ import sqlite3
 import json
 import os
 import re
+import math
+import traceback
 import subprocess
 import requests
-import numpy as np
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse
-from scipy.stats import poisson, binom
 
 app = FastAPI(title="ESPN StatsCenter MLB Prediction Hub")
 
@@ -20,7 +20,14 @@ def get_db_connection():
 def clean_team_name(name: str) -> str:
     return re.sub(r'[^a-zA-Z0-9]', '', name or "").lower()
 
-# Baseline 2026 MLB Team Power Indices (Offensive Factor, Defensive Factor)
+def poisson_cdf(k: int, lamb: float) -> float:
+    if lamb <= 0:
+        return 1.0
+    prob = 0.0
+    for i in range(int(k) + 1):
+        prob += (lamb ** i) * math.exp(-lamb) / math.factorial(i)
+    return min(1.0, max(0.0, prob))
+
 TEAM_POWER_INDEX = {
     "dodgers": (1.18, 0.88), "braves": (1.14, 0.90), "yankees": (1.15, 0.91),
     "orioles": (1.12, 0.92), "phillies": (1.11, 0.91), "astros": (1.08, 0.93),
@@ -79,8 +86,6 @@ def fetch_mlb_slate_and_scores():
         print(f"[MLB API FETCH ERROR] {e}")
     return {}
 
-# ----------------- ASYNC BACKTEST WORKER -----------------
-
 backtest_state = {
     "status": "idle",
     "message": "System ready.",
@@ -119,279 +124,268 @@ def trigger_backtest(background_tasks: BackgroundTasks):
 def get_backtest_status():
     return backtest_state
 
-# ----------------- MAIN DASHBOARD -----------------
-
 @app.get("/", response_class=HTMLResponse)
 def serve_dashboard():
-    conn = get_db_connection()
-    c = conn.cursor()
-    tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
 
-    # Ingest pregame models strictly for lookup
-    pregame_models = {}
-    if "Model_Forecasts" in tables:
-        for r in c.execute("SELECT * FROM Model_Forecasts").fetchall():
-            row = dict(r)
-            if row.get("game_pk"):
-                pregame_models[int(row["game_pk"])] = row
-                pregame_models[str(row["game_pk"])] = row
-            a_t = row.get("away_team") or row.get("away")
-            h_t = row.get("home_team") or row.get("home")
-            if a_t and h_t:
-                pregame_models[(clean_team_name(a_t), clean_team_name(h_t))] = row
+        pregame_models = {}
+        if "Model_Forecasts" in tables:
+            for r in c.execute("SELECT * FROM Model_Forecasts").fetchall():
+                row = dict(r)
+                if row.get("game_pk"):
+                    pregame_models[int(row["game_pk"])] = row
+                    pregame_models[str(row["game_pk"])] = row
+                a_t = row.get("away_team") or row.get("away")
+                h_t = row.get("home_team") or row.get("home")
+                if a_t and h_t:
+                    pregame_models[(clean_team_name(a_t), clean_team_name(h_t))] = row
 
-    # Fetch active 3-day slate (NEVER merge historical database dump into games)
-    live_schedule = fetch_mlb_slate_and_scores()
-    active_pks = list(live_schedule.keys())
+        live_schedule = fetch_mlb_slate_and_scores()
+        active_pks = list(live_schedule.keys())
 
-    games = []
-    for pk in active_pks:
-        mlb_game = live_schedule[pk]
-        teams = mlb_game.get("teams", {})
-        away_name = teams.get("away", {}).get("team", {}).get("name", "Away")
-        home_name = teams.get("home", {}).get("team", {}).get("name", "Home")
-        away_sp = teams.get("away", {}).get("probablePitcher", {}).get("fullName", "TBD")
-        home_sp = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
-        status_desc = mlb_game.get("status", {}).get("detailedState", "Scheduled")
-        linescore = mlb_game.get("linescore", {})
+        games = []
+        for pk in active_pks:
+            mlb_game = live_schedule[pk]
+            teams = mlb_game.get("teams", {})
+            away_name = teams.get("away", {}).get("team", {}).get("name", "Away")
+            home_name = teams.get("home", {}).get("team", {}).get("name", "Home")
+            away_sp = teams.get("away", {}).get("probablePitcher", {}).get("fullName", "TBD")
+            home_sp = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
+            status_desc = mlb_game.get("status", {}).get("detailedState", "Scheduled")
+            linescore = mlb_game.get("linescore", {})
 
-        dt_utc = mlb_game.get("gameDate", "")
-        time_et = "Scheduled"
-        if dt_utc:
+            dt_utc = mlb_game.get("gameDate", "")
+            time_et = "Scheduled"
+            if dt_utc:
+                try:
+                    dt_obj = datetime.fromisoformat(dt_utc.replace("Z", "+00:00"))
+                    time_et = (dt_obj - timedelta(hours=4)).strftime("%I:%M %p EDT")
+                except Exception:
+                    pass
+
+            m = pregame_models.get(pk) or pregame_models.get(str(pk)) or pregame_models.get((clean_team_name(away_name), clean_team_name(home_name)))
+            if not m or not m.get("prob_home_win") or float(m.get("prob_home_win") or 0.50) == 0.50:
+                m = derive_quantitative_projection(away_name, home_name)
+
+            p_home_pre = float(m.get("prob_home_win") or 0.54)
+            p_away_pre = round(1.0 - p_home_pre, 3)
+            exp_a = round(float(m.get("expected_runs_away") or 4.2), 2)
+            exp_h = round(float(m.get("expected_runs_home") or 4.8), 2)
+            full_total = round(exp_a + exp_h, 2)
+
+            f5_exp_a = round(float(m.get("f5_exp_away") or (exp_a * 0.55)), 2)
+            f5_exp_h = round(float(m.get("f5_exp_home") or (exp_h * 0.55)), 2)
+            f5_med = round(float(m.get("f5_median_runs") or (f5_exp_a + f5_exp_h)), 1)
+
+            fav_team = home_name if p_home_pre >= 0.50 else away_name
+            fav_prob = max(p_home_pre, p_away_pre)
+
+            is_final = any(x in status_desc.lower() for x in ["final", "game over", "completed"])
+            is_live = any(x in status_desc.lower() for x in ["in progress", "live", "delayed", "manager challenge"])
+
+            current_inning = linescore.get("currentInning", 0)
+            inning_state = linescore.get("inningState", "")
+            away_actual_runs = linescore.get("teams", {}).get("away", {}).get("runs", 0)
+            home_actual_runs = linescore.get("teams", {}).get("home", {}).get("runs", 0)
+            actual_total_runs = away_actual_runs + home_actual_runs
+
+            f5_actual_runs = None
+            f5_actual_away = 0
+            f5_actual_home = 0
+            innings_list = linescore.get("innings", [])
+            if len(innings_list) >= 5:
+                f5_actual_away = sum([inn.get("away", {}).get("runs", 0) for inn in innings_list[:5]])
+                f5_actual_home = sum([inn.get("home", {}).get("runs", 0) for inn in innings_list[:5]])
+                f5_actual_runs = f5_actual_away + f5_actual_home
+
+            live_prob_home = round(p_home_pre * 100, 1)
+            live_exp_away = exp_a
+            live_exp_home = exp_h
+
+            if is_live and current_inning > 0:
+                stage = "live"
+                rem_away = max(0.0, 9.0 - (current_inning - 1) - (1.0 if inning_state.lower() == "bottom" else 0.0))
+                rem_home = max(0.0, 8.5 - (current_inning - 1) - (0.5 if inning_state.lower() == "bottom" else 0.0))
+                live_exp_away = round(away_actual_runs + (exp_a * (rem_away / 9.0)), 2)
+                live_exp_home = round(home_actual_runs + (exp_h * (rem_home / 9.0)), 2)
+                diff = live_exp_home - live_exp_away
+                live_p = 1.0 / (1.0 + 10 ** (-diff / 2.2))
+                live_prob_home = round(live_p * 100, 1)
+            elif is_final:
+                stage = "final"
+            else:
+                stage = "upcoming"
+
+            hit_ml = None
+            if is_final:
+                actual_winner = away_name if away_actual_runs > home_actual_runs else home_name
+                hit_ml = (fav_team == actual_winner)
+
+            games.append({
+                "game_pk": pk,
+                "away_team": away_name,
+                "home_team": home_name,
+                "away_sp": away_sp,
+                "home_sp": home_sp,
+                "game_time_et": time_et,
+                "status_desc": status_desc,
+                "stage": stage,
+                "current_inning": current_inning,
+                "inning_state": inning_state,
+                "away_actual_runs": away_actual_runs,
+                "home_actual_runs": home_actual_runs,
+                "actual_total_runs": actual_total_runs,
+                "f5_actual_runs": f5_actual_runs,
+                "f5_actual_away": f5_actual_away,
+                "f5_actual_home": f5_actual_home,
+                "pregame_prob_home": round(p_home_pre * 100, 1),
+                "pregame_prob_away": round(p_away_pre * 100, 1),
+                "pregame_exp_away": exp_a,
+                "pregame_exp_home": exp_h,
+                "full_total": full_total,
+                "f5_exp_away": f5_exp_a,
+                "f5_exp_home": f5_exp_h,
+                "pregame_f5_median": f5_med,
+                "fav_team": fav_team,
+                "fav_prob": round(fav_prob * 100, 1),
+                "live_prob_home": live_prob_home,
+                "live_prob_away": round(100.0 - live_prob_home, 1),
+                "live_exp_away": live_exp_away,
+                "live_exp_home": live_exp_home,
+                "hit_ml": hit_ml
+            })
+
+        stage_priority = {"live": 0, "upcoming": 1, "final": 2}
+        games.sort(key=lambda x: stage_priority.get(x["stage"], 3))
+
+        active_pks_set = set(active_pks)
+
+        pitchers = []
+        if "Pitcher_K_Forecasts" in tables:
             try:
-                dt_obj = datetime.fromisoformat(dt_utc.replace("Z", "+00:00"))
-                time_et = (dt_obj - timedelta(hours=4)).strftime("%I:%M %p EDT")
+                p_rows = c.execute("SELECT * FROM Pitcher_K_Forecasts").fetchall()
+                for r in p_rows:
+                    pk = int(r["game_pk"])
+                    if pk in active_pks_set:
+                        over_p = float(r["over_prob"] or 0.50)
+                        under_p = float(r["under_prob"] or (1.0 - over_p))
+                        pitchers.append({
+                            "game_pk": pk,
+                            "pitcher_name": r["pitcher_name"],
+                            "team_name": r["team_name"],
+                            "opponent_team": r["opponent_team"],
+                            "projected_pitches": round(float(r["projected_pitches"] or 86.0), 1),
+                            "expected_k": round(float(r["expected_k"] or 5.0), 2),
+                            "k_line": float(r["k_line"] or 4.5),
+                            "over_prob": round(over_p * 100 if over_p <= 1.0 else over_p, 1),
+                            "under_prob": round(under_p * 100 if under_p <= 1.0 else under_p, 1)
+                        })
             except Exception:
                 pass
 
-        # Look up pregame model or derive deterministic rating (never flat 50%)
-        m = pregame_models.get(pk) or pregame_models.get(str(pk)) or pregame_models.get((clean_team_name(away_name), clean_team_name(home_name)))
-        if not m or not m.get("prob_home_win") or float(m.get("prob_home_win") or 0.50) == 0.50:
-            m = derive_quantitative_projection(away_name, home_name)
-
-        p_home_pre = float(m.get("prob_home_win") or 0.54)
-        p_away_pre = round(1.0 - p_home_pre, 3)
-        exp_a = round(float(m.get("expected_runs_away") or 4.2), 2)
-        exp_h = round(float(m.get("expected_runs_home") or 4.8), 2)
-        full_total = round(exp_a + exp_h, 2)
-
-        f5_exp_a = round(float(m.get("f5_exp_away") or (exp_a * 0.55)), 2)
-        f5_exp_h = round(float(m.get("f5_exp_home") or (exp_h * 0.55)), 2)
-        f5_med = round(float(m.get("f5_median_runs") or (f5_exp_a + f5_exp_h)), 1)
-
-        fav_team = home_name if p_home_pre >= 0.50 else away_name
-        fav_prob = max(p_home_pre, p_away_pre)
-
-        is_final = any(x in status_desc.lower() for x in ["final", "game over", "completed"])
-        is_live = any(x in status_desc.lower() for x in ["in progress", "live", "delayed", "manager challenge"])
-
-        current_inning = linescore.get("currentInning", 0)
-        inning_state = linescore.get("inningState", "")
-        away_actual_runs = linescore.get("teams", {}).get("away", {}).get("runs", 0)
-        home_actual_runs = linescore.get("teams", {}).get("home", {}).get("runs", 0)
-        actual_total_runs = away_actual_runs + home_actual_runs
-
-        f5_actual_runs = None
-        f5_actual_away = 0
-        f5_actual_home = 0
-        innings_list = linescore.get("innings", [])
-        if len(innings_list) >= 5:
-            f5_actual_away = sum([inn.get("away", {}).get("runs", 0) for inn in innings_list[:5]])
-            f5_actual_home = sum([inn.get("home", {}).get("runs", 0) for inn in innings_list[:5]])
-            f5_actual_runs = f5_actual_away + f5_actual_home
-
-        live_prob_home = round(p_home_pre * 100, 1)
-        live_exp_away = exp_a
-        live_exp_home = exp_h
-
-        if is_live and current_inning > 0:
-            stage = "live"
-            rem_away = max(0.0, 9.0 - (current_inning - 1) - (1.0 if inning_state.lower() == "bottom" else 0.0))
-            rem_home = max(0.0, 8.5 - (current_inning - 1) - (0.5 if inning_state.lower() == "bottom" else 0.0))
-            live_exp_away = round(away_actual_runs + (exp_a * (rem_away / 9.0)), 2)
-            live_exp_home = round(home_actual_runs + (exp_h * (rem_home / 9.0)), 2)
-            diff = live_exp_home - live_exp_away
-            live_p = 1.0 / (1.0 + 10 ** (-diff / 2.2))
-            live_prob_home = round(live_p * 100, 1)
-        elif is_final:
-            stage = "final"
-        else:
-            stage = "upcoming"
-
-        hit_ml = None
-        if is_final:
-            actual_winner = away_name if away_actual_runs > home_actual_runs else home_name
-            hit_ml = (fav_team == actual_winner)
-
-        games.append({
-            "game_pk": pk,
-            "away_team": away_name,
-            "home_team": home_name,
-            "away_sp": away_sp,
-            "home_sp": home_sp,
-            "game_time_et": time_et,
-            "status_desc": status_desc,
-            "stage": stage,
-            "current_inning": current_inning,
-            "inning_state": inning_state,
-            "away_actual_runs": away_actual_runs,
-            "home_actual_runs": home_actual_runs,
-            "actual_total_runs": actual_total_runs,
-            "f5_actual_runs": f5_actual_runs,
-            "f5_actual_away": f5_actual_away,
-            "f5_actual_home": f5_actual_home,
-            "pregame_prob_home": round(p_home_pre * 100, 1),
-            "pregame_prob_away": round(p_away_pre * 100, 1),
-            "pregame_exp_away": exp_a,
-            "pregame_exp_home": exp_h,
-            "full_total": full_total,
-            "f5_exp_away": f5_exp_a,
-            "f5_exp_home": f5_exp_h,
-            "pregame_f5_median": f5_med,
-            "fav_team": fav_team,
-            "fav_prob": round(fav_prob * 100, 1),
-            "live_prob_home": live_prob_home,
-            "live_prob_away": round(100.0 - live_prob_home, 1),
-            "live_exp_away": live_exp_away,
-            "live_exp_home": live_exp_home,
-            "hit_ml": hit_ml
-        })
-
-    # Sort games: Live first, then Upcoming, then Final
-    stage_priority = {"live": 0, "upcoming": 1, "final": 2}
-    games.sort(key=lambda x: stage_priority.get(x["stage"], 3))
-
-    active_pks_set = set(active_pks)
-
-    # Ingest Pitcher Props for Active Slate
-    pitchers = []
-    if "Pitcher_K_Forecasts" in tables:
-        try:
-            p_rows = c.execute("SELECT * FROM Pitcher_K_Forecasts").fetchall()
-            for r in p_rows:
-                pk = int(r["game_pk"])
-                if pk in active_pks_set:
-                    over_p = float(r["over_prob"] or 0.50)
-                    under_p = float(r["under_prob"] or (1.0 - over_p))
+        existing_p_pks = set(p["game_pk"] for p in pitchers)
+        for g in games:
+            if g["game_pk"] not in existing_p_pks:
+                pk = g["game_pk"]
+                starters = [
+                    (g["away_sp"], g["away_team"], g["home_team"]),
+                    (g["home_sp"], g["home_team"], g["away_team"])
+                ]
+                for sp_name, tm, opp in starters:
+                    display_sp = sp_name if sp_name and "tbd" not in sp_name.lower() else f"{tm} Projected Starter"
+                    exp_k = 5.25
+                    k_line = 4.5
+                    p_under = poisson_cdf(4, exp_k)
+                    p_over = float(1.0 - p_under)
                     pitchers.append({
                         "game_pk": pk,
-                        "pitcher_name": r["pitcher_name"],
-                        "team_name": r["team_name"],
-                        "opponent_team": r["opponent_team"],
-                        "projected_pitches": round(float(r["projected_pitches"] or 86.0), 1),
-                        "expected_k": round(float(r["expected_k"] or 5.0), 2),
-                        "k_line": float(r["k_line"] or 4.5),
-                        "over_prob": round(over_p * 100 if over_p <= 1.0 else over_p, 1),
-                        "under_prob": round(under_p * 100 if under_p <= 1.0 else under_p, 1)
+                        "pitcher_name": display_sp,
+                        "team_name": tm,
+                        "opponent_team": opp,
+                        "projected_pitches": 88.0,
+                        "expected_k": exp_k,
+                        "k_line": k_line,
+                        "over_prob": round(p_over * 100, 1),
+                        "under_prob": round(p_under * 100, 1)
                     })
-        except Exception:
-            pass
 
-    # If any upcoming game is missing pitcher props, synthesize advance projections
-    existing_p_pks = set(p["game_pk"] for p in pitchers)
-    for g in games:
-        if g["game_pk"] not in existing_p_pks:
-            pk = g["game_pk"]
-            starters = [
-                (g["away_sp"], g["away_team"], g["home_team"]),
-                (g["home_sp"], g["home_team"], g["away_team"])
-            ]
-            for sp_name, tm, opp in starters:
-                display_sp = sp_name if sp_name and "tbd" not in sp_name.lower() else f"{tm} Projected Starter"
-                exp_k = 5.25
-                k_line = 4.5
-                p_under = float(poisson.cdf(4, exp_k))
-                p_over = float(1.0 - p_under)
-                pitchers.append({
-                    "game_pk": pk,
-                    "pitcher_name": display_sp,
-                    "team_name": tm,
-                    "opponent_team": opp,
-                    "projected_pitches": 88.0,
-                    "expected_k": exp_k,
-                    "k_line": k_line,
-                    "over_prob": round(p_over * 100, 1),
-                    "under_prob": round(p_under * 100, 1)
+        pitchers.sort(key=lambda x: x["expected_k"], reverse=True)
+
+        batters = []
+        if "Batter_Hit_Forecasts" in tables:
+            try:
+                b_rows = c.execute("SELECT * FROM Batter_Hit_Forecasts").fetchall()
+                for r in b_rows:
+                    pk = int(r["game_pk"])
+                    if pk in active_pks_set:
+                        p05 = float(r["over_0_5_hit_prob"] or 0.0)
+                        p15 = float(r["over_1_5_hit_prob"] or 0.0)
+                        p25 = float(r["over_2_5_hit_prob"] or 0.0)
+                        batters.append({
+                            "game_pk": pk,
+                            "name": r["player_name"],
+                            "team": r["team_name"],
+                            "order": int(r["batting_order"] or 5),
+                            "pa": round(float(r["projected_pa"] or 4.1), 1),
+                            "ab": round(float(r["projected_ab"] or 3.6), 1),
+                            "xhits": round(float(r["expected_hits"] or 0.9), 2),
+                            "p_0_5": round(p05 * 100 if p05 <= 1.0 else p05, 1),
+                            "p_1_5": round(p15 * 100 if p15 <= 1.0 else p15, 1),
+                            "p_2_5": round(p25 * 100 if p25 <= 1.0 else p25, 1)
+                        })
+            except Exception:
+                pass
+
+        existing_b_pks = set(b["game_pk"] for b in batters)
+        for g in games:
+            if g["game_pk"] not in existing_b_pks:
+                pk = g["game_pk"]
+                for tm in [g["away_team"], g["home_team"]]:
+                    for slot in range(1, 10):
+                        pa = round(max(3.2, 4.7 - (slot - 1) * 0.15), 1)
+                        ab = round(pa * 0.88, 1)
+                        ba = max(0.210, 0.280 - (slot - 1) * 0.008)
+                        xhits = round(ab * ba, 2)
+                        p05 = round(1.0 - ((1.0 - ba) ** ab), 3)
+                        p15 = round(p05 * 0.38, 3)
+                        p25 = round(p15 * 0.28, 3)
+                        batters.append({
+                            "game_pk": pk,
+                            "name": f"{tm} Batter #{slot}",
+                            "team": tm,
+                            "order": slot,
+                            "pa": pa,
+                            "ab": ab,
+                            "xhits": xhits,
+                            "p_0_5": round(p05 * 100, 1),
+                            "p_1_5": round(p15 * 100, 1),
+                            "p_2_5": round(p25 * 100, 1)
+                        })
+
+        batters.sort(key=lambda x: x["p_0_5"], reverse=True)
+
+        total_graded = 0
+        total_right = 0
+        recent_audit_logs = []
+        for g in games:
+            if g["stage"] == "final":
+                total_graded += 1
+                if g["hit_ml"]:
+                    total_right += 1
+                recent_audit_logs.append({
+                    "matchup": f"{g['away_team']} @ {g['home_team']}",
+                    "predicted": f"{g['fav_team']} ({g['fav_prob']}%)",
+                    "result": f"{g['away_actual_runs']} - {g['home_actual_runs']}",
+                    "hit": g["hit_ml"]
                 })
 
-    pitchers.sort(key=lambda x: x["expected_k"], reverse=True)
+        win_pct = round((total_right / total_graded) * 100, 1) if total_graded > 0 else 58.4
+        conn.close()
 
-    # Ingest Batter Props for Active Slate
-    batters = []
-    if "Batter_Hit_Forecasts" in tables:
-        try:
-            b_rows = c.execute("SELECT * FROM Batter_Hit_Forecasts").fetchall()
-            for r in b_rows:
-                pk = int(r["game_pk"])
-                if pk in active_pks_set:
-                    p05 = float(r["over_0_5_hit_prob"] or 0.0)
-                    p15 = float(r["over_1_5_hit_prob"] or 0.0)
-                    p25 = float(r["over_2_5_hit_prob"] or 0.0)
-                    batters.append({
-                        "game_pk": pk,
-                        "name": r["player_name"],
-                        "team": r["team_name"],
-                        "order": int(r["batting_order"] or 5),
-                        "pa": round(float(r["projected_pa"] or 4.1), 1),
-                        "ab": round(float(r["projected_ab"] or 3.6), 1),
-                        "xhits": round(float(r["expected_hits"] or 0.9), 2),
-                        "p_0_5": round(p05 * 100 if p05 <= 1.0 else p05, 1),
-                        "p_1_5": round(p15 * 100 if p15 <= 1.0 else p15, 1),
-                        "p_2_5": round(p25 * 100 if p25 <= 1.0 else p25, 1)
-                    })
-        except Exception:
-            pass
-
-    # If any upcoming game is missing batter props, synthesize advance 9-man order
-    existing_b_pks = set(b["game_pk"] for b in batters)
-    for g in games:
-        if g["game_pk"] not in existing_b_pks:
-            pk = g["game_pk"]
-            for tm in [g["away_team"], g["home_team"]]:
-                for slot in range(1, 10):
-                    pa = round(max(3.2, 4.7 - (slot - 1) * 0.15), 1)
-                    ab = round(pa * 0.88, 1)
-                    ba = max(0.210, 0.280 - (slot - 1) * 0.008)
-                    xhits = round(ab * ba, 2)
-                    p05 = round(1.0 - ((1.0 - ba) ** ab), 3)
-                    p15 = round(p05 * 0.38, 3)
-                    p25 = round(p15 * 0.28, 3)
-                    batters.append({
-                        "game_pk": pk,
-                        "name": f"{tm} Batter #{slot}",
-                        "team": tm,
-                        "order": slot,
-                        "pa": pa,
-                        "ab": ab,
-                        "xhits": xhits,
-                        "p_0_5": round(p05 * 100, 1),
-                        "p_1_5": round(p15 * 100, 1),
-                        "p_2_5": round(p25 * 100, 1)
-                    })
-
-    batters.sort(key=lambda x: x["p_0_5"], reverse=True)
-
-    # Graded Accuracy Scorecard
-    total_graded = 0
-    total_right = 0
-    recent_audit_logs = []
-    for g in games:
-        if g["stage"] == "final":
-            total_graded += 1
-            if g["hit_ml"]:
-                total_right += 1
-            recent_audit_logs.append({
-                "matchup": f"{g['away_team']} @ {g['home_team']}",
-                "predicted": f"{g['fav_team']} ({g['fav_prob']}%)",
-                "result": f"{g['away_actual_runs']} - {g['home_actual_runs']}",
-                "hit": g["hit_ml"]
-            })
-
-    win_pct = round((total_right / total_graded) * 100, 1) if total_graded > 0 else 58.4
-
-    conn.close()
-
-    template = """
+        template = """
 <!DOCTYPE html>
 <html lang="en" class="h-full bg-[#0b0e14]">
 <head>
@@ -412,7 +406,6 @@ def serve_dashboard():
     </style>
 </head>
 <body class="espn-dark text-gray-200 font-sans antialiased min-h-screen flex flex-col selection:bg-red-600 selection:text-white pb-24 md:pb-12">
-    <!-- Clean Ticker Bar -->
     <div class="bg-black border-b border-red-700/80 overflow-hidden flex items-center h-10 sticky top-0 z-50 shadow-md">
         <div class="espn-red text-white px-3.5 h-full uppercase tracking-wider flex items-center z-10 shrink-0 font-black text-xs">
             <span class="inline-block w-2 h-2 rounded-full bg-yellow-400 mr-2 animate-pulse"></span>
@@ -425,7 +418,6 @@ def serve_dashboard():
         </div>
     </div>
 
-    <!-- Header Navigation -->
     <header class="espn-subbar border-b border-gray-800 px-4 py-3 shadow-lg">
         <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
             <div class="flex items-center gap-3">
@@ -436,7 +428,6 @@ def serve_dashboard():
                 </div>
             </div>
 
-            <!-- Slate Filter Buttons -->
             <div class="flex items-center gap-1.5 overflow-x-auto w-full md:w-auto touch-scroll py-1 text-xs font-black uppercase tracking-wider">
                 <button onclick="promptBacktestModal()" class="min-h-[40px] px-3.5 py-2 rounded-md bg-blue-600 hover:bg-blue-500 text-white shadow active:scale-95 transition-all flex items-center gap-1.5 whitespace-nowrap">
                     <span>📊 Run Backtest</span>
@@ -449,7 +440,6 @@ def serve_dashboard():
             </div>
         </div>
 
-        <!-- Market Tabs -->
         <div class="max-w-7xl mx-auto mt-3 flex gap-2 overflow-x-auto touch-scroll border-t border-gray-800/80 pt-2.5 text-xs md:text-sm font-bold uppercase">
             <button onclick="setBetMarket('games')" id="tab-games" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-red-600 text-white whitespace-nowrap">⚾ Matchups & F5</button>
             <button onclick="setBetMarket('pitchers')" id="tab-pitchers" class="market-tab min-h-[44px] px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">⚾ Pitcher Ks (<span id="pitchers-tab-count">0</span>)</button>
@@ -458,7 +448,6 @@ def serve_dashboard():
         </div>
     </header>
 
-    <!-- Confirmation Modal -->
     <div id="backtest-modal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
         <div class="bg-[#121722] border border-gray-700 rounded-xl max-w-md w-full p-5 shadow-2xl space-y-4">
             <div class="flex items-center gap-3">
@@ -478,7 +467,6 @@ def serve_dashboard():
         </div>
     </div>
 
-    <!-- Main Content Area -->
     <main class="max-w-7xl mx-auto p-4 md:p-6 space-y-6 flex-1 w-full">
         <div id="backtest-banner" class="hidden bg-blue-950/80 border border-blue-700/60 p-3 rounded-lg text-xs font-mono flex items-center justify-between shadow-lg">
             <div class="flex items-center gap-2">
@@ -493,7 +481,6 @@ def serve_dashboard():
             <span class="font-mono text-gray-500 text-[11px]">Database: <strong class="text-emerald-400">mlb_engine.db</strong></span>
         </div>
 
-        <!-- Section: Games Board -->
         <section id="section-games" class="space-y-3">
             <div class="flex items-center justify-between border-b border-gray-800 pb-2">
                 <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Full Game & First 5 (F5) Board</h2>
@@ -502,7 +489,6 @@ def serve_dashboard():
             <div id="games-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5"></div>
         </section>
 
-        <!-- Section: Pitcher Strikeouts -->
         <section id="section-pitchers" class="space-y-3 hidden">
             <div class="flex items-center justify-between border-b border-gray-800 pb-2">
                 <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Pitcher Strikeout Props & Lines</h2>
@@ -526,7 +512,6 @@ def serve_dashboard():
             </div>
         </section>
 
-        <!-- Section: Batter Hits -->
         <section id="section-batters" class="space-y-3 hidden">
             <div class="flex items-center justify-between border-b border-gray-800 pb-2">
                 <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Batter Contact Distributions & Hit Props</h2>
@@ -550,7 +535,6 @@ def serve_dashboard():
             </div>
         </section>
 
-        <!-- Section: Accuracy Scorecard -->
         <section id="section-accuracy" class="space-y-4 hidden">
             <div class="border-b border-gray-800 pb-2">
                 <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Prediction Accuracy Scorecard</h2>
@@ -776,7 +760,7 @@ def serve_dashboard():
                         <td class="py-2.5 px-3 text-right text-white">${b.xhits}</td>
                         <td class="py-2.5 px-3.5 text-right font-bold text-emerald-400">${b.p_0_5}%</td>
                         <td class="py-2.5 px-3.5 text-right font-bold text-cyan-400">${b.p_1_5}%</td>
-                        <td class="py-2.5 px-3 text-right text-gray-400">${b.p_2_5}%</td>
+                        <td class="py-2.5 px-3.5 text-right text-gray-400">${b.p_2_5}%</td>
                     `;
                     tbody.appendChild(tr);
                 });
@@ -815,12 +799,20 @@ def serve_dashboard():
 </body>
 </html>
 """
-    html = template.replace("__GAMES_JSON__", json.dumps(games)) \
-                   .replace("__BATTERS_JSON__", json.dumps(batters)) \
-                   .replace("__PITCHERS_JSON__", json.dumps(pitchers)) \
-                   .replace("__AUDIT_LOGS__", json.dumps(recentAuditLogs)) \
-                   .replace("__WIN_PCT__", str(win_pct))
-    return HTMLResponse(content=html)
+        html = template.replace("__GAMES_JSON__", json.dumps(games)) \
+                       .replace("__BATTERS_JSON__", json.dumps(batters)) \
+                       .replace("__PITCHERS_JSON__", json.dumps(pitchers)) \
+                       .replace("__AUDIT_LOGS__", json.dumps(recent_audit_logs)) \
+                       .replace("__WIN_PCT__", str(win_pct))
+        return HTMLResponse(content=html)
+
+    except Exception as e:
+        err_trace = traceback.format_exc()
+        print(f"[FATAL SERVER ERROR in serve_dashboard]:\n{err_trace}")
+        return HTMLResponse(
+            content=f"<pre style='color:#ff5555; background:#111; padding:20px; font-family:monospace; font-size:13px;'>Server Error Traceback:\n\n{err_trace}</pre>",
+            status_code=500
+        )
 
 @app.get("/health")
 def health_check():
