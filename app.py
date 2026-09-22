@@ -1,34 +1,36 @@
 import sqlite3
-import json
-import os
 import re
-import math
-import traceback
-import subprocess
+import time
 import requests
+import numpy as np
+import pandas as pd
+from scipy import stats
 from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI, BackgroundTasks
-from fastapi.responses import HTMLResponse, JSONResponse
+from zoneinfo import ZoneInfo
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 
-app = FastAPI(title="StatsCenter Pro MLB Prediction Hub")
+app = FastAPI(title="STATSCENTER PRO HUB - High-Performance Analytics")
 
-def get_db_connection():
+CACHE = {
+    "schedule_data": {},
+    "db_frames": {},
+    "last_fetched": 0,
+    "db_last_read": 0
+}
+CACHE_TTL_SECONDS = 30
+DB_CACHE_TTL_SECONDS = 60
+
+def get_db():
     conn = sqlite3.connect("mlb_engine.db")
     conn.row_factory = sqlite3.Row
     return conn
 
 def clean_team_name(name: str) -> str:
-    return re.sub(r'[^a-zA-Z0-9]', '', name or "").lower()
+    if not name:
+        return ""
+    return re.sub(r'[^a-zA-Z0-9]', '', name).lower()
 
-def poisson_cdf(k: int, lamb: float) -> float:
-    if lamb <= 0:
-        return 1.0
-    prob = 0.0
-    for i in range(int(k) + 1):
-        prob += (lamb ** i) * math.exp(-lamb) / math.factorial(i)
-    return min(1.0, max(0.0, prob))
-
-# 2026 MLB Power Index (Offensive factor, Defensive factor)
 TEAM_POWER_INDEX = {
     "dodgers": (1.18, 0.88), "braves": (1.14, 0.90), "yankees": (1.15, 0.91),
     "orioles": (1.12, 0.92), "phillies": (1.11, 0.91), "astros": (1.08, 0.93),
@@ -43,879 +45,631 @@ TEAM_POWER_INDEX = {
 }
 
 def derive_quantitative_projection(away_team: str, home_team: str):
-    a_key = next((k for k in TEAM_POWER_INDEX if k in clean_team_name(away_team)), "league")
-    h_key = next((k for k in TEAM_POWER_INDEX if k in clean_team_name(home_team)), "league")
-
-    a_off, a_def = TEAM_POWER_INDEX.get(a_key, (1.0, 1.0))
-    h_off, h_def = TEAM_POWER_INDEX.get(h_key, (1.0, 1.0))
+    away_key = next((k for k in TEAM_POWER_INDEX if k in clean_team_name(away_team)), "league")
+    home_key = next((k for k in TEAM_POWER_INDEX if k in clean_team_name(home_team)), "league")
+    a_off, a_def = TEAM_POWER_INDEX.get(away_key, (1.0, 1.0))
+    h_off, h_def = TEAM_POWER_INDEX.get(home_key, (1.0, 1.0))
 
     exp_away = round(4.45 * a_off * h_def, 2)
     exp_home = round(4.45 * h_off * a_def * 1.04, 2)
-
     p_home = round((exp_home ** 1.83) / ((exp_home ** 1.83) + (exp_away ** 1.83)), 3)
     p_away = round(1.0 - p_home, 3)
 
     f5_exp_a = round(exp_away * 0.55, 2)
     f5_exp_h = round(exp_home * 0.55, 2)
-    f5_med = round(f5_exp_a + f5_exp_h, 1)
+    f5_median = round(f5_exp_a + f5_exp_h, 1)
 
     return {
-        "prob_home_win": p_home,
-        "prob_away_win": p_away,
-        "expected_runs_away": exp_away,
-        "expected_runs_home": exp_home,
-        "f5_exp_away": f5_exp_a,
-        "f5_exp_home": f5_exp_h,
-        "f5_median_runs": f5_med
+        "prob_home_win": p_home, "prob_away_win": p_away,
+        "expected_runs_away": exp_away, "expected_runs_home": exp_home,
+        "f5_exp_away": f5_exp_a, "f5_exp_home": f5_exp_h, "f5_median_runs": f5_median
     }
 
-def fetch_mlb_slate_by_dates():
-    now_utc = datetime.now(timezone.utc)
-    now_et = now_utc - timedelta(hours=4)
-    today_str = now_et.strftime("%Y-%m-%d")
-    yesterday_str = (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
-    tomorrow_str = (now_et + timedelta(days=1)).strftime("%Y-%m-%d")
+def load_cached_dataframes():
+    now = time.time()
+    if CACHE["db_frames"] and (now - CACHE["db_last_read"]) < DB_CACHE_TTL_SECONDS:
+        return CACHE["db_frames"]
 
-    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={yesterday_str}&endDate={tomorrow_str}&hydrate=linescore,probablePitcher,decisions"
-    games_by_pk = {}
+    conn = get_db()
+    c = conn.cursor()
+    tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+
+    frames = {}
+    target_tables = [
+        "Model_Forecasts", "Historical_Forecasts", "Daily_Lineups", 
+        "Daily_Batters", "Batter_Hit_Forecasts", "Pitcher_K_Forecasts",
+        "Pitcher_Kalman_State", "Batter_Decoupled_Priors", 
+        "Batter_Post_Mortem_Logs", "Pitcher_Post_Mortem_Logs", "Prop_Learning_Calibration_Audit"
+    ]
+
+    for tbl in target_tables:
+        if tbl in tables:
+            try:
+                df = pd.read_sql_query(f"SELECT * FROM {tbl}", conn)
+                if "game_pk" in df.columns:
+                    df["game_pk"] = df["game_pk"].astype(str)
+                frames[tbl] = df
+            except Exception as e:
+                print(f"[WARN] Error preloading table {tbl}: {e}", flush=True)
+                frames[tbl] = pd.DataFrame()
+        else:
+            frames[tbl] = pd.DataFrame()
+
+    conn.close()
+    CACHE["db_frames"] = frames
+    CACHE["db_last_read"] = now
+    return frames
+
+def fetch_mlb_live_schedule():
+    now = time.time()
+    if CACHE["schedule_data"] and (now - CACHE["last_fetched"]) < CACHE_TTL_SECONDS:
+        return CACHE["schedule_data"]
+
+    now_utc = datetime.now(timezone.utc)
+    start_date = (now_utc - timedelta(days=1)).strftime("%Y-%m-%d")
+    end_date = (now_utc + timedelta(days=1)).strftime("%Y-%m-%d")
+    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={start_date}&endDate={end_date}&hydrate=lineups,linescore,probablePitcher,team"
+
+    schedule_map = {}
     try:
-        res = requests.get(url, timeout=7)
+        res = requests.get(url, timeout=6)
         if res.status_code == 200:
             for d in res.json().get("dates", []):
-                date_val = d.get("date")
-                slate_tag = "today" if date_val == today_str else ("yesterday" if date_val == yesterday_str else "tomorrow")
                 for g in d.get("games", []):
-                    g["slate_tag"] = slate_tag
-                    g["game_date"] = date_val
-                    games_by_pk[int(g["gamePk"])] = g
+                    schedule_map[str(g["gamePk"])] = g
+            CACHE["schedule_data"] = schedule_map
+            CACHE["last_fetched"] = now
     except Exception as e:
-        print(f"[MLB API FETCH ERROR] {e}")
-    return games_by_pk, today_str, yesterday_str, tomorrow_str
+        print(f"[WARN] MLB Live API Schedule fetch error: {e}", flush=True)
 
-# ----------------- ISOLATED BACKTEST WORKER -----------------
-backtest_state = {
-    "status": "idle",
-    "message": "Ready to execute backtest.",
-    "last_run": None,
-    "details": ""
-}
-
-def execute_backtest_task():
-    global backtest_state
-    backtest_state["status"] = "running"
-    backtest_state["message"] = "Running walk-forward backtest simulation across historical database..."
-    try:
-        target = "backtest_learning_validation.py" if os.path.exists("backtest_learning_validation.py") else "backtest_engine.py"
-        if os.path.exists(target):
-            res = subprocess.run(["python3", target], capture_output=True, text=True, timeout=240)
-            backtest_state["status"] = "completed"
-            backtest_state["message"] = f"Calibration complete via {target}."
-            backtest_state["details"] = res.stdout[-350:] if res.stdout else "Success."
-        else:
-            backtest_state["status"] = "completed"
-            backtest_state["message"] = "Calibration verification complete."
-            backtest_state["details"] = "Parameters verified against Historical_Forecasts."
-        backtest_state["last_run"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    except Exception as e:
-        backtest_state["status"] = "error"
-        backtest_state["message"] = f"Backtest failed: {str(e)}"
-
-@app.post("/api/backtest/run")
-def trigger_backtest(background_tasks: BackgroundTasks):
-    if backtest_state["status"] == "running":
-        return JSONResponse(status_code=409, content={"status": "running", "message": "Backtest is already executing."})
-    background_tasks.add_task(execute_backtest_task)
-    return {"status": "started", "message": "Engine backtest initiated in background."}
-
-@app.get("/api/backtest/status")
-def get_backtest_status():
-    return backtest_state
-
-# ----------------- MAIN PREDICTION HUB -----------------
-@app.get("/", response_class=HTMLResponse)
-def serve_dashboard():
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-
-        pregame_models = {}
-        if "Model_Forecasts" in tables:
-            for r in c.execute("SELECT * FROM Model_Forecasts").fetchall():
-                row = dict(r)
-                if row.get("game_pk"):
-                    pregame_models[int(row["game_pk"])] = row
-                    pregame_models[str(row["game_pk"])] = row
-                a_t = row.get("away_team") or row.get("away")
-                h_t = row.get("home_team") or row.get("home")
-                if a_t and h_t:
-                    pregame_models[(clean_team_name(a_t), clean_team_name(h_t))] = row
-
-        live_schedule, today_s, yest_s, tom_s = fetch_mlb_slate_by_dates()
-        active_pks = list(live_schedule.keys())
-
-        games = []
-        for pk in active_pks:
-            mlb_game = live_schedule[pk]
-            teams = mlb_game.get("teams", {})
-            away_name = teams.get("away", {}).get("team", {}).get("name", "Away")
-            home_name = teams.get("home", {}).get("team", {}).get("name", "Home")
-            away_sp = teams.get("away", {}).get("probablePitcher", {}).get("fullName", "TBD")
-            home_sp = teams.get("home", {}).get("probablePitcher", {}).get("fullName", "TBD")
-            status_desc = mlb_game.get("status", {}).get("detailedState", "Scheduled")
-            linescore = mlb_game.get("linescore", {})
-            slate_tag = mlb_game.get("slate_tag", "today")
-
-            dt_utc = mlb_game.get("gameDate", "")
-            time_et = "Scheduled"
-            if dt_utc:
-                try:
-                    dt_obj = datetime.fromisoformat(dt_utc.replace("Z", "+00:00"))
-                    time_et = (dt_obj - timedelta(hours=4)).strftime("%I:%M %p EDT")
-                except Exception:
-                    pass
-
-            m = pregame_models.get(pk) or pregame_models.get(str(pk)) or pregame_models.get((clean_team_name(away_name), clean_team_name(home_name)))
-            if not m or not m.get("prob_home_win") or float(m.get("prob_home_win") or 0.50) == 0.50:
-                m = derive_quantitative_projection(away_name, home_name)
-
-            p_home_pre = float(m.get("prob_home_win") or 0.54)
-            p_away_pre = round(1.0 - p_home_pre, 3)
-            exp_a = round(float(m.get("expected_runs_away") or 4.2), 2)
-            exp_h = round(float(m.get("expected_runs_home") or 4.8), 2)
-            full_total = round(exp_a + exp_h, 2)
-
-            f5_exp_a = round(float(m.get("f5_exp_away") or (exp_a * 0.55)), 2)
-            f5_exp_h = round(float(m.get("f5_exp_home") or (exp_h * 0.55)), 2)
-            f5_med = round(float(m.get("f5_median_runs") or (f5_exp_a + f5_exp_h)), 1)
-
-            fav_team = home_name if p_home_pre >= 0.50 else away_name
-            fav_prob = max(p_home_pre, p_away_pre)
-
-            is_final = any(x in status_desc.lower() for x in ["final", "game over", "completed"])
-            is_live = any(x in status_desc.lower() for x in ["in progress", "live", "delayed", "manager challenge"])
-
-            current_inning = linescore.get("currentInning", 0)
-            inning_state = linescore.get("inningState", "")
-            away_actual_runs = linescore.get("teams", {}).get("away", {}).get("runs", 0)
-            home_actual_runs = linescore.get("teams", {}).get("home", {}).get("runs", 0)
-            actual_total_runs = away_actual_runs + home_actual_runs
-
-            f5_actual_runs = None
-            f5_actual_away = 0
-            f5_actual_home = 0
-            innings_list = linescore.get("innings", [])
-            if len(innings_list) >= 5:
-                f5_actual_away = sum([inn.get("away", {}).get("runs", 0) for inn in innings_list[:5]])
-                f5_actual_home = sum([inn.get("home", {}).get("runs", 0) for inn in innings_list[:5]])
-                f5_actual_runs = f5_actual_away + f5_actual_home
-
-            live_prob_home = round(p_home_pre * 100, 1)
-            live_exp_away = exp_a
-            live_exp_home = exp_h
-
-            if is_live and current_inning > 0:
-                stage = "live"
-                rem_away = max(0.0, 9.0 - (current_inning - 1) - (1.0 if inning_state.lower() == "bottom" else 0.0))
-                rem_home = max(0.0, 8.5 - (current_inning - 1) - (0.5 if inning_state.lower() == "bottom" else 0.0))
-                live_exp_away = round(away_actual_runs + (exp_a * (rem_away / 9.0)), 2)
-                live_exp_home = round(home_actual_runs + (exp_h * (rem_home / 9.0)), 2)
-                diff = live_exp_home - live_exp_away
-                live_p = 1.0 / (1.0 + 10 ** (-diff / 2.2))
-                live_prob_home = round(live_p * 100, 1)
-            elif is_final:
-                stage = "final"
-            else:
-                stage = "upcoming"
-
-            hit_ml = None
-            if is_final:
-                actual_winner = away_name if away_actual_runs > home_actual_runs else home_name
-                hit_ml = (fav_team == actual_winner)
-
-            games.append({
-                "game_pk": pk,
-                "slate_tag": slate_tag,
-                "away_team": away_name,
-                "home_team": home_name,
-                "away_sp": away_sp,
-                "home_sp": home_sp,
-                "game_time_et": time_et,
-                "status_desc": status_desc,
-                "stage": stage,
-                "current_inning": current_inning,
-                "inning_state": inning_state,
-                "away_actual_runs": away_actual_runs,
-                "home_actual_runs": home_actual_runs,
-                "actual_total_runs": actual_total_runs,
-                "f5_actual_runs": f5_actual_runs,
-                "f5_actual_away": f5_actual_away,
-                "f5_actual_home": f5_actual_home,
-                "pregame_prob_home": round(p_home_pre * 100, 1),
-                "pregame_prob_away": round(p_away_pre * 100, 1),
-                "pregame_exp_away": exp_a,
-                "pregame_exp_home": exp_h,
-                "full_total": full_total,
-                "f5_exp_away": f5_exp_a,
-                "f5_exp_home": f5_exp_h,
-                "pregame_f5_median": f5_med,
-                "fav_team": fav_team,
-                "fav_prob": round(fav_prob * 100, 1),
-                "live_prob_home": live_prob_home,
-                "live_prob_away": round(100.0 - live_prob_home, 1),
-                "live_exp_away": live_exp_away,
-                "live_exp_home": live_exp_home,
-                "hit_ml": hit_ml
-            })
-
-        active_pks_set = set(active_pks)
-
-        # Pitcher Strikeouts
-        pitchers = []
-        if "Pitcher_K_Forecasts" in tables:
-            try:
-                p_rows = c.execute("SELECT * FROM Pitcher_K_Forecasts").fetchall()
-                for r in p_rows:
-                    pk = int(r["game_pk"])
-                    if pk in active_pks_set:
-                        over_p = float(r["over_prob"] or 0.50)
-                        under_p = float(r["under_prob"] or (1.0 - over_p))
-                        pitchers.append({
-                            "game_pk": pk,
-                            "pitcher_name": r["pitcher_name"],
-                            "team_name": r["team_name"],
-                            "opponent_team": r["opponent_team"],
-                            "projected_pitches": round(float(r["projected_pitches"] or 86.0), 1),
-                            "expected_k": round(float(r["expected_k"] or 5.0), 2),
-                            "k_line": float(r["k_line"] or 4.5),
-                            "over_prob": round(over_p * 100 if over_p <= 1.0 else over_p, 1),
-                            "under_prob": round(under_p * 100 if under_p <= 1.0 else under_p, 1)
-                        })
-            except Exception:
-                pass
-
-        existing_p_pks = set(p["game_pk"] for p in pitchers)
-        for g in games:
-            if g["game_pk"] not in existing_p_pks:
-                pk = g["game_pk"]
-                starters = [
-                    (g["away_sp"], g["away_team"], g["home_team"]),
-                    (g["home_sp"], g["home_team"], g["away_team"])
-                ]
-                for sp_name, tm, opp in starters:
-                    display_sp = sp_name if sp_name and "tbd" not in sp_name.lower() else f"{tm} Projected Starter"
-                    exp_k = 5.25
-                    k_line = 4.5
-                    p_under = poisson_cdf(4, exp_k)
-                    p_over = float(1.0 - p_under)
-                    pitchers.append({
-                        "game_pk": pk,
-                        "pitcher_name": display_sp,
-                        "team_name": tm,
-                        "opponent_team": opp,
-                        "projected_pitches": 88.0,
-                        "expected_k": exp_k,
-                        "k_line": k_line,
-                        "over_prob": round(p_over * 100, 1),
-                        "under_prob": round(p_under * 100, 1)
-                    })
-
-        pitchers.sort(key=lambda x: x["expected_k"], reverse=True)
-
-        # Batter Hit Props
-        batters = []
-        if "Batter_Hit_Forecasts" in tables:
-            try:
-                b_rows = c.execute("SELECT * FROM Batter_Hit_Forecasts").fetchall()
-                for r in b_rows:
-                    pk = int(r["game_pk"])
-                    if pk in active_pks_set:
-                        p05 = float(r["over_0_5_hit_prob"] or 0.0)
-                        p15 = float(r["over_1_5_hit_prob"] or 0.0)
-                        p25 = float(r["over_2_5_hit_prob"] or 0.0)
-                        batters.append({
-                            "game_pk": pk,
-                            "name": r["player_name"],
-                            "team": r["team_name"],
-                            "order": int(r["batting_order"] or 5),
-                            "pa": round(float(r["projected_pa"] or 4.1), 1),
-                            "ab": round(float(r["projected_ab"] or 3.6), 1),
-                            "xhits": round(float(r["expected_hits"] or 0.9), 2),
-                            "p_0_5": round(p05 * 100 if p05 <= 1.0 else p05, 1),
-                            "p_1_5": round(p15 * 100 if p15 <= 1.0 else p15, 1),
-                            "p_2_5": round(p25 * 100 if p25 <= 1.0 else p25, 1)
-                        })
-            except Exception:
-                pass
-
-        existing_b_pks = set(b["game_pk"] for b in batters)
-        for g in games:
-            if g["game_pk"] not in existing_b_pks:
-                pk = g["game_pk"]
-                for tm in [g["away_team"], g["home_team"]]:
-                    for slot in range(1, 10):
-                        pa = round(max(3.2, 4.7 - (slot - 1) * 0.15), 1)
-                        ab = round(pa * 0.88, 1)
-                        ba = max(0.210, 0.280 - (slot - 1) * 0.008)
-                        xhits = round(ab * ba, 2)
-                        p05 = round(1.0 - ((1.0 - ba) ** ab), 3)
-                        p15 = round(p05 * 0.38, 3)
-                        p25 = round(p15 * 0.28, 3)
-                        batters.append({
-                            "game_pk": pk,
-                            "name": f"{tm} Batter #{slot}",
-                            "team": tm,
-                            "order": slot,
-                            "pa": pa,
-                            "ab": ab,
-                            "xhits": xhits,
-                            "p_0_5": round(p05 * 100, 1),
-                            "p_1_5": round(p15 * 100, 1),
-                            "p_2_5": round(p25 * 100, 1)
-                        })
-
-        batters.sort(key=lambda x: x["p_0_5"], reverse=True)
-
-        total_graded = 0
-        total_right = 0
-        audit_logs = []
-        for g in games:
-            if g["stage"] == "final":
-                total_graded += 1
-                if g["hit_ml"]:
-                    total_right += 1
-                audit_logs.append({
-                    "matchup": f"{g['away_team']} @ {g['home_team']}",
-                    "predicted": f"{g['fav_team']} ({g['fav_prob']}%)",
-                    "result": f"{g['away_actual_runs']} - {g['home_actual_runs']}",
-                    "hit": g["hit_ml"]
-                })
-
-        win_pct = round((total_right / total_graded) * 100, 1) if total_graded > 0 else 58.4
-        conn.close()
-
-        template = """
-<!DOCTYPE html>
-<html lang="en" class="h-full bg-[#0b0e14]">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <meta name="theme-color" content="#cc0000">
-    <title>STATSCENTER PRO // MLB PREDICTION APP</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        * { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
-        @keyframes ticker { 0% { transform: translateX(0); } 100% { transform: translateX(-100%); } }
-        .animate-ticker { display: inline-block; white-space: nowrap; animation: ticker 85s linear infinite; will-change: transform; }
-        .espn-red { background-color: #d00000; }
-        .espn-dark { background-color: #0b0e14; }
-        .espn-card { background-color: #121722; border-color: #20293a; }
-        .espn-subbar { background-color: #182030; }
-        .touch-scroll { -webkit-overflow-scrolling: touch; }
-    </style>
-</head>
-<body class="espn-dark text-gray-200 font-sans antialiased min-h-screen flex flex-col selection:bg-red-600 selection:text-white pb-24 md:pb-12">
-    <!-- Top BottomLine Scrolling Odds Ticker -->
-    <div class="bg-black border-b border-red-700/80 overflow-hidden flex items-center h-10 sticky top-0 z-50 shadow-md">
-        <div class="espn-red text-white px-3.5 h-full uppercase tracking-wider flex items-center z-10 shrink-0 font-black text-xs">
-            <span class="inline-block w-2 h-2 rounded-full bg-yellow-400 mr-2 animate-pulse"></span>
-            BOTTOMLINE
-        </div>
-        <div class="overflow-hidden w-full relative h-full flex items-center">
-            <div id="ticker-content" class="animate-ticker text-xs font-mono font-bold text-gray-300 pl-4">
-                Loading live board...
-            </div>
-        </div>
-    </div>
-
-    <!-- Master Header -->
-    <header class="espn-subbar border-b border-gray-800 px-4 py-3 shadow-lg">
-        <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
-            <div class="flex items-center gap-3">
-                <span class="espn-red text-white text-xl font-black px-2.5 py-0.5 rounded tracking-tighter italic shadow">ESPN</span>
-                <div>
-                    <h1 class="text-lg md:text-2xl font-black text-white tracking-wide uppercase">StatsCenter Pro Hub</h1>
-                    <p class="text-[11px] md:text-xs font-mono text-gray-400">Monte Carlo Predictive Engine • Real-Time Odds & Player Props</p>
-                </div>
-            </div>
-
-            <!-- Date Selector (Yesterday | Today | Tomorrow) -->
-            <div class="flex items-center gap-1 bg-black/60 p-1 rounded-lg border border-gray-800 text-xs font-black uppercase tracking-wider">
-                <button onclick="setDateSlate('yesterday')" id="date-btn-yesterday" class="date-btn min-h-[36px] px-3 py-1.5 rounded-md text-gray-400 hover:text-white transition-all">Yesterday</button>
-                <button onclick="setDateSlate('today')" id="date-btn-today" class="date-btn min-h-[36px] px-3.5 py-1.5 rounded-md bg-red-600 text-white shadow transition-all">Today</button>
-                <button onclick="setDateSlate('tomorrow')" id="date-btn-tomorrow" class="date-btn min-h-[36px] px-3 py-1.5 rounded-md text-gray-400 hover:text-white transition-all">Tomorrow</button>
-            </div>
-        </div>
-
-        <!-- Secondary Filter Bar: Game Stages (All, Live, Upcoming, Final) -->
-        <div class="max-w-7xl mx-auto mt-2.5 flex items-center gap-1.5 overflow-x-auto touch-scroll text-[11px] font-black uppercase tracking-wider">
-            <button onclick="setGameStage('all')" id="stage-btn-all" class="stage-btn min-h-[34px] px-3 py-1.5 rounded-md bg-red-600 text-white shadow">All (<span id="count-all">0</span>)</button>
-            <button onclick="setGameStage('live')" id="stage-btn-live" class="stage-btn min-h-[34px] px-3 py-1.5 rounded-md bg-gray-800 text-gray-400 border border-gray-700">🔴 Live (<span id="count-live">0</span>)</button>
-            <button onclick="setGameStage('upcoming')" id="stage-btn-upcoming" class="stage-btn min-h-[34px] px-3 py-1.5 rounded-md bg-gray-800 text-gray-400 border border-gray-700">⏳ Upcoming (<span id="count-upcoming">0</span>)</button>
-            <button onclick="setGameStage('final')" id="stage-btn-final" class="stage-btn min-h-[34px] px-3 py-1.5 rounded-md bg-gray-800 text-gray-400 border border-gray-700">🏁 Final (<span id="count-final">0</span>)</button>
-        </div>
-
-        <!-- Market Tabs -->
-        <div class="max-w-7xl mx-auto mt-2.5 flex gap-2 overflow-x-auto touch-scroll border-t border-gray-800/80 pt-2 text-xs md:text-sm font-bold uppercase">
-            <button onclick="setBetMarket('games')" id="tab-games" class="market-tab min-h-[42px] px-3.5 py-2 border-b-2 border-red-600 text-white whitespace-nowrap">⚾ Matchups</button>
-            <button onclick="setBetMarket('best_bets')" id="tab-best_bets" class="market-tab min-h-[42px] px-3.5 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🔥 Best Value Bets</button>
-            <button onclick="setBetMarket('pitchers')" id="tab-pitchers" class="market-tab min-h-[42px] px-3.5 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">⚾ Pitcher Ks (<span id="pitchers-tab-count">0</span>)</button>
-            <button onclick="setBetMarket('batters')" id="tab-batters" class="market-tab min-h-[42px] px-3.5 py-2 border-b-2 border-transparent text-gray-400 hover:text-white whitespace-nowrap">🎯 Batter Hits (<span id="batters-tab-count">0</span>)</button>
-            <button onclick="setBetMarket('lab')" id="tab-lab" class="market-tab min-h-[42px] px-3.5 py-2 border-b-2 border-transparent text-blue-400 hover:text-blue-300 whitespace-nowrap">📊 Model Accuracy & Lab</button>
-        </div>
-    </header>
-
-    <!-- Confirmation Modal -->
-    <div id="backtest-modal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
-        <div class="bg-[#121722] border border-gray-700 rounded-xl max-w-md w-full p-5 shadow-2xl space-y-4">
-            <div class="flex items-center gap-3">
-                <div class="w-10 h-10 rounded-full bg-blue-900/60 border border-blue-500/50 flex items-center justify-center text-blue-400 text-lg">📊</div>
-                <div>
-                    <h3 class="text-base font-black text-white uppercase tracking-wide">Confirm Model Backtest</h3>
-                    <p class="text-xs text-gray-400">Walk-Forward Engine Validation</p>
-                </div>
-            </div>
-            <p class="text-xs text-gray-300 font-mono leading-relaxed bg-black/50 p-3 rounded border border-gray-800">
-                Are you sure you want to run the backtest? This performs walk-forward calibration across historical slates without altering the live betting board.
-            </p>
-            <div class="flex gap-2.5 pt-1">
-                <button onclick="confirmStartBacktest()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-black py-2.5 rounded-lg text-xs uppercase tracking-wider active:scale-95 transition-all shadow-md">
-                    Yes, Start Backtest
-                </button>
-                <button onclick="closeBacktestModal()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 font-bold py-2.5 px-4 rounded-lg text-xs uppercase tracking-wider border border-gray-700">
-                    Cancel
-                </button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Main Content -->
-    <main class="max-w-7xl mx-auto p-4 md:p-6 space-y-6 flex-1 w-full">
-        <!-- Live Status Bar -->
-        <div class="flex justify-between items-center bg-gray-900/90 border border-gray-800 px-3.5 py-2.5 rounded-lg text-xs">
-            <span class="text-gray-400">Date Slate: <strong id="filter-date-label" class="text-yellow-400 uppercase font-mono font-bold tracking-wide">TODAY</strong> • <span id="filter-market-label" class="text-gray-300">MATCHUPS</span></span>
-            <span class="font-mono text-gray-500 text-[11px]">Database: <strong class="text-emerald-400">mlb_engine.db</strong></span>
-        </div>
-
-        <!-- Backtest Status Notification Banner -->
-        <div id="backtest-banner" class="hidden bg-blue-950/80 border border-blue-700/60 p-3 rounded-lg text-xs font-mono flex items-center justify-between shadow-lg">
-            <div class="flex items-center gap-2">
-                <span class="w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
-                <span id="banner-status-text" class="text-gray-200">Worker executing...</span>
-            </div>
-            <span id="banner-time" class="text-gray-500 text-[11px]"></span>
-        </div>
-
-        <!-- Section 1: Games Board -->
-        <section id="section-games" class="space-y-3">
-            <div class="flex items-center justify-between border-b border-gray-800 pb-2">
-                <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">MLB Betting Board & Odds</h2>
-                <span class="text-xs font-mono text-gray-400" id="games-counter"></span>
-            </div>
-            <div id="games-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5"></div>
-        </section>
-
-        <!-- Section 2: Best Value Bets -->
-        <section id="section-best-bets" class="space-y-3 hidden">
-            <div class="flex items-center justify-between border-b border-gray-800 pb-2">
-                <div>
-                    <h2 class="text-base md:text-lg font-black uppercase text-emerald-400 tracking-wide">🔥 Top High-Confidence Value Picks</h2>
-                    <p class="text-xs text-gray-400 mt-0.5">Games and player props where the quantitative model holds high statistical edge.</p>
-                </div>
-            </div>
-            <div id="best-bets-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5"></div>
-        </section>
-
-        <!-- Section 3: Pitcher Strikeouts -->
-        <section id="section-pitchers" class="space-y-3 hidden">
-            <div class="flex items-center justify-between border-b border-gray-800 pb-2">
-                <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Pitcher Strikeout Props & Lines</h2>
-                <span class="text-xs font-mono text-gray-400" id="pitchers-counter"></span>
-            </div>
-            <div class="overflow-x-auto espn-card border rounded-lg shadow touch-scroll">
-                <table class="w-full text-left text-xs md:text-sm">
-                    <thead class="bg-gray-800/90 text-gray-400 font-mono uppercase text-[11px]">
-                        <tr>
-                            <th class="py-3 px-3.5">Starting Pitcher</th>
-                            <th class="py-3 px-3">Opponent</th>
-                            <th class="py-3 px-3 text-right">Pitches</th>
-                            <th class="py-3 px-3 text-right">xK</th>
-                            <th class="py-3 px-3 text-center">Line</th>
-                            <th class="py-3 px-3.5 text-right font-bold text-emerald-400">Over %</th>
-                            <th class="py-3 px-3.5 text-right font-bold text-cyan-400">Under %</th>
-                        </tr>
-                    </thead>
-                    <tbody id="pitchers-tbody" class="divide-y divide-gray-800 font-mono"></tbody>
-                </table>
-            </div>
-        </section>
-
-        <!-- Section 4: Batter Hits -->
-        <section id="section-batters" class="space-y-3 hidden">
-            <div class="flex items-center justify-between border-b border-gray-800 pb-2">
-                <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Batter Contact Distributions & Hit Props</h2>
-                <span class="text-xs font-mono text-gray-400" id="batters-counter"></span>
-            </div>
-            <div class="overflow-x-auto espn-card border rounded-lg shadow touch-scroll">
-                <table class="w-full text-left text-xs md:text-sm">
-                    <thead class="bg-gray-800/90 text-gray-400 font-mono uppercase text-[11px]">
-                        <tr>
-                            <th class="py-3 px-3.5">Hitter</th>
-                            <th class="py-3 px-3 text-center">Slot</th>
-                            <th class="py-3 px-3 text-right">Proj PA</th>
-                            <th class="py-3 px-3 text-right">xHits</th>
-                            <th class="py-3 px-3.5 text-right font-bold text-emerald-400">Over 0.5</th>
-                            <th class="py-3 px-3.5 text-right font-bold text-cyan-400">Over 1.5</th>
-                            <th class="py-3 px-3 text-right text-gray-400">Over 2.5</th>
-                        </tr>
-                    </thead>
-                    <tbody id="batters-tbody" class="divide-y divide-gray-800 font-mono"></tbody>
-                </table>
-            </div>
-        </section>
-
-        <!-- Section 5: Model Accuracy & Lab -->
-        <section id="section-lab" class="space-y-4 hidden">
-            <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-3 border-b border-gray-800 pb-3">
-                <div>
-                    <h2 class="text-base md:text-lg font-black uppercase text-white tracking-wide">Model Performance & Calibration Hub</h2>
-                    <p class="text-xs text-gray-400 font-mono">Real-world empirical scorecard and walk-forward backtest controls</p>
-                </div>
-                <button onclick="promptBacktestModal()" class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-black text-xs uppercase tracking-wider active:scale-95 transition-all shadow-md flex items-center gap-2">
-                    <span>📊 Run Walk-Forward Backtest</span>
-                </button>
-            </div>
-
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div class="espn-card border rounded-lg p-4">
-                    <div class="text-[11px] font-mono uppercase text-gray-400">Outright Moneyline Win Rate</div>
-                    <div class="text-3xl font-black font-mono text-emerald-400 mt-1" id="scorecard-win-pct">58.4%</div>
-                    <div class="text-[11px] text-gray-500 mt-1">Direct favorite post-mortem audits</div>
-                </div>
-                <div class="espn-card border rounded-lg p-4">
-                    <div class="text-[11px] font-mono uppercase text-gray-400">Graded Slate Games</div>
-                    <div class="text-3xl font-black font-mono text-white mt-1" id="scorecard-total-graded">0</div>
-                    <div class="text-[11px] text-gray-500 mt-1">Official MLB linescore verification</div>
-                </div>
-                <div class="espn-card border rounded-lg p-4">
-                    <div class="text-[11px] font-mono uppercase text-gray-400">Brier Calibration Score</div>
-                    <div class="text-3xl font-black font-mono text-cyan-400 mt-1">0.2418</div>
-                    <div class="text-[11px] text-gray-500 mt-1">Market benchmark: &lt; 0.2500</div>
-                </div>
-            </div>
-
-            <div class="espn-card border rounded-lg p-4 space-y-2">
-                <h3 class="text-xs font-bold font-mono text-gray-300 uppercase">Recent Graded Audit Logs</h3>
-                <div id="accuracy-logs" class="divide-y divide-gray-800 font-mono text-xs"></div>
-            </div>
-        </section>
-    </main>
-
-    <script>
-        const gamesData = __GAMES_JSON__;
-        const battersData = __BATTERS_JSON__;
-        const pitchersData = __PITCHERS_JSON__;
-        const auditLogsData = __AUDIT_LOGS__;
-        const overallWinPct = __WIN_PCT__;
-
-        let currentDate = 'today';
-        let currentStage = 'all';
-        let currentMarket = 'games';
-
-        document.getElementById('scorecard-win-pct').textContent = `${overallWinPct}%`;
-        document.getElementById('scorecard-total-graded').textContent = gamesData.filter(g => g.stage === 'final').length;
-
-        function buildTicker() {
-            const items = [];
-            const activeSlateGames = gamesData.filter(g => g.slate_tag === 'today');
-            activeSlateGames.filter(g => g.stage === 'live').forEach(g => {
-                items.push(`🔴 LIVE: ${g.away_team} ${g.away_actual_runs}, ${g.home_team} ${g.home_actual_runs} (${g.inning_state} ${g.current_inning}) | Live Proj: ${g.live_exp_away}-${g.live_exp_home} | ${g.home_team} Win: ${g.live_prob_home}%`);
-            });
-            activeSlateGames.filter(g => g.stage === 'final').forEach(g => {
-                const badge = g.hit_ml ? 'HIT ✅' : 'MISS ❌';
-                items.push(`🏁 FINAL: ${g.away_team} ${g.away_actual_runs}, ${g.home_team} ${g.home_actual_runs} | Fav: ${g.fav_team} (${g.fav_prob}%) -> ${badge}`);
-            });
-            activeSlateGames.filter(g => g.stage === 'upcoming').slice(0, 8).forEach(g => {
-                items.push(`⏳ ${g.game_time_et}: ${g.away_team} @ ${g.home_team} | Fav: ${g.fav_team} (${g.fav_prob}%) | Runs: ${g.pregame_exp_away}-${g.pregame_exp_home} (Tot: ${g.full_total})`);
-            });
-            pitchersData.slice(0, 5).forEach(p => {
-                items.push(`⚾ ${p.pitcher_name}: xK ${p.expected_k} (Line ${p.k_line}) • Over: ${p.over_prob}%`);
-            });
-            document.getElementById('ticker-content').innerHTML = items.length > 0 ? items.join(' &nbsp;&nbsp;&nbsp;•&nbsp;&nbsp;&nbsp; ') : 'Synchronizing slate data...';
-        }
-
-        function promptBacktestModal() { document.getElementById('backtest-modal').classList.remove('hidden'); }
-        function closeBacktestModal() { document.getElementById('backtest-modal').classList.add('hidden'); }
-        async function confirmStartBacktest() {
-            closeBacktestModal();
-            const banner = document.getElementById('backtest-banner');
-            const bText = document.getElementById('banner-status-text');
-            banner.classList.remove('hidden');
-            bText.textContent = 'Executing backtest worker in background thread...';
-            try {
-                const res = await fetch('/api/backtest/run', { method: 'POST' });
-                const d = await res.json();
-                bText.textContent = d.message;
-                pollStatus();
-            } catch (e) {
-                bText.textContent = 'Error starting backtest: ' + e;
-            }
-        }
-        function pollStatus() {
-            const t = setInterval(async () => {
-                try {
-                    const res = await fetch('/api/backtest/status');
-                    const d = await res.json();
-                    document.getElementById('banner-status-text').textContent = d.message;
-                    if (d.last_run) document.getElementById('banner-time').textContent = d.last_run;
-                    if (d.status === 'completed' || d.status === 'error') clearInterval(t);
-                } catch (e) {}
-            }, 3000);
-        }
-
-        function setDateSlate(dateTag) {
-            currentDate = dateTag;
-            document.querySelectorAll('.date-btn').forEach(b => {
-                b.classList.remove('bg-red-600', 'text-white', 'shadow');
-                b.classList.add('text-gray-400');
-            });
-            const activeBtn = document.getElementById(`date-btn-${dateTag}`);
-            if (activeBtn) {
-                activeBtn.classList.add('bg-red-600', 'text-white', 'shadow');
-                activeBtn.classList.remove('text-gray-400');
-            }
-            renderView();
-        }
-
-        function setGameStage(stage) {
-            currentStage = stage;
-            document.querySelectorAll('.stage-btn').forEach(b => {
-                b.classList.remove('bg-red-600', 'text-white');
-                b.classList.add('bg-gray-800', 'text-gray-400');
-            });
-            const activeBtn = document.getElementById(`stage-btn-${stage}`);
-            if (activeBtn) {
-                activeBtn.classList.add('bg-red-600', 'text-white');
-                activeBtn.classList.remove('bg-gray-800', 'text-gray-400');
-            }
-            renderView();
-        }
-
-        function setBetMarket(market) {
-            currentMarket = market;
-            document.querySelectorAll('.market-tab').forEach(t => {
-                t.classList.remove('border-red-600', 'text-white');
-                t.classList.add('border-transparent', 'text-gray-400');
-            });
-            const activeTab = document.getElementById(`tab-${market}`);
-            if (activeTab) {
-                activeTab.classList.add('border-red-600', 'text-white');
-                activeTab.classList.remove('border-transparent', 'text-gray-400');
-            }
-            renderView();
-        }
-
-        function renderView() {
-            document.getElementById('filter-date-label').textContent = currentDate.toUpperCase();
-            document.getElementById('filter-market-label').textContent = currentMarket.toUpperCase();
-
-            // Filter games by date
-            const dateGames = gamesData.filter(g => g.slate_tag === currentDate);
-
-            // Update stage counts for active date
-            document.getElementById('count-all').textContent = dateGames.length;
-            document.getElementById('count-live').textContent = dateGames.filter(g => g.stage === 'live').length;
-            document.getElementById('count-upcoming').textContent = dateGames.filter(g => g.stage === 'upcoming').length;
-            document.getElementById('count-final').textContent = dateGames.filter(g => g.stage === 'final').length;
-
-            const filteredGames = dateGames.filter(g => currentStage === 'all' || g.stage === currentStage);
-            const activePks = new Set(filteredGames.map(g => String(g.game_pk)));
-
-            const secGames = document.getElementById('section-games');
-            const secBest = document.getElementById('section-best-bets');
-            const secPitchers = document.getElementById('section-pitchers');
-            const secBatters = document.getElementById('section-batters');
-            const secLab = document.getElementById('section-lab');
-
-            secGames.classList.add('hidden');
-            secBest.classList.add('hidden');
-            secPitchers.classList.add('hidden');
-            secBatters.classList.add('hidden');
-            secLab.classList.add('hidden');
-
-            const pFiltered = pitchersData.filter(p => activePks.has(String(p.game_pk)));
-            const bFiltered = battersData.filter(b => activePks.has(String(b.game_pk)));
-
-            document.getElementById('pitchers-tab-count').textContent = pFiltered.length;
-            document.getElementById('batters-tab-count').textContent = bFiltered.length;
-
-            if (currentMarket === 'games') {
-                secGames.classList.remove('hidden');
-                const container = document.getElementById('games-grid');
-                container.innerHTML = '';
-                if (filteredGames.length === 0) {
-                    container.innerHTML = '<div class="col-span-3 py-8 text-center text-gray-500 font-mono">No matchups found for this stage/date filter.</div>';
-                }
-                filteredGames.forEach(g => {
-                    const card = document.createElement('div');
-                    card.className = "espn-card border rounded-lg p-3.5 shadow-md flex flex-col justify-between";
-
-                    const badge = g.stage === 'live'
-                        ? `<span class="bg-red-600 text-white px-2 py-0.5 rounded text-[10px] font-black tracking-wider animate-pulse">LIVE: ${g.inning_state} ${g.current_inning}</span>`
-                        : (g.stage === 'final'
-                            ? `<span class="bg-blue-600 text-white px-2 py-0.5 rounded text-[10px] font-black tracking-wider">FINAL</span>`
-                            : `<span class="bg-gray-700 text-gray-300 px-2 py-0.5 rounded text-[10px] font-black tracking-wider">UPCOMING • ${g.game_time_et}</span>`);
-
-                    const scoreLine = g.stage === 'upcoming'
-                        ? `<strong class="text-gray-200">${g.pregame_exp_away} - ${g.pregame_exp_home}</strong> (Total: ${g.full_total})`
-                        : `<strong class="text-yellow-400">${g.away_actual_runs} - ${g.home_actual_runs}</strong> (Proj: ${g.pregame_exp_away} - ${g.pregame_exp_home})`;
-
-                    card.innerHTML = `
-                        <div>
-                            <div class="flex justify-between items-center mb-2">
-                                ${badge}
-                                <span class="font-mono text-xs text-yellow-400 font-bold">F5 Line: ${g.pregame_f5_median}</span>
-                            </div>
-                            <h3 class="text-base font-black text-white uppercase tracking-tight mb-1">${g.away_team} @ ${g.home_team}</h3>
-                            <div class="text-xs text-gray-400 space-y-0.5 mb-2.5">
-                                <div class="truncate">SP: <span class="text-gray-200">${g.away_sp}</span> vs <span class="text-gray-200">${g.home_sp}</span></div>
-                                <div class="truncate">Runs: ${scoreLine}</div>
-                            </div>
-                            <div class="bg-black/60 p-2.5 rounded border border-gray-800 space-y-1 text-xs font-mono">
-                                <div class="flex justify-between text-gray-300">
-                                    <span>Model Favorite:</span>
-                                    <strong class="text-emerald-400">${g.fav_team} (${g.fav_prob}%)</strong>
-                                </div>
-                                <div class="flex justify-between text-gray-400 text-[11px]">
-                                    <span>Away: ${g.pregame_prob_away}%</span>
-                                    <span>Home: ${g.pregame_prob_home}%</span>
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                    container.appendChild(card);
-                });
-                document.getElementById('games-counter').textContent = `${filteredGames.length} Matchups`;
-            } else if (currentMarket === 'best_bets') {
-                secBest.classList.remove('hidden');
-                const container = document.getElementById('best-bets-grid');
-                container.innerHTML = '';
-                const highConfGames = filteredGames.filter(g => g.fav_prob >= 58.0);
-                if (highConfGames.length === 0) {
-                    container.innerHTML = '<div class="col-span-3 py-8 text-center text-gray-500 font-mono">No games currently meet the 58%+ high edge threshold.</div>';
-                }
-                highConfGames.forEach(g => {
-                    const card = document.createElement('div');
-                    card.className = "espn-card border-2 border-emerald-500/50 rounded-lg p-4 shadow-xl flex flex-col justify-between";
-                    card.innerHTML = `
-                        <div>
-                            <div class="flex justify-between items-center mb-2">
-                                <span class="bg-emerald-600 text-white px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider">Top Edge Pick</span>
-                                <span class="font-mono text-xs text-emerald-400 font-bold">${g.fav_prob}% Win Prob</span>
-                            </div>
-                            <h3 class="text-base font-black text-white uppercase">${g.away_team} @ ${g.home_team}</h3>
-                            <p class="text-xs text-gray-400 mt-1">Recommended Moneyline: <strong class="text-white">${g.fav_team}</strong></p>
-                            <div class="mt-3 bg-black/60 p-2.5 rounded border border-gray-800 text-xs font-mono space-y-1">
-                                <div class="flex justify-between text-gray-300">
-                                    <span>Expected Score:</span>
-                                    <strong class="text-white">${g.pregame_exp_away} - ${g.pregame_exp_home}</strong>
-                                </div>
-                                <div class="flex justify-between text-gray-400">
-                                    <span>F5 Model Total:</span>
-                                    <span>${g.pregame_f5_median} Runs</span>
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                    container.appendChild(card);
-                });
-            } else if (currentMarket === 'pitchers') {
-                secPitchers.classList.remove('hidden');
-                const tbody = document.getElementById('pitchers-tbody');
-                tbody.innerHTML = '';
-                pFiltered.forEach(p => {
-                    const tr = document.createElement('tr');
-                    tr.className = "hover:bg-gray-800/60 transition-colors";
-                    tr.innerHTML = `
-                        <td class="py-2.5 px-3.5 font-sans font-bold text-white whitespace-nowrap">${p.pitcher_name} (${p.team_name})</td>
-                        <td class="py-2.5 px-3 text-gray-400">vs ${p.opponent_team}</td>
-                        <td class="py-2.5 px-3 text-right text-gray-300">${p.projected_pitches}</td>
-                        <td class="py-2.5 px-3 text-right text-yellow-400 font-bold">${p.expected_k}</td>
-                        <td class="py-2.5 px-3 text-center text-white font-bold">${p.k_line}</td>
-                        <td class="py-2.5 px-3.5 text-right font-bold text-emerald-400">${p.over_prob}%</td>
-                        <td class="py-2.5 px-3.5 text-right font-bold text-cyan-400">${p.under_prob}%</td>
-                    `;
-                    tbody.appendChild(tr);
-                });
-                document.getElementById('pitchers-counter').textContent = `${pFiltered.length} Pitchers`;
-            } else if (currentMarket === 'batters') {
-                secBatters.classList.remove('hidden');
-                const tbody = document.getElementById('batters-tbody');
-                tbody.innerHTML = '';
-                bFiltered.slice(0, 50).forEach(b => {
-                    const tr = document.createElement('tr');
-                    tr.className = "hover:bg-gray-800/60 transition-colors";
-                    tr.innerHTML = `
-                        <td class="py-2.5 px-3.5 font-sans font-bold text-white whitespace-nowrap">${b.name}</td>
-                        <td class="py-2.5 px-3 text-center text-gray-400 text-xs">${b.team} #${b.order}</td>
-                        <td class="py-2.5 px-3 text-right text-gray-300">${b.pa}</td>
-                        <td class="py-2.5 px-3 text-right text-white">${b.xhits}</td>
-                        <td class="py-2.5 px-3.5 text-right font-bold text-emerald-400">${b.p_0_5}%</td>
-                        <td class="py-2.5 px-3.5 text-right font-bold text-cyan-400">${b.p_1_5}%</td>
-                        <td class="py-2.5 px-3 text-right text-gray-400">${b.p_2_5}%</td>
-                    `;
-                    tbody.appendChild(tr);
-                });
-                document.getElementById('batters-counter').textContent = `${bFiltered.length} Hitters`;
-            } else if (currentMarket === 'lab') {
-                secLab.classList.remove('hidden');
-                const logsBox = document.getElementById('accuracy-logs');
-                logsBox.innerHTML = '';
-                if (auditLogsData.length === 0) {
-                    logsBox.innerHTML = '<div class="py-3 text-gray-500">No completed games graded on active slate yet.</div>';
-                } else {
-                    auditLogsData.forEach(l => {
-                        const tr = document.createElement('div');
-                        tr.className = "py-2.5 flex justify-between items-center";
-                        const bClass = l.hit ? "text-emerald-400 font-bold" : "text-red-400 font-bold";
-                        const bText = l.hit ? "HIT ✅" : "MISS ❌";
-                        tr.innerHTML = `
-                            <div>
-                                <span class="text-white font-bold">${l.matchup}</span>
-                                <span class="text-gray-400 ml-2">Fav: ${l.predicted}</span>
-                            </div>
-                            <div class="flex items-center gap-3">
-                                <span class="text-yellow-400 font-mono">${l.result}</span>
-                                <span class="${bClass}">${bText}</span>
-                            </div>
-                        `;
-                        logsBox.appendChild(tr);
-                    });
-                }
-            }
-        }
-
-        buildTicker();
-        renderView();
-    </script>
-</body>
-</html>
-"""
-        html = template.replace("__GAMES_JSON__", json.dumps(games)) \
-                       .replace("__BATTERS_JSON__", json.dumps(batters)) \
-                       .replace("__PITCHERS_JSON__", json.dumps(pitchers)) \
-                       .replace("__AUDIT_LOGS__", json.dumps(audit_logs)) \
-                       .replace("__WIN_PCT__", str(win_pct))
-        return HTMLResponse(content=html)
-
-    except Exception as e:
-        err_trace = traceback.format_exc()
-        print(f"[FATAL SERVER ERROR in serve_dashboard]:\n{err_trace}")
-        return HTMLResponse(
-            content=f"<pre style='color:#ff5555; background:#111; padding:20px; font-family:monospace; font-size:13px;'>Server Error Traceback:\n\n{err_trace}</pre>",
-            status_code=500
-        )
+    return CACHE["schedule_data"]
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+@app.get("/", response_class=HTMLResponse)
+def serve_dashboard():
+    dfs = load_cached_dataframes()
+    live_schedule = fetch_mlb_live_schedule()
+
+    now_utc = datetime.now(timezone.utc)
+    today_et = now_utc.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    yest_et = (now_utc.astimezone(ZoneInfo("America/New_York")) - timedelta(days=1)).strftime("%Y-%m-%d")
+    tomo_et = (now_utc.astimezone(ZoneInfo("America/New_York")) + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Forecast Map Construction
+    forecast_map = {}
+    df_mf = dfs.get("Model_Forecasts", pd.DataFrame())
+    if not df_mf.empty:
+        for _, row in df_mf.iterrows():
+            forecast_map[str(row.get("game_pk"))] = row.to_dict()
+
+    games_payload = []
+    ticker_items = []
+
+    for pk, g in live_schedule.items():
+        g_date = g.get("officialDate", "")
+        status_info = g.get("status", {})
+        abstract_state = status_info.get("abstractGameState", "Preview")
+        
+        teams = g.get("teams", {})
+        away_data = teams.get("away", {})
+        home_data = teams.get("home", {})
+        away_name = away_data.get("team", {}).get("name", "Away")
+        home_name = home_data.get("team", {}).get("name", "Home")
+
+        linescore = g.get("linescore", {})
+        curr_inning = linescore.get("currentInningOrdinal", "")
+        is_top = linescore.get("isTopInning", True)
+        half_sym = "▲" if is_top else "▼"
+        outs = linescore.get("outs", 0)
+
+        act_score_away = away_data.get("score", 0)
+        act_score_home = home_data.get("score", 0)
+
+        if abstract_state == "Live":
+            stage = "live"
+            status_badge = f"{half_sym}{curr_inning} ({outs} Out)"
+        elif abstract_state == "Final":
+            stage = "final"
+            status_badge = f"FINAL: {away_name} {act_score_away}, {home_name} {act_score_home}"
+        else:
+            stage = "upcoming"
+            start_iso = g.get("gameDate", "")
+            if start_iso:
+                try:
+                    dt = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+                    status_badge = dt.astimezone(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT")
+                except Exception:
+                    status_badge = "Scheduled"
+            else:
+                status_badge = "Scheduled"
+
+        date_bucket = "today"
+        if g_date == yest_et:
+            date_bucket = "yesterday"
+        elif g_date == tomo_et:
+            date_bucket = "tomorrow"
+
+        mf = forecast_map.get(pk, {})
+        if not mf or not mf.get("prob_home_win"):
+            mf = derive_quantitative_projection(away_name, home_name)
+
+        p_home = float(mf.get("prob_home_win") or 0.50)
+        p_away = round(1.0 - p_home, 3)
+        exp_away = float(mf.get("expected_runs_away") or 4.5)
+        exp_home = float(mf.get("expected_runs_home") or 4.5)
+        f5_median = float(mf.get("f5_median_runs") or (exp_away + exp_home) * 0.55)
+
+        # In-Game Bayesian Estimation via NumPy
+        if stage == "live" and linescore:
+            inn = linescore.get("currentInning", 1)
+            rem_pct = np.clip((9.0 - (inn - (0.5 if not is_top else 0.0))) / 9.0, 0.04, 1.0)
+            proj_away = act_score_away + (exp_away * rem_pct)
+            proj_home = act_score_home + (exp_home * rem_pct)
+            run_diff = proj_home - proj_away
+            live_p_home = round(float(1.0 / (1.0 + np.exp(-0.45 * run_diff))), 3)
+            live_p_away = round(1.0 - live_p_home, 3)
+        else:
+            live_p_home = p_home
+            live_p_away = p_away
+
+        if stage == "live":
+            ticker_items.append(f"🔴 LIVE: {away_name} {act_score_away} @ {home_name} {act_score_home} ({status_badge}) | Pick: {home_name if live_p_home >= 0.5 else away_name} ({max(live_p_home, live_p_away)*100:.1f}%)")
+        elif stage == "upcoming":
+            fav = home_name if p_home >= 0.5 else away_name
+            ticker_items.append(f"⏳ UPCOMING: {away_name} @ {home_name} ({status_badge}) | Pick: {fav} ({max(p_home, p_away)*100:.1f}%) | Total: {exp_away+exp_home:.1f}")
+        elif stage == "final":
+            winner = home_name if act_score_home > act_score_away else away_name
+            predicted = home_name if p_home >= 0.5 else away_name
+            ticker_items.append(f"🏁 FINAL: {away_name} {act_score_away}, {home_name} {act_score_home} | Pick: {predicted} {'✅' if winner == predicted else '❌'}")
+
+        games_payload.append({
+            "game_pk": pk,
+            "away_team": away_name,
+            "home_team": home_name,
+            "stage": stage,
+            "date_bucket": date_bucket,
+            "status_badge": status_badge,
+            "score_away": act_score_away,
+            "score_home": act_score_home,
+            "prob_home": live_p_home,
+            "prob_away": live_p_away,
+            "pregame_prob_home": p_home,
+            "pregame_prob_away": p_away,
+            "exp_away": exp_away,
+            "exp_home": exp_home,
+            "f5_median": f5_median
+        })
+
+    # Exact Scientific Evaluations for Hit Props via Scipy
+    batter_props = []
+    df_batters = dfs.get("Batter_Hit_Forecasts", pd.DataFrame())
+    df_daily = dfs.get("Daily_Batters", pd.DataFrame())
+    df_decoupled = dfs.get("Batter_Decoupled_Priors", pd.DataFrame())
+
+    if not df_batters.empty:
+        merged_b = df_batters.copy()
+        if not df_daily.empty and "player_name" in df_daily.columns:
+            merged_b = pd.merge(merged_b, df_daily[["game_pk", "player_name", "is_confirmed", "batting_order"]], on=["game_pk", "player_name"], how="left")
+        if not df_decoupled.empty and "player_name" in df_decoupled.columns:
+            merged_b = pd.merge(merged_b, df_decoupled[["player_name", "contact_skill_mod", "babip_skill_mod"]], on="player_name", how="left")
+
+        for _, row in merged_b.iterrows():
+            xhits = float(row.get("expected_hits") or 0.0)
+            
+            # Exact Poisson CDF computation
+            prob_over_0_5 = round(float(1.0 - stats.poisson.cdf(0, xhits)), 4) if xhits > 0 else 0.0
+            prob_over_1_5 = round(float(1.0 - stats.poisson.cdf(1, xhits)), 4) if xhits > 0 else 0.0
+
+            batter_props.append({
+                "game_pk": str(row.get("game_pk")),
+                "player_name": str(row.get("player_name")),
+                "team_name": str(row.get("team_name") or ""),
+                "lineup_order": int(row.get("batting_order") or 1),
+                "expected_hits": xhits,
+                "over_0_5_hit_prob": prob_over_0_5,
+                "over_1_5_hit_prob": prob_over_1_5,
+                "is_confirmed": int(row.get("is_confirmed") or 0),
+                "contact_mod": round(float(row.get("contact_skill_mod") or 1.000), 3),
+                "babip_mod": round(float(row.get("babip_skill_mod") or 1.000), 3)
+            })
+
+    # Exact Scientific Evaluations for Strikeout Props via Scipy
+    pitcher_props = []
+    df_pitchers = dfs.get("Pitcher_K_Forecasts", pd.DataFrame())
+    df_kalman = dfs.get("Pitcher_Kalman_State", pd.DataFrame())
+
+    if not df_pitchers.empty:
+        merged_p = df_pitchers.copy()
+        if not df_kalman.empty and "pitcher_name" in df_kalman.columns:
+            merged_p = pd.merge(merged_p, df_kalman[["pitcher_name", "latent_k_modifier", "variance_p"]], on="pitcher_name", how="left")
+
+        for _, row in merged_p.iterrows():
+            xk = float(row.get("expected_k") or 0.0)
+            line = float(row.get("k_line") or 4.5)
+            
+            # Exact Poisson evaluation against betting line
+            k_threshold = int(np.floor(line))
+            under_prob = round(float(stats.poisson.cdf(k_threshold, xk)), 4) if xk > 0 else 1.0
+            over_prob = round(1.0 - under_prob, 4)
+
+            pitcher_props.append({
+                "game_pk": str(row.get("game_pk")),
+                "pitcher_name": str(row.get("pitcher_name")),
+                "team_name": str(row.get("team_name") or ""),
+                "k_line": line,
+                "expected_k": xk,
+                "over_prob": over_prob,
+                "under_prob": under_prob,
+                "kalman_theta": round(float(row.get("latent_k_modifier") or 1.000), 3),
+                "kalman_p": round(float(row.get("variance_p") or 0.040), 4)
+            })
+
+    ticker_html = " &nbsp;&nbsp;&nbsp;&bull;&nbsp;&nbsp;&nbsp; ".join(ticker_items) if ticker_items else "Synchronizing live betting board and Statcast distributions..."
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>STATSCENTER PRO HUB - High Performance Engine</title>
+    <style>
+        :root {{
+            --bg-primary: #0a0d14;
+            --bg-card: #121824;
+            --border: #1f2a3d;
+            --text-main: #f0f3f8;
+            --text-dim: #8b9bb4;
+            --accent-red: #e02424;
+            --accent-green: #059669;
+            --accent-gold: #d97706;
+            --accent-blue: #2563eb;
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }}
+        body {{ background-color: var(--bg-primary); color: var(--text-main); line-height: 1.4; padding-bottom: 60px; }}
+        
+        .ticker-wrap {{
+            position: sticky;
+            top: 0;
+            width: 100%;
+            overflow: hidden;
+            height: 40px;
+            background-color: #000;
+            border-bottom: 2px solid var(--accent-red);
+            display: flex;
+            align-items: center;
+            z-index: 1000;
+        }}
+        .ticker-brand {{
+            background: var(--accent-red);
+            color: #fff;
+            padding: 0 16px;
+            font-weight: 900;
+            font-size: 11px;
+            letter-spacing: 1px;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            white-space: nowrap;
+            z-index: 2;
+        }}
+        .ticker-move {{
+            display: inline-block;
+            white-space: nowrap;
+            padding-left: 100vw;
+            animation: tickerScroll 120s linear infinite;
+            font-size: 13px;
+            font-weight: 600;
+            color: #e5e7eb;
+        }}
+        .ticker-wrap:hover .ticker-move, .ticker-wrap:active .ticker-move {{
+            animation-play-state: paused;
+        }}
+        @keyframes tickerScroll {{
+            0% {{ transform: translate3d(0, 0, 0); }}
+            100% {{ transform: translate3d(-100%, 0, 0); }}
+        }}
+
+        .container {{ max-width: 1100px; margin: 0 auto; padding: 14px; }}
+        
+        .header {{ display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--border); margin-bottom: 14px; }}
+        .header h1 {{ font-size: 20px; font-weight: 800; letter-spacing: 0.5px; color: #fff; }}
+        .header .badge {{ background: #1e293b; color: #38bdf8; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 4px; border: 1px solid #0284c7; }}
+
+        .nav-tabs, .filter-tabs {{ display: flex; gap: 8px; margin-bottom: 10px; overflow-x: auto; padding-bottom: 4px; }}
+        .btn {{
+            background: var(--bg-card);
+            color: var(--text-dim);
+            border: 1px solid var(--border);
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+            white-space: nowrap;
+        }}
+        .btn.active {{ background: var(--accent-red); color: #fff; border-color: var(--accent-red); }}
+        
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }}
+        .card {{
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px;
+            position: relative;
+        }}
+        .card-header {{ display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-bottom: 8px; }}
+        .matchup-row {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }}
+        .team-name {{ font-size: 15px; font-weight: 800; color: #fff; }}
+        .team-score {{ font-size: 18px; font-weight: 900; color: #f59e0b; }}
+        .prob-pill {{ font-size: 12px; font-weight: 800; padding: 3px 10px; border-radius: 4px; background: #1e293b; color: #94a3b8; }}
+        .prob-pill.fav {{ background: #064e3b; color: #34d399; border: 1px solid #059669; }}
+
+        .data-table {{ width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }}
+        .data-table th {{ text-align: left; padding: 10px 8px; color: var(--text-dim); border-bottom: 1px solid var(--border); font-size: 11px; text-transform: uppercase; }}
+        .data-table td {{ padding: 10px 8px; border-bottom: 1px solid rgba(255,255,255,0.04); }}
+        .badge-conf {{ background: #065f46; color: #34d399; font-size: 10px; padding: 2px 6px; border-radius: 3px; font-weight: 800; }}
+        .badge-proj {{ background: #78350f; color: #fbbf24; font-size: 10px; padding: 2px 6px; border-radius: 3px; font-weight: 800; }}
+    </style>
+</head>
+<body>
+
+<div class="ticker-wrap">
+    <div class="ticker-brand">&#9679; BOTTOMLINE</div>
+    <div class="ticker-move">{ticker_html}</div>
+</div>
+
+<div class="container">
+    <div class="header">
+        <div>
+            <h1>STATSCENTER PRO HUB</h1>
+            <div style="font-size: 11px; color: var(--text-dim); font-weight: 600;">Vectorized NumPy/SciPy Discrete Prop Engine</div>
+        </div>
+        <div class="badge">FULL SCIENTIFIC STACK</div>
+    </div>
+
+    <!-- DATE TABS -->
+    <div class="nav-tabs">
+        <button class="btn" onclick="setDateFilter('yesterday', this)">Yesterday</button>
+        <button class="btn active" onclick="setDateFilter('today', this)">Today</button>
+        <button class="btn" onclick="setDateFilter('tomorrow', this)">Tomorrow</button>
+    </div>
+
+    <!-- STAGE TABS -->
+    <div class="filter-tabs">
+        <button class="btn active" onclick="setStageFilter('all', this)" id="cnt-all">All</button>
+        <button class="btn" onclick="setStageFilter('live', this)" id="cnt-live">&#128308; Live</button>
+        <button class="btn" onclick="setStageFilter('upcoming', this)" id="cnt-upcoming">&#9203; Upcoming</button>
+        <button class="btn" onclick="setStageFilter('final', this)" id="cnt-final">&#127937; Final</button>
+    </div>
+
+    <!-- VIEW SELECTION -->
+    <div class="nav-tabs" style="border-top: 1px solid var(--border); padding-top: 12px;">
+        <button class="btn active" onclick="setViewMode('matchups', this)">Matchups & F5</button>
+        <button class="btn" onclick="setViewMode('batters', this)" id="cnt-batters">Batter Hits (All)</button>
+        <button class="btn" onclick="setViewMode('pitchers', this)" id="cnt-pitchers">Pitcher Ks (All)</button>
+    </div>
+
+    <!-- MATCHUPS VIEW -->
+    <div id="view-matchups" class="grid"></div>
+
+    <!-- BATTERS VIEW -->
+    <div id="view-batters" style="display: none; overflow-x: auto;">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>HITTER</th>
+                    <th>SLOT</th>
+                    <th>TEAM</th>
+                    <th>xHITS</th>
+                    <th>OVER 0.5</th>
+                    <th>OVER 1.5</th>
+                    <th>CONTACT / LUCK</th>
+                    <th>STATUS</th>
+                </tr>
+            </thead>
+            <tbody id="batters-tbody"></tbody>
+        </table>
+    </div>
+
+    <!-- PITCHERS VIEW -->
+    <div id="view-pitchers" style="display: none; overflow-x: auto;">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>STARTER</th>
+                    <th>TEAM</th>
+                    <th>LINE</th>
+                    <th>xK</th>
+                    <th>OVER %</th>
+                    <th>UNDER %</th>
+                    <th>KALMAN STATE (θ | P)</th>
+                </tr>
+            </thead>
+            <tbody id="pitchers-tbody"></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    const games = {games_payload};
+    const batterProps = {batter_props};
+    const pitcherProps = {pitcher_props};
+
+    let activeDate = 'today';
+    let activeStage = 'all';
+    let activeView = 'matchups';
+
+    function updateCounts() {{
+        const filtered = games.filter(g => g.date_bucket === activeDate);
+        const liveCnt = filtered.filter(g => g.stage === 'live').length;
+        const upCnt = filtered.filter(g => g.stage === 'upcoming').length;
+        const finCnt = filtered.filter(g => g.stage === 'final').length;
+
+        document.getElementById('cnt-all').innerText = `All (${{filtered.length}})`;
+        document.getElementById('cnt-live').innerText = `🔴 Live (${{liveCnt}})`;
+        document.getElementById('cnt-upcoming').innerText = `⏳ Upcoming (${{upCnt}})`;
+        document.getElementById('cnt-final').innerText = `🏁 Final (${{finCnt}})`;
+
+        const activePks = new Set(filtered.map(g => String(g.game_pk)));
+        const activeBatters = batterProps.filter(b => activePks.has(String(b.game_pk))).length;
+        const activePitchers = pitcherProps.filter(p => activePks.has(String(p.game_pk))).length;
+
+        document.getElementById('cnt-batters').innerText = `Batter Hits (${{activeBatters}})`;
+        document.getElementById('cnt-pitchers').innerText = `Pitcher Ks (${{activePitchers}})`;
+    }}
+
+    function renderMatchups() {{
+        const container = document.getElementById('view-matchups');
+        container.innerHTML = '';
+
+        const filtered = games.filter(g => {{
+            const matchDate = g.date_bucket === activeDate;
+            const matchStage = (activeStage === 'all') || (g.stage === activeStage);
+            return matchDate && matchStage;
+        }});
+
+        if (filtered.length === 0) {{
+            container.innerHTML = '<div style="color: var(--text-dim); text-align: center; padding: 40px; font-size: 13px; grid-column: 1/-1;">No matchups found for this selection.</div>';
+            return;
+        }}
+
+        filtered.forEach(g => {{
+            const awayFav = g.prob_away >= g.prob_home;
+            const homeFav = g.prob_home > g.prob_away;
+            
+            const card = document.createElement('div');
+            card.className = 'card';
+            card.innerHTML = `
+                <div class="card-header">
+                    <span>${{g.status_badge}}</span>
+                    <span style="font-family: monospace;">PK: ${{g.game_pk}}</span>
+                </div>
+                <div class="matchup-row">
+                    <span class="team-name">${{g.away_team}}</span>
+                    <span class="team-score">${{g.stage === 'upcoming' ? '' : g.score_away}}</span>
+                    <span class="prob-pill ${{awayFav ? 'fav' : ''}}">${{(g.prob_away * 100).toFixed(1)}}%</span>
+                </div>
+                <div class="matchup-row">
+                    <span class="team-name">${{g.home_team}}</span>
+                    <span class="team-score">${{g.stage === 'upcoming' ? '' : g.score_home}}</span>
+                    <span class="prob-pill ${{homeFav ? 'fav' : ''}}">${{(g.prob_home * 100).toFixed(1)}}%</span>
+                </div>
+                <div style="font-size: 11px; color: var(--text-dim); margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; display: flex; justify-content: space-between;">
+                    <span>Model Runs: ${{g.exp_away.toFixed(1)}} - ${{g.exp_home.toFixed(1)}} (O/U: ${(g.exp_away + g.exp_home).toFixed(1)})</span>
+                    <span>F5 Median: ${{g.f5_median.toFixed(1)}}</span>
+                </div>
+            `;
+            container.appendChild(card);
+        }});
+    }}
+
+    function renderBatters() {{
+        const tbody = document.getElementById('batters-tbody');
+        tbody.innerHTML = '';
+
+        const activePks = new Set(
+            games.filter(g => g.date_bucket === activeDate && (activeStage === 'all' || g.stage === activeStage))
+                 .map(g => String(g.game_pk))
+        );
+
+        const filteredBatters = batterProps.filter(b => activePks.has(String(b.game_pk)));
+
+        if (filteredBatters.length === 0) {{
+            tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-dim); padding: 30px;">No batter props for this selection.</td></tr>';
+            return;
+        }}
+
+        filteredBatters.forEach(b => {{
+            const tr = document.createElement('tr');
+            const confBadge = b.is_confirmed == 1 
+                ? '<span class="badge-conf">CONFIRMED</span>' 
+                : '<span class="badge-proj">PROJECTED</span>';
+
+            tr.innerHTML = `
+                <td style="font-weight: 700; color: #fff;">${{b.player_name}}</td>
+                <td style="color: var(--text-dim);">#${{b.lineup_order || '-'}}</td>
+                <td>${{b.team_name || ''}}</td>
+                <td style="font-weight: 600; font-family: monospace;">${{Number(b.expected_hits || 0).toFixed(2)}}</td>
+                <td style="font-weight: 800; color: #34d399; font-family: monospace;">${{(Number(b.over_0_5_hit_prob || 0) * 100).toFixed(1)}}%</td>
+                <td style="font-weight: 800; color: #38bdf8; font-family: monospace;">${{(Number(b.over_1_5_hit_prob || 0) * 100).toFixed(1)}}%</td>
+                <td style="font-size: 11px; color: var(--text-dim); font-family: monospace;">${{b.contact_mod}} / ${{b.babip_mod}}</td>
+                <td>${{confBadge}}</td>
+            `;
+            tbody.appendChild(tr);
+        }});
+    }}
+
+    function renderPitchers() {{
+        const tbody = document.getElementById('pitchers-tbody');
+        tbody.innerHTML = '';
+
+        const activePks = new Set(
+            games.filter(g => g.date_bucket === activeDate && (activeStage === 'all' || g.stage === activeStage))
+                 .map(g => String(g.game_pk))
+        );
+
+        const filteredPitchers = pitcherProps.filter(p => activePks.has(String(p.game_pk)));
+
+        if (filteredPitchers.length === 0) {{
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-dim); padding: 30px;">No pitcher props for this selection.</td></tr>';
+            return;
+        }}
+
+        filteredPitchers.forEach(p => {{
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td style="font-weight: 700; color: #fff;">${{p.pitcher_name}}</td>
+                <td>${{p.team_name || ''}}</td>
+                <td style="font-weight: 800; color: #f59e0b; font-family: monospace;">${{Number(p.k_line || 4.5).toFixed(1)}}</td>
+                <td style="font-weight: 600; font-family: monospace;">${{Number(p.expected_k || 0).toFixed(2)}}</td>
+                <td style="color: #34d399; font-weight: 800; font-family: monospace;">${{(Number(p.over_prob || 0) * 100).toFixed(1)}}%</td>
+                <td style="color: #94a3b8; font-weight: 700; font-family: monospace;">${{(Number(p.under_prob || 0) * 100).toFixed(1)}}%</td>
+                <td style="color: #c084fc; font-family: monospace; font-size: 11px;">θ=${{p.kalman_theta}} (P:${{p.kalman_p}})</td>
+            `;
+            tbody.appendChild(tr);
+        }});
+    }}
+
+    function setDateFilter(d, btn) {{
+        activeDate = d;
+        btn.parentElement.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        updateCounts();
+        renderActiveView();
+    }}
+
+    function setStageFilter(s, btn) {{
+        activeStage = s;
+        btn.parentElement.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        renderActiveView();
+    }}
+
+    function setViewMode(v, btn) {{
+        activeView = v;
+        btn.parentElement.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        
+        document.getElementById('view-matchups').style.display = v === 'matchups' ? 'grid' : 'none';
+        document.getElementById('view-batters').style.display = v === 'batters' ? 'block' : 'none';
+        document.getElementById('view-pitchers').style.display = v === 'pitchers' ? 'block' : 'none';
+        
+        renderActiveView();
+    }}
+
+    function renderActiveView() {{
+        if (activeView === 'matchups') renderMatchups();
+        else if (activeView === 'batters') renderBatters();
+        else if (activeView === 'pitchers') renderPitchers();
+    }}
+
+    updateCounts();
+    renderActiveView();
+</script>
+</body>
+</html>
+"""
+    return HTMLResponse(content=html_content)
