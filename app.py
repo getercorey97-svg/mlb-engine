@@ -1,6 +1,7 @@
 import sqlite3
 import re
 import time
+import json
 import requests
 import numpy as np
 import pandas as pd
@@ -78,19 +79,18 @@ def load_cached_dataframes():
     target_tables = [
         "Model_Forecasts", "Historical_Forecasts", "Daily_Lineups", 
         "Daily_Batters", "Batter_Hit_Forecasts", "Pitcher_K_Forecasts",
-        "Pitcher_Kalman_State", "Batter_Decoupled_Priors", 
-        "Batter_Post_Mortem_Logs", "Pitcher_Post_Mortem_Logs", "Prop_Learning_Calibration_Audit"
+        "Pitcher_Kalman_State", "Batter_Decoupled_Priors"
     ]
 
     for tbl in target_tables:
         if tbl in tables:
             try:
-                df = pd.read_sql_query(f"SELECT * FROM {tbl}", conn)
+                df = pd.read_sql_query(f"SELECT * FROM {tbl}", conn).fillna(0)
                 if "game_pk" in df.columns:
                     df["game_pk"] = df["game_pk"].astype(str)
                 frames[tbl] = df
             except Exception as e:
-                print(f"[WARN] Error preloading table {tbl}: {e}", flush=True)
+                print(f"[WARN] Error loading {tbl}: {e}", flush=True)
                 frames[tbl] = pd.DataFrame()
         else:
             frames[tbl] = pd.DataFrame()
@@ -120,7 +120,7 @@ def fetch_mlb_live_schedule():
             CACHE["schedule_data"] = schedule_map
             CACHE["last_fetched"] = now
     except Exception as e:
-        print(f"[WARN] MLB Live API Schedule fetch error: {e}", flush=True)
+        print(f"[WARN] Live MLB API schedule pull error: {e}", flush=True)
 
     return CACHE["schedule_data"]
 
@@ -138,7 +138,6 @@ def serve_dashboard():
     yest_et = (now_utc.astimezone(ZoneInfo("America/New_York")) - timedelta(days=1)).strftime("%Y-%m-%d")
     tomo_et = (now_utc.astimezone(ZoneInfo("America/New_York")) + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # Forecast Map Construction
     forecast_map = {}
     df_mf = dfs.get("Model_Forecasts", pd.DataFrame())
     if not df_mf.empty:
@@ -200,9 +199,8 @@ def serve_dashboard():
         p_away = round(1.0 - p_home, 3)
         exp_away = float(mf.get("expected_runs_away") or 4.5)
         exp_home = float(mf.get("expected_runs_home") or 4.5)
-        f5_median = float(mf.get("f5_median_runs") or (exp_away + exp_home) * 0.55)
+        f5_median = float(mf.get("f5_median_runs") or round((exp_away + exp_home) * 0.55, 1))
 
-        # In-Game Bayesian Estimation via NumPy
         if stage == "live" and linescore:
             inn = linescore.get("currentInning", 1)
             rem_pct = np.clip((9.0 - (inn - (0.5 if not is_top else 0.0))) / 9.0, 0.04, 1.0)
@@ -243,7 +241,7 @@ def serve_dashboard():
             "f5_median": f5_median
         })
 
-    # Exact Scientific Evaluations for Hit Props via Scipy
+    # Batter Hit Forecasts
     batter_props = []
     df_batters = dfs.get("Batter_Hit_Forecasts", pd.DataFrame())
     df_daily = dfs.get("Daily_Batters", pd.DataFrame())
@@ -252,16 +250,14 @@ def serve_dashboard():
     if not df_batters.empty:
         merged_b = df_batters.copy()
         if not df_daily.empty and "player_name" in df_daily.columns:
-            merged_b = pd.merge(merged_b, df_daily[["game_pk", "player_name", "is_confirmed", "batting_order"]], on=["game_pk", "player_name"], how="left")
+            merged_b = pd.merge(merged_b, df_daily[["game_pk", "player_name", "is_confirmed", "batting_order"]], on=["game_pk", "player_name"], how="left").fillna(0)
         if not df_decoupled.empty and "player_name" in df_decoupled.columns:
-            merged_b = pd.merge(merged_b, df_decoupled[["player_name", "contact_skill_mod", "babip_skill_mod"]], on="player_name", how="left")
+            merged_b = pd.merge(merged_b, df_decoupled[["player_name", "contact_skill_mod", "babip_skill_mod"]], on="player_name", how="left").fillna(1.0)
 
         for _, row in merged_b.iterrows():
             xhits = float(row.get("expected_hits") or 0.0)
-            
-            # Exact Poisson CDF computation
-            prob_over_0_5 = round(float(1.0 - stats.poisson.cdf(0, xhits)), 4) if xhits > 0 else 0.0
-            prob_over_1_5 = round(float(1.0 - stats.poisson.cdf(1, xhits)), 4) if xhits > 0 else 0.0
+            p_over_0_5 = round(float(1.0 - stats.poisson.cdf(0, xhits)), 4) if xhits > 0 else 0.0
+            p_over_1_5 = round(float(1.0 - stats.poisson.cdf(1, xhits)), 4) if xhits > 0 else 0.0
 
             batter_props.append({
                 "game_pk": str(row.get("game_pk")),
@@ -269,14 +265,14 @@ def serve_dashboard():
                 "team_name": str(row.get("team_name") or ""),
                 "lineup_order": int(row.get("batting_order") or 1),
                 "expected_hits": xhits,
-                "over_0_5_hit_prob": prob_over_0_5,
-                "over_1_5_hit_prob": prob_over_1_5,
+                "over_0_5_hit_prob": p_over_0_5,
+                "over_1_5_hit_prob": p_over_1_5,
                 "is_confirmed": int(row.get("is_confirmed") or 0),
                 "contact_mod": round(float(row.get("contact_skill_mod") or 1.000), 3),
                 "babip_mod": round(float(row.get("babip_skill_mod") or 1.000), 3)
             })
 
-    # Exact Scientific Evaluations for Strikeout Props via Scipy
+    # Pitcher Strikeout Forecasts
     pitcher_props = []
     df_pitchers = dfs.get("Pitcher_K_Forecasts", pd.DataFrame())
     df_kalman = dfs.get("Pitcher_Kalman_State", pd.DataFrame())
@@ -284,13 +280,11 @@ def serve_dashboard():
     if not df_pitchers.empty:
         merged_p = df_pitchers.copy()
         if not df_kalman.empty and "pitcher_name" in df_kalman.columns:
-            merged_p = pd.merge(merged_p, df_kalman[["pitcher_name", "latent_k_modifier", "variance_p"]], on="pitcher_name", how="left")
+            merged_p = pd.merge(merged_p, df_kalman[["pitcher_name", "latent_k_modifier", "variance_p"]], on="pitcher_name", how="left").fillna(0)
 
         for _, row in merged_p.iterrows():
             xk = float(row.get("expected_k") or 0.0)
             line = float(row.get("k_line") or 4.5)
-            
-            # Exact Poisson evaluation against betting line
             k_threshold = int(np.floor(line))
             under_prob = round(float(stats.poisson.cdf(k_threshold, xk)), 4) if xk > 0 else 1.0
             over_prob = round(1.0 - under_prob, 4)
@@ -307,16 +301,17 @@ def serve_dashboard():
                 "kalman_p": round(float(row.get("variance_p") or 0.040), 4)
             })
 
-    ticker_html = " &nbsp;&nbsp;&nbsp;&bull;&nbsp;&nbsp;&nbsp; ".join(ticker_items) if ticker_items else "Synchronizing live betting board and Statcast distributions..."
+    ticker_content = " &nbsp;&nbsp;&nbsp;&bull;&nbsp;&nbsp;&nbsp; ".join(ticker_items) if ticker_items else "Synchronizing live betting board and Statcast distributions..."
 
-    html_content = f"""<!DOCTYPE html>
+    # Template-Based Injection to Prevent F-String Collisions
+    template = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>STATSCENTER PRO HUB - High Performance Engine</title>
     <style>
-        :root {{
+        :root {
             --bg-primary: #0a0d14;
             --bg-card: #121824;
             --border: #1f2a3d;
@@ -326,11 +321,11 @@ def serve_dashboard():
             --accent-green: #059669;
             --accent-gold: #d97706;
             --accent-blue: #2563eb;
-        }}
-        * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }}
-        body {{ background-color: var(--bg-primary); color: var(--text-main); line-height: 1.4; padding-bottom: 60px; }}
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+        body { background-color: var(--bg-primary); color: var(--text-main); line-height: 1.4; padding-bottom: 60px; }
         
-        .ticker-wrap {{
+        .ticker-wrap {
             position: sticky;
             top: 0;
             width: 100%;
@@ -341,8 +336,8 @@ def serve_dashboard():
             display: flex;
             align-items: center;
             z-index: 1000;
-        }}
-        .ticker-brand {{
+        }
+        .ticker-brand {
             background: var(--accent-red);
             color: #fff;
             padding: 0 16px;
@@ -354,8 +349,8 @@ def serve_dashboard():
             align-items: center;
             white-space: nowrap;
             z-index: 2;
-        }}
-        .ticker-move {{
+        }
+        .ticker-move {
             display: inline-block;
             white-space: nowrap;
             padding-left: 100vw;
@@ -363,23 +358,22 @@ def serve_dashboard():
             font-size: 13px;
             font-weight: 600;
             color: #e5e7eb;
-        }}
-        .ticker-wrap:hover .ticker-move, .ticker-wrap:active .ticker-move {{
+        }
+        .ticker-wrap:hover .ticker-move, .ticker-wrap:active .ticker-move {
             animation-play-state: paused;
-        }}
-        @keyframes tickerScroll {{
-            0% {{ transform: translate3d(0, 0, 0); }}
-            100% {{ transform: translate3d(-100%, 0, 0); }}
-        }}
+        }
+        @keyframes tickerScroll {
+            0% { transform: translate3d(0, 0, 0); }
+            100% { transform: translate3d(-100%, 0, 0); }
+        }
 
-        .container {{ max-width: 1100px; margin: 0 auto; padding: 14px; }}
-        
-        .header {{ display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--border); margin-bottom: 14px; }}
-        .header h1 {{ font-size: 20px; font-weight: 800; letter-spacing: 0.5px; color: #fff; }}
-        .header .badge {{ background: #1e293b; color: #38bdf8; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 4px; border: 1px solid #0284c7; }}
+        .container { max-width: 1100px; margin: 0 auto; padding: 14px; }
+        .header { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+        .header h1 { font-size: 20px; font-weight: 800; letter-spacing: 0.5px; color: #fff; }
+        .header .badge { background: #1e293b; color: #38bdf8; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 4px; border: 1px solid #0284c7; }
 
-        .nav-tabs, .filter-tabs {{ display: flex; gap: 8px; margin-bottom: 10px; overflow-x: auto; padding-bottom: 4px; }}
-        .btn {{
+        .nav-tabs, .filter-tabs { display: flex; gap: 8px; margin-bottom: 10px; overflow-x: auto; padding-bottom: 4px; }
+        .btn {
             background: var(--bg-card);
             color: var(--text-dim);
             border: 1px solid var(--border);
@@ -389,55 +383,53 @@ def serve_dashboard():
             font-weight: 700;
             cursor: pointer;
             white-space: nowrap;
-        }}
-        .btn.active {{ background: var(--accent-red); color: #fff; border-color: var(--accent-red); }}
+        }
+        .btn.active { background: var(--accent-red); color: #fff; border-color: var(--accent-red); }
         
-        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }}
-        .card {{
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+        .card {
             background: var(--bg-card);
             border: 1px solid var(--border);
             border-radius: 8px;
             padding: 14px;
             position: relative;
-        }}
-        .card-header {{ display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-bottom: 8px; }}
-        .matchup-row {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }}
-        .team-name {{ font-size: 15px; font-weight: 800; color: #fff; }}
-        .team-score {{ font-size: 18px; font-weight: 900; color: #f59e0b; }}
-        .prob-pill {{ font-size: 12px; font-weight: 800; padding: 3px 10px; border-radius: 4px; background: #1e293b; color: #94a3b8; }}
-        .prob-pill.fav {{ background: #064e3b; color: #34d399; border: 1px solid #059669; }}
+        }
+        .card-header { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-bottom: 8px; }
+        .matchup-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+        .team-name { font-size: 15px; font-weight: 800; color: #fff; }
+        .team-score { font-size: 18px; font-weight: 900; color: #f59e0b; }
+        .prob-pill { font-size: 12px; font-weight: 800; padding: 3px 10px; border-radius: 4px; background: #1e293b; color: #94a3b8; }
+        .prob-pill.fav { background: #064e3b; color: #34d399; border: 1px solid #059669; }
 
-        .data-table {{ width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }}
-        .data-table th {{ text-align: left; padding: 10px 8px; color: var(--text-dim); border-bottom: 1px solid var(--border); font-size: 11px; text-transform: uppercase; }}
-        .data-table td {{ padding: 10px 8px; border-bottom: 1px solid rgba(255,255,255,0.04); }}
-        .badge-conf {{ background: #065f46; color: #34d399; font-size: 10px; padding: 2px 6px; border-radius: 3px; font-weight: 800; }}
-        .badge-proj {{ background: #78350f; color: #fbbf24; font-size: 10px; padding: 2px 6px; border-radius: 3px; font-weight: 800; }}
+        .data-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+        .data-table th { text-align: left; padding: 10px 8px; color: var(--text-dim); border-bottom: 1px solid var(--border); font-size: 11px; text-transform: uppercase; }
+        .data-table td { padding: 10px 8px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+        .badge-conf { background: #065f46; color: #34d399; font-size: 10px; padding: 2px 6px; border-radius: 3px; font-weight: 800; }
+        .badge-proj { background: #78350f; color: #fbbf24; font-size: 10px; padding: 2px 6px; border-radius: 3px; font-weight: 800; }
     </style>
 </head>
 <body>
 
 <div class="ticker-wrap">
     <div class="ticker-brand">&#9679; BOTTOMLINE</div>
-    <div class="ticker-move">{ticker_html}</div>
+    <div class="ticker-move">__TICKER_ITEMS__</div>
 </div>
 
 <div class="container">
     <div class="header">
         <div>
             <h1>STATSCENTER PRO HUB</h1>
-            <div style="font-size: 11px; color: var(--text-dim); font-weight: 600;">Vectorized NumPy/SciPy Discrete Prop Engine</div>
+            <div style="font-size: 11px; color: var(--text-dim); font-weight: 600;">Vectorized Discrete Prop & Kalman Architecture</div>
         </div>
         <div class="badge">FULL SCIENTIFIC STACK</div>
     </div>
 
-    <!-- DATE TABS -->
     <div class="nav-tabs">
         <button class="btn" onclick="setDateFilter('yesterday', this)">Yesterday</button>
         <button class="btn active" onclick="setDateFilter('today', this)">Today</button>
         <button class="btn" onclick="setDateFilter('tomorrow', this)">Tomorrow</button>
     </div>
 
-    <!-- STAGE TABS -->
     <div class="filter-tabs">
         <button class="btn active" onclick="setStageFilter('all', this)" id="cnt-all">All</button>
         <button class="btn" onclick="setStageFilter('live', this)" id="cnt-live">&#128308; Live</button>
@@ -445,17 +437,14 @@ def serve_dashboard():
         <button class="btn" onclick="setStageFilter('final', this)" id="cnt-final">&#127937; Final</button>
     </div>
 
-    <!-- VIEW SELECTION -->
     <div class="nav-tabs" style="border-top: 1px solid var(--border); padding-top: 12px;">
         <button class="btn active" onclick="setViewMode('matchups', this)">Matchups & F5</button>
         <button class="btn" onclick="setViewMode('batters', this)" id="cnt-batters">Batter Hits (All)</button>
         <button class="btn" onclick="setViewMode('pitchers', this)" id="cnt-pitchers">Pitcher Ks (All)</button>
     </div>
 
-    <!-- MATCHUPS VIEW -->
     <div id="view-matchups" class="grid"></div>
 
-    <!-- BATTERS VIEW -->
     <div id="view-batters" style="display: none; overflow-x: auto;">
         <table class="data-table">
             <thead>
@@ -474,7 +463,6 @@ def serve_dashboard():
         </table>
     </div>
 
-    <!-- PITCHERS VIEW -->
     <div id="view-pitchers" style="display: none; overflow-x: auto;">
         <table class="data-table">
             <thead>
@@ -494,79 +482,80 @@ def serve_dashboard():
 </div>
 
 <script>
-    const games = {games_payload};
-    const batterProps = {batter_props};
-    const pitcherProps = {pitcher_props};
+    const games = __GAMES_DATA__;
+    const batterProps = __BATTER_DATA__;
+    const pitcherProps = __PITCHER_DATA__;
 
     let activeDate = 'today';
     let activeStage = 'all';
     let activeView = 'matchups';
 
-    function updateCounts() {{
+    function updateCounts() {
         const filtered = games.filter(g => g.date_bucket === activeDate);
         const liveCnt = filtered.filter(g => g.stage === 'live').length;
         const upCnt = filtered.filter(g => g.stage === 'upcoming').length;
         const finCnt = filtered.filter(g => g.stage === 'final').length;
 
-        document.getElementById('cnt-all').innerText = `All (${{filtered.length}})`;
-        document.getElementById('cnt-live').innerText = `🔴 Live (${{liveCnt}})`;
-        document.getElementById('cnt-upcoming').innerText = `⏳ Upcoming (${{upCnt}})`;
-        document.getElementById('cnt-final').innerText = `🏁 Final (${{finCnt}})`;
+        document.getElementById('cnt-all').innerText = `All (${filtered.length})`;
+        document.getElementById('cnt-live').innerText = `🔴 Live (${liveCnt})`;
+        document.getElementById('cnt-upcoming').innerText = `⏳ Upcoming (${upCnt})`;
+        document.getElementById('cnt-final').innerText = `🏁 Final (${finCnt})`;
 
         const activePks = new Set(filtered.map(g => String(g.game_pk)));
         const activeBatters = batterProps.filter(b => activePks.has(String(b.game_pk))).length;
         const activePitchers = pitcherProps.filter(p => activePks.has(String(p.game_pk))).length;
 
-        document.getElementById('cnt-batters').innerText = `Batter Hits (${{activeBatters}})`;
-        document.getElementById('cnt-pitchers').innerText = `Pitcher Ks (${{activePitchers}})`;
-    }}
+        document.getElementById('cnt-batters').innerText = `Batter Hits (${activeBatters})`;
+        document.getElementById('cnt-pitchers').innerText = `Pitcher Ks (${activePitchers})`;
+    }
 
-    function renderMatchups() {{
+    function renderMatchups() {
         const container = document.getElementById('view-matchups');
         container.innerHTML = '';
 
-        const filtered = games.filter(g => {{
+        const filtered = games.filter(g => {
             const matchDate = g.date_bucket === activeDate;
             const matchStage = (activeStage === 'all') || (g.stage === activeStage);
             return matchDate && matchStage;
-        }});
+        });
 
-        if (filtered.length === 0) {{
+        if (filtered.length === 0) {
             container.innerHTML = '<div style="color: var(--text-dim); text-align: center; padding: 40px; font-size: 13px; grid-column: 1/-1;">No matchups found for this selection.</div>';
             return;
-        }}
+        }
 
-        filtered.forEach(g => {{
+        filtered.forEach(g => {
             const awayFav = g.prob_away >= g.prob_home;
             const homeFav = g.prob_home > g.prob_away;
+            const totalRuns = Number(g.exp_away + g.exp_home).toFixed(1);
             
             const card = document.createElement('div');
             card.className = 'card';
             card.innerHTML = `
                 <div class="card-header">
-                    <span>${{g.status_badge}}</span>
-                    <span style="font-family: monospace;">PK: ${{g.game_pk}}</span>
+                    <span>${g.status_badge}</span>
+                    <span style="font-family: monospace;">PK: ${g.game_pk}</span>
                 </div>
                 <div class="matchup-row">
-                    <span class="team-name">${{g.away_team}}</span>
-                    <span class="team-score">${{g.stage === 'upcoming' ? '' : g.score_away}}</span>
-                    <span class="prob-pill ${{awayFav ? 'fav' : ''}}">${{(g.prob_away * 100).toFixed(1)}}%</span>
+                    <span class="team-name">${g.away_team}</span>
+                    <span class="team-score">${g.stage === 'upcoming' ? '' : g.score_away}</span>
+                    <span class="prob-pill ${awayFav ? 'fav' : ''}">${(g.prob_away * 100).toFixed(1)}%</span>
                 </div>
                 <div class="matchup-row">
-                    <span class="team-name">${{g.home_team}}</span>
-                    <span class="team-score">${{g.stage === 'upcoming' ? '' : g.score_home}}</span>
-                    <span class="prob-pill ${{homeFav ? 'fav' : ''}}">${{(g.prob_home * 100).toFixed(1)}}%</span>
+                    <span class="team-name">${g.home_team}</span>
+                    <span class="team-score">${g.stage === 'upcoming' ? '' : g.score_home}</span>
+                    <span class="prob-pill ${homeFav ? 'fav' : ''}">${(g.prob_home * 100).toFixed(1)}%</span>
                 </div>
                 <div style="font-size: 11px; color: var(--text-dim); margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; display: flex; justify-content: space-between;">
-                    <span>Model Runs: ${{g.exp_away.toFixed(1)}} - ${{g.exp_home.toFixed(1)}} (O/U: ${(g.exp_away + g.exp_home).toFixed(1)})</span>
-                    <span>F5 Median: ${{g.f5_median.toFixed(1)}}</span>
+                    <span>Model Runs: ${g.exp_away.toFixed(1)} - ${g.exp_home.toFixed(1)} (O/U: ${totalRuns})</span>
+                    <span>F5 Median: ${g.f5_median.toFixed(1)}</span>
                 </div>
             `;
             container.appendChild(card);
-        }});
-    }}
+        });
+    }
 
-    function renderBatters() {{
+    function renderBatters() {
         const tbody = document.getElementById('batters-tbody');
         tbody.innerHTML = '';
 
@@ -577,32 +566,32 @@ def serve_dashboard():
 
         const filteredBatters = batterProps.filter(b => activePks.has(String(b.game_pk)));
 
-        if (filteredBatters.length === 0) {{
+        if (filteredBatters.length === 0) {
             tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-dim); padding: 30px;">No batter props for this selection.</td></tr>';
             return;
-        }}
+        }
 
-        filteredBatters.forEach(b => {{
+        filteredBatters.forEach(b => {
             const tr = document.createElement('tr');
             const confBadge = b.is_confirmed == 1 
                 ? '<span class="badge-conf">CONFIRMED</span>' 
                 : '<span class="badge-proj">PROJECTED</span>';
 
             tr.innerHTML = `
-                <td style="font-weight: 700; color: #fff;">${{b.player_name}}</td>
-                <td style="color: var(--text-dim);">#${{b.lineup_order || '-'}}</td>
-                <td>${{b.team_name || ''}}</td>
-                <td style="font-weight: 600; font-family: monospace;">${{Number(b.expected_hits || 0).toFixed(2)}}</td>
-                <td style="font-weight: 800; color: #34d399; font-family: monospace;">${{(Number(b.over_0_5_hit_prob || 0) * 100).toFixed(1)}}%</td>
-                <td style="font-weight: 800; color: #38bdf8; font-family: monospace;">${{(Number(b.over_1_5_hit_prob || 0) * 100).toFixed(1)}}%</td>
-                <td style="font-size: 11px; color: var(--text-dim); font-family: monospace;">${{b.contact_mod}} / ${{b.babip_mod}}</td>
-                <td>${{confBadge}}</td>
+                <td style="font-weight: 700; color: #fff;">${b.player_name}</td>
+                <td style="color: var(--text-dim);">#${b.lineup_order || '-'}</td>
+                <td>${b.team_name || ''}</td>
+                <td style="font-weight: 600; font-family: monospace;">${Number(b.expected_hits || 0).toFixed(2)}</td>
+                <td style="font-weight: 800; color: #34d399; font-family: monospace;">${(Number(b.over_0_5_hit_prob || 0) * 100).toFixed(1)}%</td>
+                <td style="font-weight: 800; color: #38bdf8; font-family: monospace;">${(Number(b.over_1_5_hit_prob || 0) * 100).toFixed(1)}%</td>
+                <td style="font-size: 11px; color: var(--text-dim); font-family: monospace;">${b.contact_mod} / ${b.babip_mod}</td>
+                <td>${confBadge}</td>
             `;
             tbody.appendChild(tr);
-        }});
-    }}
+        });
+    }
 
-    function renderPitchers() {{
+    function renderPitchers() {
         const tbody = document.getElementById('pitchers-tbody');
         tbody.innerHTML = '';
 
@@ -613,42 +602,42 @@ def serve_dashboard():
 
         const filteredPitchers = pitcherProps.filter(p => activePks.has(String(p.game_pk)));
 
-        if (filteredPitchers.length === 0) {{
+        if (filteredPitchers.length === 0) {
             tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-dim); padding: 30px;">No pitcher props for this selection.</td></tr>';
             return;
-        }}
+        }
 
-        filteredPitchers.forEach(p => {{
+        filteredPitchers.forEach(p => {
             const tr = document.createElement('tr');
             tr.innerHTML = `
-                <td style="font-weight: 700; color: #fff;">${{p.pitcher_name}}</td>
-                <td>${{p.team_name || ''}}</td>
-                <td style="font-weight: 800; color: #f59e0b; font-family: monospace;">${{Number(p.k_line || 4.5).toFixed(1)}}</td>
-                <td style="font-weight: 600; font-family: monospace;">${{Number(p.expected_k || 0).toFixed(2)}}</td>
-                <td style="color: #34d399; font-weight: 800; font-family: monospace;">${{(Number(p.over_prob || 0) * 100).toFixed(1)}}%</td>
-                <td style="color: #94a3b8; font-weight: 700; font-family: monospace;">${{(Number(p.under_prob || 0) * 100).toFixed(1)}}%</td>
-                <td style="color: #c084fc; font-family: monospace; font-size: 11px;">θ=${{p.kalman_theta}} (P:${{p.kalman_p}})</td>
+                <td style="font-weight: 700; color: #fff;">${p.pitcher_name}</td>
+                <td>${p.team_name || ''}</td>
+                <td style="font-weight: 800; color: #f59e0b; font-family: monospace;">${Number(p.k_line || 4.5).toFixed(1)}</td>
+                <td style="font-weight: 600; font-family: monospace;">${Number(p.expected_k || 0).toFixed(2)}</td>
+                <td style="color: #34d399; font-weight: 800; font-family: monospace;">${(Number(p.over_prob || 0) * 100).toFixed(1)}%</td>
+                <td style="color: #94a3b8; font-weight: 700; font-family: monospace;">${(Number(p.under_prob || 0) * 100).toFixed(1)}%</td>
+                <td style="color: #c084fc; font-family: monospace; font-size: 11px;">θ=${p.kalman_theta} (P:${p.kalman_p})</td>
             `;
             tbody.appendChild(tr);
-        }});
-    }}
+        });
+    }
 
-    function setDateFilter(d, btn) {{
+    function setDateFilter(d, btn) {
         activeDate = d;
         btn.parentElement.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         updateCounts();
         renderActiveView();
-    }}
+    }
 
-    function setStageFilter(s, btn) {{
+    function setStageFilter(s, btn) {
         activeStage = s;
         btn.parentElement.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         renderActiveView();
-    }}
+    }
 
-    function setViewMode(v, btn) {{
+    function setViewMode(v, btn) {
         activeView = v;
         btn.parentElement.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
@@ -658,13 +647,13 @@ def serve_dashboard():
         document.getElementById('view-pitchers').style.display = v === 'pitchers' ? 'block' : 'none';
         
         renderActiveView();
-    }}
+    }
 
-    function renderActiveView() {{
+    function renderActiveView() {
         if (activeView === 'matchups') renderMatchups();
         else if (activeView === 'batters') renderBatters();
         else if (activeView === 'pitchers') renderPitchers();
-    }}
+    }
 
     updateCounts();
     renderActiveView();
@@ -672,4 +661,9 @@ def serve_dashboard():
 </body>
 </html>
 """
-    return HTMLResponse(content=html_content)
+    html_output = template.replace("__TICKER_ITEMS__", ticker_content) \
+                          .replace("__GAMES_DATA__", json.dumps(games_payload)) \
+                          .replace("__BATTER_DATA__", json.dumps(batter_props)) \
+                          .replace("__PITCHER_DATA__", json.dumps(pitcher_props))
+
+    return HTMLResponse(content=html_output)
