@@ -1,0 +1,51 @@
+name: Daily Autonomous MLB Pipeline & Slate Sync
+
+on:
+  schedule:
+    # 06:00 UTC (2:00 AM EDT): Overnight post-mortem linescores & grading
+    - cron: '0 6 * * *'
+    # 15:00 UTC (11:00 AM EDT): Morning slate load & prop generation
+    - cron: '0 15 * * *'
+    # Every 15 mins during active game windows (12:00 PM - 1:45 AM EDT)
+    - cron: '*/15 16-23,0-5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests numpy pandas scipy fastapi uvicorn
+
+      - name: Execute Autonomous Daily Pipeline
+        run: |
+          python cron_pipeline.py
+
+      - name: Commit and Push Updated Operational Database
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git reset origin/main
+          [ -f mlb_engine.db ] && git add mlb_engine.db
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "Autonomous daily slate & post-mortem sync [skip ci]"
+            git push origin main
+          else
+            echo "No database changes to commit."
+          fi
