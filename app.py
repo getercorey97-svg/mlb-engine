@@ -449,7 +449,7 @@ def index():
             if (contA) {
                 contA.innerHTML = '';
                 if (auditItems.length === 0) {
-                    contA.innerHTML = '<div class="text-gray-400 text-xs font-mono p-3 bg-gray-900 rounded border border-gray-800">No completed game boxscores graded yet today.</div>';
+                    contA.innerHTML = '<div class="text-gray-400 text-xs font-mono p-3 bg-gray-900 rounded border border-gray-800">No completed game boxscores graded yet.</div>';
                 } else {
                     auditItems.forEach(item => {
                         const isHit = item.status === 'HIT';
@@ -486,13 +486,13 @@ def index():
         content = content.replace("__ML_STAT__", f"{acc['markets']['ml']['right']} Right / {acc['markets']['ml']['wrong']} Wrong ({acc['markets']['ml']['pct']}%)")
         content = content.replace("__PK_STAT__", f"{acc['markets']['pitchers']['right']} Right / {acc['markets']['pitchers']['wrong']} Wrong ({acc['markets']['pitchers']['pct']}%)")
         content = content.replace("__BH_STAT__", f"{acc['markets']['batters']['right']} Right / {acc['markets']['batters']['wrong']} Wrong ({acc['markets']['batters']['pct']}%)")
-        content = content.replace("__AUDIT_COUNT__", str(len(auditItems)))
+        content = content.replace("__AUDIT_COUNT__", str(len(audit_items)))
         content = content.replace("__TODAY_STR__", today_str)
         content = content.replace("__YESTERDAY_STR__", yesterday_str)
         content = content.replace("__GAMES_DATA__", json.dumps(games))
         content = content.replace("__PITCHERS_DATA__", json.dumps(pitchers))
         content = content.replace("__BATTERS_DATA__", json.dumps(batters))
-        content = content.replace("__AUDIT_DATA__", json.dumps(auditItems))
+        content = content.replace("__AUDIT_DATA__", json.dumps(audit_items))
 
         return HTMLResponse(content=content)
 
