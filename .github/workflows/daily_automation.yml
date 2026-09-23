@@ -2,7 +2,7 @@ name: Daily Autonomous MLB Pipeline & Slate Sync
 
 on:
   schedule:
-    # 06:00 UTC (2:00 AM EDT): Overnight post-mortem linescores & grading
+    # 06:00 UTC (2:00 AM EDT): Overnight linescores, boxscores & post-mortem grading
     - cron: '0 6 * * *'
     # 15:00 UTC (11:00 AM EDT): Morning slate load & prop generation
     - cron: '0 15 * * *'
@@ -40,12 +40,10 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin main
-          git reset origin/main
-          [ -f mlb_engine.db ] && git add mlb_engine.db
+          git add mlb_engine.db
           if ! git diff-index --quiet HEAD; then
             git commit -m "Autonomous daily slate & post-mortem sync [skip ci]"
-            git push origin main
+            git push origin main || git push origin main --force
           else
             echo "No database changes to commit."
           fi

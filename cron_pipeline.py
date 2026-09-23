@@ -3,73 +3,53 @@ import requests
 from datetime import datetime, timezone, timedelta
 from scipy.stats import poisson
 
-def run_daily_pipeline():
-    conn = sqlite3.connect("mlb_engine.db")
-    c = conn.cursor()
+def ensure_schema(c):
+    # Model_Forecasts
+    c.execute("CREATE TABLE IF NOT EXISTS Model_Forecasts (game_pk TEXT PRIMARY KEY)")
+    mf_cols = [r[1] for r in c.execute("PRAGMA table_info(Model_Forecasts)").fetchall()]
+    cols_mf = [
+        ("game_date", "TEXT"), ("home_team", "TEXT"), ("away_team", "TEXT"),
+        ("prob_home_win", "REAL"), ("expected_runs", "REAL"), ("f5_median_runs", "REAL"),
+        ("actual_score_away", "REAL"), ("actual_score_home", "REAL"),
+        ("f5_actual_away", "REAL"), ("f5_actual_home", "REAL"),
+        ("hit_ml", "INTEGER"), ("hit_f5_ml", "INTEGER")
+    ]
+    for col, ctype in cols_mf:
+        if col not in mf_cols:
+            c.execute(f"ALTER TABLE Model_Forecasts ADD COLUMN {col} {ctype}")
 
-    # Schemas
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS Model_Forecasts (
-            game_pk TEXT PRIMARY KEY,
-            game_date TEXT,
-            home_team TEXT,
-            away_team TEXT,
-            prob_home_win REAL,
-            expected_runs REAL,
-            f5_median_runs REAL,
-            actual_score_away REAL,
-            actual_score_home REAL,
-            f5_actual_away REAL,
-            f5_actual_home REAL,
-            hit_ml INTEGER,
-            hit_f5_ml INTEGER
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS Pitcher_K_Forecasts (
-            game_pk TEXT,
-            pitcher_name TEXT,
-            team_name TEXT,
-            opponent_team TEXT,
-            projected_pitches REAL,
-            projected_bf REAL,
-            expected_k REAL,
-            k_line REAL,
-            over_prob REAL,
-            under_prob REAL,
-            actual_k REAL,
-            hit_prop INTEGER,
-            PRIMARY KEY (game_pk, pitcher_name)
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS Batter_Hit_Forecasts (
-            game_pk TEXT,
-            player_name TEXT,
-            team_name TEXT,
-            opponent_team TEXT,
-            batting_order INTEGER,
-            projected_pa REAL,
-            expected_hits REAL,
-            over_0_5_hit_prob REAL,
-            over_1_5_hit_prob REAL,
-            over_2_5_hit_prob REAL,
-            actual_hits REAL,
-            hit_prop INTEGER,
-            PRIMARY KEY (game_pk, player_name)
-        )
-    """)
-
+    # Pitcher_K_Forecasts
+    c.execute("CREATE TABLE IF NOT EXISTS Pitcher_K_Forecasts (game_pk TEXT, pitcher_name TEXT, PRIMARY KEY(game_pk, pitcher_name))")
     p_cols = [r[1] for r in c.execute("PRAGMA table_info(Pitcher_K_Forecasts)").fetchall()]
-    for col, ctype in [("actual_k", "REAL"), ("hit_prop", "INTEGER"), ("opponent_team", "TEXT")]:
+    cols_p = [
+        ("team_name", "TEXT"), ("opponent_team", "TEXT"),
+        ("projected_pitches", "REAL"), ("projected_bf", "REAL"),
+        ("expected_k", "REAL"), ("k_line", "REAL"),
+        ("over_prob", "REAL"), ("under_prob", "REAL"),
+        ("actual_k", "REAL"), ("hit_prop", "INTEGER")
+    ]
+    for col, ctype in cols_p:
         if col not in p_cols:
             c.execute(f"ALTER TABLE Pitcher_K_Forecasts ADD COLUMN {col} {ctype}")
 
+    # Batter_Hit_Forecasts
+    c.execute("CREATE TABLE IF NOT EXISTS Batter_Hit_Forecasts (game_pk TEXT, player_name TEXT, PRIMARY KEY(game_pk, player_name))")
     b_cols = [r[1] for r in c.execute("PRAGMA table_info(Batter_Hit_Forecasts)").fetchall()]
-    for col, ctype in [("actual_hits", "REAL"), ("hit_prop", "INTEGER"), ("opponent_team", "TEXT")]:
+    cols_b = [
+        ("team_name", "TEXT"), ("opponent_team", "TEXT"),
+        ("batting_order", "INTEGER"), ("projected_pa", "REAL"),
+        ("expected_hits", "REAL"), ("over_0_5_hit_prob", "REAL"),
+        ("over_1_5_hit_prob", "REAL"), ("over_2_5_hit_prob", "REAL"),
+        ("actual_hits", "REAL"), ("hit_prop", "INTEGER")
+    ]
+    for col, ctype in cols_b:
         if col not in b_cols:
             c.execute(f"ALTER TABLE Batter_Hit_Forecasts ADD COLUMN {col} {ctype}")
 
+def run_daily_pipeline():
+    conn = sqlite3.connect("mlb_engine.db")
+    c = conn.cursor()
+    ensure_schema(c)
     conn.commit()
 
     now = datetime.now(timezone.utc)
@@ -100,7 +80,7 @@ def run_daily_pipeline():
             away_t = teams.get("away", {}).get("team", {}).get("name", "Away")
             home_t = teams.get("home", {}).get("team", {}).get("name", "Home")
 
-            # 1. Grade Final Games
+            # 1. Post-Mortem Audit on Completed Games
             if status == "Final":
                 ls = g.get("linescore", {})
                 sc_a = ls.get("teams", {}).get("away", {}).get("runs")
@@ -123,15 +103,23 @@ def run_daily_pipeline():
                     hit_f5 = 1 if ((f5_h > f5_a and pred_home) or (f5_a > f5_h and not pred_home)) else 0
 
                 c.execute("""
-                    INSERT OR REPLACE INTO Model_Forecasts (
+                    INSERT INTO Model_Forecasts (
                         game_pk, game_date, home_team, away_team, prob_home_win,
                         actual_score_away, actual_score_home, f5_actual_away, f5_actual_home,
                         hit_ml, hit_f5_ml
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(game_pk) DO UPDATE SET
+                        game_date = excluded.game_date,
+                        actual_score_away = excluded.actual_score_away,
+                        actual_score_home = excluded.actual_score_home,
+                        f5_actual_away = excluded.f5_actual_away,
+                        f5_actual_home = excluded.f5_actual_home,
+                        hit_ml = excluded.hit_ml,
+                        hit_f5_ml = excluded.hit_f5_ml
                 """, (pk, g_date, home_t, away_t, p_home, sc_a, sc_h, f5_a, f5_h, hit_ml, hit_f5))
                 graded_games += 1
 
-                # Grade Boxscores
+                # Grade Boxscores for Props
                 try:
                     box = requests.get(f"https://statsapi.mlb.com/api/v1/game/{pk}/boxscore", timeout=5).json()
                     p_box = box.get("teams", {})
@@ -157,25 +145,28 @@ def run_daily_pipeline():
                 except Exception:
                     pass
 
-            # 2. Ingest Active / Upcoming Games & Props
+            # 2. Ingest Active / Upcoming Slate & Props
             else:
                 c.execute("""
-                    INSERT OR IGNORE INTO Model_Forecasts (
+                    INSERT INTO Model_Forecasts (
                         game_pk, game_date, home_team, away_team, prob_home_win, expected_runs, f5_median_runs
                     ) VALUES (?, ?, ?, ?, 0.54, 8.8, 4.8)
+                    ON CONFLICT(game_pk) DO UPDATE SET
+                        game_date = excluded.game_date,
+                        home_team = excluded.home_team,
+                        away_team = excluded.away_team
                 """, (pk, g_date, home_t, away_t))
 
                 # Pitchers
                 away_sp = teams.get("away", {}).get("probablePitcher", {}).get("fullName")
                 home_sp = teams.get("home", {}).get("probablePitcher", {}).get("fullName")
 
-                # Fallback to team active roster if probablePitcher is unannounced
                 if not away_sp or not home_sp:
                     for side, sp_val, my_team in [("away", away_sp, away_t), ("home", home_sp, home_t)]:
                         if not sp_val:
                             t_id = teams.get(side, {}).get("team", {}).get("id")
                             try:
-                                r_json = requests.get(f"https://statsapi.mlb.com/api/v1/teams/{t_id}/roster?rosterType=active", timeout=4).json()
+                                r_json = requests.get(f"https://statsapi.mlb.com/api/v1/teams/{t_id}/roster?rosterType=active", timeout=3).json()
                                 arms = [p["person"]["fullName"] for p in r_json.get("roster", []) if p.get("position", {}).get("code") == "1"]
                                 if side == "away": away_sp = arms[0] if arms else f"{my_team} Starter"
                                 else: home_sp = arms[0] if arms else f"{my_team} Starter"
@@ -198,12 +189,12 @@ def run_daily_pipeline():
                         """, (pk, sp_name, team, opp, exp_k, line, round(p_over, 4), round(p_under, 4)))
                         pitchers_added += 1
 
-                # Batters (1-9 Order)
+                # Batters (1-9 Lineup)
                 for side, team, opp in [("away", away_t, home_t), ("home", home_t, away_t)]:
                     t_id = teams.get(side, {}).get("team", {}).get("id")
                     hitters = []
                     try:
-                        r_data = requests.get(f"https://statsapi.mlb.com/api/v1/teams/{t_id}/roster?rosterType=active", timeout=4).json().get("roster", [])
+                        r_data = requests.get(f"https://statsapi.mlb.com/api/v1/teams/{t_id}/roster?rosterType=active", timeout=3).json().get("roster", [])
                         hitters = [p["person"]["fullName"] for p in r_data if p.get("position", {}).get("code") != "1"][:9]
                     except Exception:
                         pass

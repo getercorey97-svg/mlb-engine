@@ -68,7 +68,7 @@ def index():
                     hit_ml = 1 if ((sc_h > sc_a and pred_h) or (sc_a > sc_h and not pred_h)) else 0
                 if hit_f5 is None and f5_a is not None and f5_h is not None and f5_a != f5_h:
                     pred_h = (prob_h >= 0.50)
-                    hit_f5 = 1 if ((f5_h > f5_a and pred_h) or (f5_a > f5_h and not pred_home)) else 0
+                    hit_f5 = 1 if ((f5_h > f5_a and pred_h) or (f5_a > f5_h and not pred_h)) else 0
 
             games.append({
                 "game_pk": pk,
@@ -119,7 +119,7 @@ def index():
                 "hit_prop": r["hit_prop"]
             })
 
-    # Build Right vs Wrong Diagnostic Audit Feed
+    # Diagnostic Audit Feed
     audit_items = []
     for g in games:
         if g["stage"] == "final" and g["hit_ml"] is not None:
@@ -234,7 +234,6 @@ def index():
     <div id="sec-batters" class="space-y-2 hidden"></div>
     <div id="sec-pitchers" class="space-y-2 hidden"></div>
     
-    <!-- ACCURACY SCORECARD & AUDIT FEED -->
     <div id="sec-accuracy" class="space-y-4 hidden">
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
@@ -405,7 +404,7 @@ def index():
             if (contA) {
                 contA.innerHTML = '';
                 if (auditItems.length === 0) {
-                    contA.innerHTML = '<div class="text-gray-400 text-xs font-mono p-3 bg-gray-900 rounded border border-gray-800">No completed game boxscores graded yet today.</div>';
+                    contA.innerHTML = '<div class="text-gray-400 text-xs font-mono p-3 bg-gray-900 rounded border border-gray-800">No completed game boxscores graded yet.</div>';
                 } else {
                     auditItems.forEach(item => {
                         const isHit = item.status === 'HIT';
@@ -436,7 +435,6 @@ def index():
 </body>
 </html>"""
 
-    # Populate string replacements safely
     content = template.replace("__ACC_PCT__", str(acc["overall_pct"]))
     content = content.replace("__ACC_R__", str(acc["overall_right"]))
     content = content.replace("__ACC_W__", str(acc["overall_wrong"]))
