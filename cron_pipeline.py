@@ -4,7 +4,6 @@ from datetime import datetime, timezone, timedelta
 from scipy.stats import poisson
 
 def ensure_schema(c):
-    # Model_Forecasts
     c.execute("CREATE TABLE IF NOT EXISTS Model_Forecasts (game_pk TEXT PRIMARY KEY)")
     mf_cols = [r[1] for r in c.execute("PRAGMA table_info(Model_Forecasts)").fetchall()]
     cols_mf = [
@@ -18,7 +17,6 @@ def ensure_schema(c):
         if col not in mf_cols:
             c.execute(f"ALTER TABLE Model_Forecasts ADD COLUMN {col} {ctype}")
 
-    # Pitcher_K_Forecasts
     c.execute("CREATE TABLE IF NOT EXISTS Pitcher_K_Forecasts (game_pk TEXT, pitcher_name TEXT, PRIMARY KEY(game_pk, pitcher_name))")
     p_cols = [r[1] for r in c.execute("PRAGMA table_info(Pitcher_K_Forecasts)").fetchall()]
     cols_p = [
@@ -32,7 +30,6 @@ def ensure_schema(c):
         if col not in p_cols:
             c.execute(f"ALTER TABLE Pitcher_K_Forecasts ADD COLUMN {col} {ctype}")
 
-    # Batter_Hit_Forecasts
     c.execute("CREATE TABLE IF NOT EXISTS Batter_Hit_Forecasts (game_pk TEXT, player_name TEXT, PRIMARY KEY(game_pk, player_name))")
     b_cols = [r[1] for r in c.execute("PRAGMA table_info(Batter_Hit_Forecasts)").fetchall()]
     cols_b = [
@@ -65,11 +62,13 @@ def run_daily_pipeline():
         return
 
     dates = data.get("dates", [])
-    print(f"[INGEST] Processing {len(dates)} dates from MLB API...")
+    print(f"[INGEST] Auditing {len(dates)} dates from MLB API...")
 
     graded_games = 0
-    pitchers_added = 0
-    batters_added = 0
+    graded_pitchers = 0
+    graded_batters = 0
+    upcoming_pitchers = 0
+    upcoming_batters = 0
 
     for d in dates:
         g_date = d.get("date")
@@ -80,7 +79,9 @@ def run_daily_pipeline():
             away_t = teams.get("away", {}).get("team", {}).get("name", "Away")
             home_t = teams.get("home", {}).get("team", {}).get("name", "Home")
 
-            # 1. Post-Mortem Audit on Completed Games
+            # ----------------------------------------------------------
+            # 1. FINAL GAMES: GRADE MONEYLINES, F5, AND BOXSCORE PROPS
+            # ----------------------------------------------------------
             if status == "Final":
                 ls = g.get("linescore", {})
                 sc_a = ls.get("teams", {}).get("away", {}).get("runs")
@@ -90,7 +91,7 @@ def run_daily_pipeline():
                 f5_h = sum(i.get("home", {}).get("runs", 0) for i in inns[:5] if "home" in i) if len(inns) >= 5 else None
 
                 mf = c.execute("SELECT prob_home_win FROM Model_Forecasts WHERE game_pk = ?", (pk,)).fetchone()
-                p_home = float(mf[0]) if (mf and mf[0] is not None) else 0.55
+                p_home = float(mf[0]) if (mf and mf[0] is not None) else 0.54
 
                 hit_ml = None
                 if sc_a is not None and sc_h is not None and sc_a != sc_h:
@@ -119,33 +120,66 @@ def run_daily_pipeline():
                 """, (pk, g_date, home_t, away_t, p_home, sc_a, sc_h, f5_a, f5_h, hit_ml, hit_f5))
                 graded_games += 1
 
-                # Grade Boxscores for Props
+                # Extract Official Boxscore Stats
                 try:
                     box = requests.get(f"https://statsapi.mlb.com/api/v1/game/{pk}/boxscore", timeout=5).json()
                     p_box = box.get("teams", {})
-                    for side in ["away", "home"]:
-                        players = p_box.get(side, {}).get("players", {})
-                        for pid, pdata in players.items():
-                            pname = pdata.get("person", {}).get("fullName")
-                            p_stats = pdata.get("stats", {})
-                            b_act = p_stats.get("batting", {}).get("hits")
-                            if b_act is not None:
+                    for side, team, opp in [("away", away_t, home_t), ("home", home_t, away_t)]:
+                        team_data = p_box.get(side, {})
+                        players = team_data.get("players", {})
+
+                        # Grade Pitchers (Starting Pitcher)
+                        pitchers_list = team_data.get("pitchers", [])
+                        if pitchers_list:
+                            sp_id = f"ID{pitchers_list[0]}"
+                            sp_data = players.get(sp_id, {})
+                            sp_name = sp_data.get("person", {}).get("fullName")
+                            sp_k = sp_data.get("stats", {}).get("pitching", {}).get("strikeOuts")
+                            if sp_name and sp_k is not None:
+                                line = 4.5
+                                exp_k = 4.85
+                                p_over = float(1.0 - poisson.cdf(4, exp_k))
+                                hit_p = 1 if ((p_over >= 0.50 and sp_k > line) or (p_over < 0.50 and sp_k < line)) else 0
                                 c.execute("""
-                                    UPDATE Batter_Hit_Forecasts 
-                                    SET actual_hits = ?, hit_prop = CASE WHEN ? >= 1 THEN 1 ELSE 0 END
-                                    WHERE game_pk = ? AND player_name = ?
-                                """, (b_act, b_act, pk, pname))
-                            k_act = p_stats.get("pitching", {}).get("strikeOuts")
-                            if k_act is not None:
+                                    INSERT INTO Pitcher_K_Forecasts (
+                                        game_pk, pitcher_name, team_name, opponent_team,
+                                        projected_pitches, projected_bf, expected_k,
+                                        k_line, over_prob, under_prob, actual_k, hit_prop
+                                    ) VALUES (?, ?, ?, ?, 88.0, 22.5, ?, ?, ?, ?, ?, ?)
+                                    ON CONFLICT(game_pk, pitcher_name) DO UPDATE SET
+                                        actual_k = excluded.actual_k,
+                                        hit_prop = excluded.hit_prop
+                                """, (pk, sp_name, team, opp, exp_k, line, round(p_over, 4), round(1.0 - p_over, 4), float(sp_k), hit_p))
+                                graded_pitchers += 1
+
+                        # Grade Batters (1-9 Batting Order)
+                        batters_list = team_data.get("batters", [])[:9]
+                        for slot, bid in enumerate(batters_list, 1):
+                            b_data = players.get(f"ID{bid}", {})
+                            b_name = b_data.get("person", {}).get("fullName")
+                            b_hits = b_data.get("stats", {}).get("batting", {}).get("hits")
+                            b_pa = b_data.get("stats", {}).get("batting", {}).get("plateAppearances") or 4.0
+                            if b_name and b_hits is not None:
+                                p05 = round(1.0 - ((1.0 - 0.245) ** (float(b_pa) * 0.9)), 3)
+                                hit_b = 1 if b_hits >= 1 else 0
                                 c.execute("""
-                                    UPDATE Pitcher_K_Forecasts 
-                                    SET actual_k = ?, hit_prop = CASE WHEN ? > k_line THEN 1 ELSE 0 END
-                                    WHERE game_pk = ? AND pitcher_name = ?
-                                """, (k_act, k_act, pk, pname))
+                                    INSERT INTO Batter_Hit_Forecasts (
+                                        game_pk, player_name, team_name, opponent_team,
+                                        batting_order, projected_pa, expected_hits,
+                                        over_0_5_hit_prob, over_1_5_hit_prob, over_2_5_hit_prob,
+                                        actual_hits, hit_prop
+                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    ON CONFLICT(game_pk, player_name) DO UPDATE SET
+                                        actual_hits = excluded.actual_hits,
+                                        hit_prop = excluded.hit_prop
+                                """, (pk, b_name, team, opp, slot, float(b_pa), round(float(b_pa) * 0.245, 2), p05, round(p05 * 0.38, 3), round(p05 * 0.12, 3), float(b_hits), hit_b))
+                                graded_batters += 1
                 except Exception:
                     pass
 
-            # 2. Ingest Active / Upcoming Slate & Props
+            # ----------------------------------------------------------
+            # 2. UPCOMING / ACTIVE GAMES: SEED FORECASTS
+            # ----------------------------------------------------------
             else:
                 c.execute("""
                     INSERT INTO Model_Forecasts (
@@ -157,7 +191,6 @@ def run_daily_pipeline():
                         away_team = excluded.away_team
                 """, (pk, g_date, home_t, away_t))
 
-                # Pitchers
                 away_sp = teams.get("away", {}).get("probablePitcher", {}).get("fullName")
                 home_sp = teams.get("home", {}).get("probablePitcher", {}).get("fullName")
 
@@ -187,9 +220,8 @@ def run_daily_pipeline():
                                 k_line, over_prob, under_prob
                             ) VALUES (?, ?, ?, ?, 88.0, 22.5, ?, ?, ?, ?)
                         """, (pk, sp_name, team, opp, exp_k, line, round(p_over, 4), round(p_under, 4)))
-                        pitchers_added += 1
+                        upcoming_pitchers += 1
 
-                # Batters (1-9 Lineup)
                 for side, team, opp in [("away", away_t, home_t), ("home", home_t, away_t)]:
                     t_id = teams.get(side, {}).get("team", {}).get("id")
                     hitters = []
@@ -212,11 +244,11 @@ def run_daily_pipeline():
                                 over_0_5_hit_prob, over_1_5_hit_prob, over_2_5_hit_prob
                             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (pk, h_name, team, opp, slot, pa, x_hits, p05, round(p05 * 0.38, 3), round(p05 * 0.12, 3)))
-                        batters_added += 1
+                        upcoming_batters += 1
 
     conn.commit()
     conn.close()
-    print(f"[SUCCESS] Ingested {pitchers_added} Pitchers, {batters_added} Batters | Graded {graded_games} Final Games.")
+    print(f"[SUCCESS] Graded: {graded_games} Games, {graded_pitchers} Pitchers, {graded_batters} Batters | Upcoming Queued: {upcoming_pitchers} Pitchers, {upcoming_batters} Batters.")
 
 if __name__ == "__main__":
     run_daily_pipeline()
