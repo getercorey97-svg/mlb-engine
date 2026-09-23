@@ -1,11 +1,52 @@
 import json
 import sqlite3
 import requests
+import traceback
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 app = FastAPI(title="StatsCenter Pro Hub")
+
+def ensure_schema(c):
+    c.execute("CREATE TABLE IF NOT EXISTS Model_Forecasts (game_pk TEXT PRIMARY KEY)")
+    mf_cols = [r[1] for r in c.execute("PRAGMA table_info(Model_Forecasts)").fetchall()]
+    cols_mf = [
+        ("game_date", "TEXT"), ("home_team", "TEXT"), ("away_team", "TEXT"),
+        ("prob_home_win", "REAL"), ("expected_runs", "REAL"), ("f5_median_runs", "REAL"),
+        ("actual_score_away", "REAL"), ("actual_score_home", "REAL"),
+        ("f5_actual_away", "REAL"), ("f5_actual_home", "REAL"),
+        ("hit_ml", "INTEGER"), ("hit_f5_ml", "INTEGER")
+    ]
+    for col, ctype in cols_mf:
+        if col not in mf_cols:
+            c.execute(f"ALTER TABLE Model_Forecasts ADD COLUMN {col} {ctype}")
+
+    c.execute("CREATE TABLE IF NOT EXISTS Pitcher_K_Forecasts (game_pk TEXT, pitcher_name TEXT, PRIMARY KEY(game_pk, pitcher_name))")
+    p_cols = [r[1] for r in c.execute("PRAGMA table_info(Pitcher_K_Forecasts)").fetchall()]
+    cols_p = [
+        ("team_name", "TEXT"), ("opponent_team", "TEXT"),
+        ("projected_pitches", "REAL"), ("projected_bf", "REAL"),
+        ("expected_k", "REAL"), ("k_line", "REAL"),
+        ("over_prob", "REAL"), ("under_prob", "REAL"),
+        ("actual_k", "REAL"), ("hit_prop", "INTEGER")
+    ]
+    for col, ctype in cols_p:
+        if col not in p_cols:
+            c.execute(f"ALTER TABLE Pitcher_K_Forecasts ADD COLUMN {col} {ctype}")
+
+    c.execute("CREATE TABLE IF NOT EXISTS Batter_Hit_Forecasts (game_pk TEXT, player_name TEXT, PRIMARY KEY(game_pk, player_name))")
+    b_cols = [r[1] for r in c.execute("PRAGMA table_info(Batter_Hit_Forecasts)").fetchall()]
+    cols_b = [
+        ("team_name", "TEXT"), ("opponent_team", "TEXT"),
+        ("batting_order", "INTEGER"), ("projected_pa", "REAL"),
+        ("expected_hits", "REAL"), ("over_0_5_hit_prob", "REAL"),
+        ("over_1_5_hit_prob", "REAL"), ("over_2_5_hit_prob", "REAL"),
+        ("actual_hits", "REAL"), ("hit_prop", "INTEGER")
+    ]
+    for col, ctype in cols_b:
+        if col not in b_cols:
+            c.execute(f"ALTER TABLE Batter_Hit_Forecasts ADD COLUMN {col} {ctype}")
 
 @app.get("/health")
 def health():
@@ -13,169 +54,173 @@ def health():
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    conn = sqlite3.connect("mlb_engine.db")
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-
-    tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-
-    now = datetime.now(timezone.utc)
-    yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-    today_str = now.strftime("%Y-%m-%d")
-
-    sched_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={yesterday_str}&endDate={today_str}&hydrate=probablePitcher,lineups,linescore"
     try:
-        sched = requests.get(sched_url, timeout=6).json()
-        raw_dates = sched.get("dates", [])
-    except Exception:
-        raw_dates = []
+        conn = sqlite3.connect("mlb_engine.db")
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        ensure_schema(c)
+        conn.commit()
 
-    forecast_map = {}
-    if "Model_Forecasts" in tables:
-        for r in c.execute("SELECT * FROM Model_Forecasts").fetchall():
-            forecast_map[str(r["game_pk"])] = dict(r)
+        tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
 
-    games = []
-    for d in raw_dates:
-        g_date = d.get("date")
-        for g in d.get("games", []):
-            pk = str(g.get("gamePk"))
-            status = g.get("status", {}).get("abstractGameState", "")
-            detailed = g.get("status", {}).get("detailedState", "")
-            teams = g.get("teams", {})
-            away_t = teams.get("away", {}).get("team", {}).get("name", "Away")
-            home_t = teams.get("home", {}).get("team", {}).get("name", "Home")
+        now = datetime.now(timezone.utc)
+        yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        today_str = now.strftime("%Y-%m-%d")
 
-            ls = g.get("linescore", {})
-            sc_a = ls.get("teams", {}).get("away", {}).get("runs", 0)
-            sc_h = ls.get("teams", {}).get("home", {}).get("runs", 0)
-            inns = ls.get("innings", [])
-            f5_a = sum(i.get("away", {}).get("runs", 0) for i in inns[:5] if "away" in i) if len(inns) >= 5 else None
-            f5_h = sum(i.get("home", {}).get("runs", 0) for i in inns[:5] if "home" in i) if len(inns) >= 5 else None
+        sched_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate={yesterday_str}&endDate={today_str}&hydrate=probablePitcher,lineups,linescore"
+        try:
+            sched = requests.get(sched_url, timeout=6).json()
+            raw_dates = sched.get("dates", [])
+        except Exception:
+            raw_dates = []
 
-            f_data = forecast_map.get(pk, {})
-            prob_h = f_data.get("prob_home_win", 0.54)
-            hit_ml = f_data.get("hit_ml")
-            hit_f5 = f_data.get("hit_f5_ml")
+        forecast_map = {}
+        if "Model_Forecasts" in tables:
+            for r in c.execute("SELECT * FROM Model_Forecasts").fetchall():
+                rd = dict(r)
+                forecast_map[str(rd.get("game_pk"))] = rd
 
-            stage = "upcoming"
-            if status == "Live" or "In Progress" in detailed:
-                stage = "live"
-            elif status == "Final":
-                stage = "final"
-                if hit_ml is None and sc_a is not None and sc_h is not None and sc_a != sc_h:
-                    pred_h = (prob_h >= 0.50)
-                    hit_ml = 1 if ((sc_h > sc_a and pred_h) or (sc_a > sc_h and not pred_h)) else 0
-                if hit_f5 is None and f5_a is not None and f5_h is not None and f5_a != f5_h:
-                    pred_h = (prob_h >= 0.50)
-                    hit_f5 = 1 if ((f5_h > f5_a and pred_h) or (f5_a > f5_h and not pred_h)) else 0
+        games = []
+        for d in raw_dates:
+            g_date = d.get("date")
+            for g in d.get("games", []):
+                pk = str(g.get("gamePk"))
+                status = g.get("status", {}).get("abstractGameState", "")
+                detailed = g.get("status", {}).get("detailedState", "")
+                teams = g.get("teams", {})
+                away_t = teams.get("away", {}).get("team", {}).get("name", "Away")
+                home_t = teams.get("home", {}).get("team", {}).get("name", "Home")
 
-            games.append({
-                "game_pk": pk,
-                "game_date": g_date,
-                "stage": stage,
-                "away_team": away_t,
-                "home_team": home_t,
-                "away_score": sc_a,
-                "home_score": sc_h,
-                "prob_home": round(prob_h * 100, 1),
-                "prob_away": round((1.0 - prob_h) * 100, 1),
-                "exp_runs": f_data.get("expected_runs", 8.8),
-                "f5_line": f_data.get("f5_median_runs", 4.8),
-                "hit_ml": hit_ml,
-                "hit_f5": hit_f5,
-                "time_et": g.get("gameDate", "")[11:16] + " UTC"
-            })
+                ls = g.get("linescore", {})
+                sc_a = ls.get("teams", {}).get("away", {}).get("runs", 0)
+                sc_h = ls.get("teams", {}).get("home", {}).get("runs", 0)
+                inns = ls.get("innings", [])
+                f5_a = sum(i.get("away", {}).get("runs", 0) for i in inns[:5] if "away" in i) if len(inns) >= 5 else None
+                f5_h = sum(i.get("home", {}).get("runs", 0) for i in inns[:5] if "home" in i) if len(inns) >= 5 else None
 
-    pitchers = []
-    if "Pitcher_K_Forecasts" in tables:
-        for r in c.execute("SELECT * FROM Pitcher_K_Forecasts").fetchall():
-            pitchers.append({
-                "game_pk": str(r["game_pk"]),
-                "pitcher": r["pitcher_name"],
-                "team": r["team_name"],
-                "opponent": r["opponent_team"],
-                "expected_k": r["expected_k"],
-                "k_line": r["k_line"],
-                "over_prob": round(float(r["over_prob"] or 0.5) * 100, 1),
-                "under_prob": round(float(r["under_prob"] or 0.5) * 100, 1),
-                "actual_k": r["actual_k"],
-                "hit_prop": r["hit_prop"]
-            })
+                f_data = forecast_map.get(pk, {})
+                prob_h = float(f_data.get("prob_home_win") or 0.54)
+                hit_ml = f_data.get("hit_ml")
+                hit_f5 = f_data.get("hit_f5_ml")
 
-    batters = []
-    if "Batter_Hit_Forecasts" in tables:
-        for r in c.execute("SELECT * FROM Batter_Hit_Forecasts ORDER BY batting_order ASC").fetchall():
-            batters.append({
-                "game_pk": str(r["game_pk"]),
-                "player": r["player_name"],
-                "team": r["team_name"],
-                "opponent": r["opponent_team"],
-                "slot": r["batting_order"],
-                "pa": r["projected_pa"],
-                "x_hits": r["expected_hits"],
-                "over_05": round(float(r["over_0_5_hit_prob"] or 0.6) * 100, 1),
-                "actual_hits": r["actual_hits"],
-                "hit_prop": r["hit_prop"]
-            })
+                stage = "upcoming"
+                if status == "Live" or "In Progress" in detailed:
+                    stage = "live"
+                elif status == "Final":
+                    stage = "final"
+                    pred_home = (prob_h >= 0.50)
+                    if hit_ml is None and sc_a is not None and sc_h is not None and sc_a != sc_h:
+                        hit_ml = 1 if ((sc_h > sc_a and pred_home) or (sc_a > sc_h and not pred_home)) else 0
+                    if hit_f5 is None and f5_a is not None and f5_h is not None and f5_a != f5_h:
+                        hit_f5 = 1 if ((f5_h > f5_a and pred_home) or (f5_a > f5_h and not pred_home)) else 0
 
-    # Diagnostic Audit Feed
-    audit_items = []
-    for g in games:
-        if g["stage"] == "final" and g["hit_ml"] is not None:
-            pick = g["home_team"] if g["prob_home"] >= 50 else g["away_team"]
-            pick_p = max(g["prob_home"], g["prob_away"])
-            win = g["home_team"] if g["home_score"] > g["away_score"] else g["away_team"]
-            audit_items.append({
-                "market": "Moneyline",
-                "title": f"{g['away_team']} @ {g['home_team']}",
-                "pick": f"Pick: {pick} ({pick_p}%)",
-                "result": f"Final: {g['away_team']} {g['away_score']}, {g['home_team']} {g['home_score']} (Winner: {win})",
-                "status": "HIT" if g["hit_ml"] == 1 else "MISS"
-            })
+                games.append({
+                    "game_pk": pk,
+                    "game_date": g_date,
+                    "stage": stage,
+                    "away_team": away_t,
+                    "home_team": home_t,
+                    "away_score": sc_a,
+                    "home_score": sc_h,
+                    "prob_home": round(prob_h * 100, 1),
+                    "prob_away": round((1.0 - prob_h) * 100, 1),
+                    "exp_runs": f_data.get("expected_runs", 8.8),
+                    "f5_line": f_data.get("f5_median_runs", 4.8),
+                    "hit_ml": hit_ml,
+                    "hit_f5": hit_f5,
+                    "time_et": g.get("gameDate", "")[11:16] + " UTC"
+                })
 
-    for p in pitchers:
-        if p["actual_k"] is not None and p["hit_prop"] is not None:
-            pick_type = "OVER" if p["over_prob"] >= 50 else "UNDER"
-            audit_items.append({
-                "market": "Pitcher K",
-                "title": f"{p['pitcher']} ({p['team']})",
-                "pick": f"{pick_type} {p['k_line']} Ks (Exp: {p['expected_k']})",
-                "result": f"Recorded: {int(p['actual_k'])} Ks",
-                "status": "HIT" if p["hit_prop"] == 1 else "MISS"
-            })
+        pitchers = []
+        if "Pitcher_K_Forecasts" in tables:
+            for r in c.execute("SELECT * FROM Pitcher_K_Forecasts").fetchall():
+                rd = dict(r)
+                pitchers.append({
+                    "game_pk": str(rd.get("game_pk")),
+                    "pitcher": rd.get("pitcher_name"),
+                    "team": rd.get("team_name"),
+                    "opponent": rd.get("opponent_team"),
+                    "expected_k": rd.get("expected_k"),
+                    "k_line": rd.get("k_line"),
+                    "over_prob": round(float(rd.get("over_prob") or 0.5) * 100, 1),
+                    "under_prob": round(float(rd.get("under_prob") or 0.5) * 100, 1),
+                    "actual_k": rd.get("actual_k"),
+                    "hit_prop": rd.get("hit_prop")
+                })
 
-    for b in batters:
-        if b["actual_hits"] is not None and b["hit_prop"] is not None:
-            audit_items.append({
-                "market": "Batter Hit",
-                "title": f"#{b['slot']} {b['player']} ({b['team']})",
-                "pick": f"Over 0.5 Hits ({b['over_05']}%)",
-                "result": f"Recorded: {int(b['actual_hits'])} Hits (PA: {b['pa']})",
-                "status": "HIT" if b["hit_prop"] == 1 else "MISS"
-            })
+        batters = []
+        if "Batter_Hit_Forecasts" in tables:
+            for r in c.execute("SELECT * FROM Batter_Hit_Forecasts ORDER BY batting_order ASC").fetchall():
+                rd = dict(r)
+                batters.append({
+                    "game_pk": str(rd.get("game_pk")),
+                    "player": rd.get("player_name"),
+                    "team": rd.get("team_name"),
+                    "opponent": rd.get("opponent_team"),
+                    "slot": rd.get("batting_order"),
+                    "pa": rd.get("projected_pa"),
+                    "x_hits": rd.get("expected_hits"),
+                    "over_05": round(float(rd.get("over_0_5_hit_prob") or 0.6) * 100, 1),
+                    "actual_hits": rd.get("actual_hits"),
+                    "hit_prop": rd.get("hit_prop")
+                })
 
-    acc = {
-        "overall_right": sum(1 for a in audit_items if a["status"] == "HIT"),
-        "overall_wrong": sum(1 for a in audit_items if a["status"] == "MISS"),
-        "overall_pct": 0.0,
-        "markets": {
-            "ml": {"label": "Full Game Moneylines", "right": sum(1 for a in audit_items if a["market"] == "Moneyline" and a["status"] == "HIT"), "wrong": sum(1 for a in audit_items if a["market"] == "Moneyline" and a["status"] == "MISS")},
-            "pitchers": {"label": "Pitcher Ks", "right": sum(1 for a in audit_items if a["market"] == "Pitcher K" and a["status"] == "HIT"), "wrong": sum(1 for a in audit_items if a["market"] == "Pitcher K" and a["status"] == "MISS")},
-            "batters": {"label": "Batter Hits", "right": sum(1 for a in audit_items if a["market"] == "Batter Hit" and a["status"] == "HIT"), "wrong": sum(1 for a in audit_items if a["market"] == "Batter Hit" and a["status"] == "MISS")}
+        audit_items = []
+        for g in games:
+            if g["stage"] == "final" and g["hit_ml"] is not None:
+                pick = g["home_team"] if g["prob_home"] >= 50 else g["away_team"]
+                pick_p = max(g["prob_home"], g["prob_away"])
+                win = g["home_team"] if g["home_score"] > g["away_score"] else g["away_team"]
+                audit_items.append({
+                    "market": "Moneyline",
+                    "title": f"{g['away_team']} @ {g['home_team']}",
+                    "pick": f"Pick: {pick} ({pick_p}%)",
+                    "result": f"Final: {g['away_team']} {g['away_score']}, {g['home_team']} {g['home_score']} (Winner: {win})",
+                    "status": "HIT" if g["hit_ml"] == 1 else "MISS"
+                })
+
+        for p in pitchers:
+            if p.get("actual_k") is not None and p.get("hit_prop") is not None:
+                pick_type = "OVER" if p["over_prob"] >= 50 else "UNDER"
+                audit_items.append({
+                    "market": "Pitcher K",
+                    "title": f"{p['pitcher']} ({p['team']})",
+                    "pick": f"{pick_type} {p['k_line']} Ks (Exp: {p['expected_k']})",
+                    "result": f"Recorded: {int(p['actual_k'])} Ks",
+                    "status": "HIT" if p["hit_prop"] == 1 else "MISS"
+                })
+
+        for b in batters:
+            if b.get("actual_hits") is not None and b.get("hit_prop") is not None:
+                audit_items.append({
+                    "market": "Batter Hit",
+                    "title": f"#{b['slot']} {b['player']} ({b['team']})",
+                    "pick": f"Over 0.5 Hits ({b['over_05']}%)",
+                    "result": f"Recorded: {int(b['actual_hits'])} Hits (PA: {b['pa']})",
+                    "status": "HIT" if b["hit_prop"] == 1 else "MISS"
+                })
+
+        acc = {
+            "overall_right": sum(1 for a in audit_items if a["status"] == "HIT"),
+            "overall_wrong": sum(1 for a in audit_items if a["status"] == "MISS"),
+            "overall_pct": 0.0,
+            "markets": {
+                "ml": {"label": "Full Game Moneylines", "right": sum(1 for a in audit_items if a["market"] == "Moneyline" and a["status"] == "HIT"), "wrong": sum(1 for a in audit_items if a["market"] == "Moneyline" and a["status"] == "MISS")},
+                "pitchers": {"label": "Pitcher Ks", "right": sum(1 for a in audit_items if a["market"] == "Pitcher K" and a["status"] == "HIT"), "wrong": sum(1 for a in audit_items if a["market"] == "Pitcher K" and a["status"] == "MISS")},
+                "batters": {"label": "Batter Hits", "right": sum(1 for a in audit_items if a["market"] == "Batter Hit" and a["status"] == "HIT"), "wrong": sum(1 for a in audit_items if a["market"] == "Batter Hit" and a["status"] == "MISS")}
+            }
         }
-    }
-    tot = acc["overall_right"] + acc["overall_wrong"]
-    if tot > 0:
-        acc["overall_pct"] = round((acc["overall_right"] / tot) * 100, 1)
+        tot = acc["overall_right"] + acc["overall_wrong"]
+        if tot > 0:
+            acc["overall_pct"] = round((acc["overall_right"] / tot) * 100, 1)
 
-    for k, m in acc["markets"].items():
-        sub = m["right"] + m["wrong"]
-        m["pct"] = round((m["right"] / sub) * 100, 1) if sub > 0 else 0.0
+        for k, m in acc["markets"].items():
+            sub = m["right"] + m["wrong"]
+            m["pct"] = round((m["right"] / sub) * 100, 1) if sub > 0 else 0.0
 
-    conn.close()
+        conn.close()
 
-    template = """<!DOCTYPE html>
+        template = """<!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
@@ -404,7 +449,7 @@ def index():
             if (contA) {
                 contA.innerHTML = '';
                 if (auditItems.length === 0) {
-                    contA.innerHTML = '<div class="text-gray-400 text-xs font-mono p-3 bg-gray-900 rounded border border-gray-800">No completed game boxscores graded yet.</div>';
+                    contA.innerHTML = '<div class="text-gray-400 text-xs font-mono p-3 bg-gray-900 rounded border border-gray-800">No completed game boxscores graded yet today.</div>';
                 } else {
                     auditItems.forEach(item => {
                         const isHit = item.status === 'HIT';
@@ -435,18 +480,28 @@ def index():
 </body>
 </html>"""
 
-    content = template.replace("__ACC_PCT__", str(acc["overall_pct"]))
-    content = content.replace("__ACC_R__", str(acc["overall_right"]))
-    content = content.replace("__ACC_W__", str(acc["overall_wrong"]))
-    content = content.replace("__ML_STAT__", f"{acc['markets']['ml']['right']} Right / {acc['markets']['ml']['wrong']} Wrong ({acc['markets']['ml']['pct']}%)")
-    content = content.replace("__PK_STAT__", f"{acc['markets']['pitchers']['right']} Right / {acc['markets']['pitchers']['wrong']} Wrong ({acc['markets']['pitchers']['pct']}%)")
-    content = content.replace("__BH_STAT__", f"{acc['markets']['batters']['right']} Right / {acc['markets']['batters']['wrong']} Wrong ({acc['markets']['batters']['pct']}%)")
-    content = content.replace("__AUDIT_COUNT__", str(len(auditItems)))
-    content = content.replace("__TODAY_STR__", today_str)
-    content = content.replace("__YESTERDAY_STR__", yesterday_str)
-    content = content.replace("__GAMES_DATA__", json.dumps(games))
-    content = content.replace("__PITCHERS_DATA__", json.dumps(pitchers))
-    content = content.replace("__BATTERS_DATA__", json.dumps(batters))
-    content = content.replace("__AUDIT_DATA__", json.dumps(auditItems))
+        content = template.replace("__ACC_PCT__", str(acc["overall_pct"]))
+        content = content.replace("__ACC_R__", str(acc["overall_right"]))
+        content = content.replace("__ACC_W__", str(acc["overall_wrong"]))
+        content = content.replace("__ML_STAT__", f"{acc['markets']['ml']['right']} Right / {acc['markets']['ml']['wrong']} Wrong ({acc['markets']['ml']['pct']}%)")
+        content = content.replace("__PK_STAT__", f"{acc['markets']['pitchers']['right']} Right / {acc['markets']['pitchers']['wrong']} Wrong ({acc['markets']['pitchers']['pct']}%)")
+        content = content.replace("__BH_STAT__", f"{acc['markets']['batters']['right']} Right / {acc['markets']['batters']['wrong']} Wrong ({acc['markets']['batters']['pct']}%)")
+        content = content.replace("__AUDIT_COUNT__", str(len(auditItems)))
+        content = content.replace("__TODAY_STR__", today_str)
+        content = content.replace("__YESTERDAY_STR__", yesterday_str)
+        content = content.replace("__GAMES_DATA__", json.dumps(games))
+        content = content.replace("__PITCHERS_DATA__", json.dumps(pitchers))
+        content = content.replace("__BATTERS_DATA__", json.dumps(batters))
+        content = content.replace("__AUDIT_DATA__", json.dumps(auditItems))
 
-    return HTMLResponse(content=content)
+        return HTMLResponse(content=content)
+
+    except Exception as err:
+        err_msg = traceback.format_exc()
+        print(f"[CRITICAL APP ERROR] {err_msg}")
+        return HTMLResponse(content=f"""
+        <html><body style="background:#0b0e14;color:#f87171;font-family:monospace;padding:24px;">
+            <h2>StatsCenter Diagnostics: Runtime Error Detected</h2>
+            <pre style="background:#18181b;padding:16px;border-radius:8px;border:1px solid #ef4444;color:#fca5a5;overflow-x:auto;">{err_msg}</pre>
+        </body></html>
+        """, status_code=200)
