@@ -1,38 +1,38 @@
-# MLB Predictive Model Forecasts (2026-09-24 11:12:01 UTC)
+# MLB Predictive Model Forecasts (2026-09-24 18:45:56 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| New York Mets @ Texas Rangers | **New York Mets** | 63.4% | +26.8% | 6.5 - 5.1 | Zac Thornton vs Kumar Rocker |
-| Miami Marlins @ Chicago Cubs | **Chicago Cubs** | 60.3% | +20.5% | 5.2 - 5.9 | Tyler Phillips vs Matthew Boyd |
-| Cincinnati Reds @ Atlanta Braves | **Atlanta Braves** | 59.3% | +18.7% | 5.0 - 5.6 | Brady Singer vs Tyler Mahle |
-| Houston Astros @ Athletics | **Athletics** | 57.6% | +15.2% | 5.1 - 5.5 | Peter Lambert vs Mason Barnett |
-| San Diego Padres @ Los Angeles Dodgers | **Los Angeles Dodgers** | 57.3% | +14.7% | 5.1 - 5.5 | Nick Pivetta vs Tyler Glasnow |
-| Chicago White Sox @ Kansas City Royals | **Kansas City Royals** | 57.0% | +13.9% | 5.0 - 5.4 | David Sandlin vs Randy Dobnak |
-| Arizona Diamondbacks @ Colorado Rockies | **Arizona Diamondbacks** | 56.3% | +12.5% | 9.6 - 8.6 | Eduardo Rodriguez vs Tanner Gordon |
-| Tampa Bay Rays @ New York Yankees | **New York Yankees** | 55.1% | +10.2% | 4.5 - 4.7 | Ian Seymour vs Cam Schlittler |
-| Cleveland Guardians @ Boston Red Sox | **Boston Red Sox** | 54.4% | +8.7% | 4.8 - 5.0 | Daniel Espino vs Ranger Suarez |
-| Milwaukee Brewers @ Philadelphia Phillies | **Philadelphia Phillies** | 50.7% | +1.4% | 5.4 - 5.3 | Bryse Wilson vs Andrew Painter |
-| Los Angeles Angels @ Seattle Mariners | **Los Angeles Angels** | 50.7% | +1.4% | 4.2 - 4.0 | Grayson Rodriguez vs Bryan Woo |
-| St. Louis Cardinals @ Pittsburgh Pirates | **Pittsburgh Pirates** | 50.7% | +1.3% | 4.9 - 4.8 | Kyle Leahy vs Paul Skenes |
+| New York Mets @ Texas Rangers | **New York Mets** | 64.4% | +28.8% | 6.7 - 5.2 | Zac Thornton vs Kumar Rocker |
+| Miami Marlins @ Chicago Cubs | **Chicago Cubs** | 59.1% | +18.2% | 5.4 - 6.0 | Tyler Phillips vs Matthew Boyd |
+| Cincinnati Reds @ Atlanta Braves | **Atlanta Braves** | 59.0% | +17.9% | 5.1 - 5.7 | Brady Singer vs Tyler Mahle |
+| Houston Astros @ Athletics | **Athletics** | 58.9% | +17.7% | 5.5 - 6.2 | Peter Lambert vs Mason Barnett |
+| Chicago White Sox @ Kansas City Royals | **Kansas City Royals** | 57.6% | +15.2% | 5.3 - 5.8 | David Sandlin vs Randy Dobnak |
+| San Diego Padres @ Los Angeles Dodgers | **Los Angeles Dodgers** | 57.2% | +14.5% | 5.2 - 5.6 | Nick Pivetta vs Tyler Glasnow |
+| Arizona Diamondbacks @ Colorado Rockies | **Arizona Diamondbacks** | 56.2% | +12.4% | 9.7 - 8.7 | Eduardo Rodriguez vs Tanner Gordon |
+| Tampa Bay Rays @ New York Yankees | **New York Yankees** | 55.1% | +10.1% | 4.8 - 5.0 | Ian Seymour vs Cam Schlittler |
+| Cleveland Guardians @ Boston Red Sox | **Boston Red Sox** | 54.9% | +9.7% | 5.1 - 5.3 | Daniel Espino vs Ranger Suarez |
+| Milwaukee Brewers @ Philadelphia Phillies | **Philadelphia Phillies** | 50.8% | +1.5% | 5.6 - 5.5 | Shane Drohan vs Andrew Painter |
+| St. Louis Cardinals @ Pittsburgh Pirates | **Pittsburgh Pirates** | 50.7% | +1.5% | 5.2 - 5.1 | Kyle Leahy vs Paul Skenes |
+| Los Angeles Angels @ Seattle Mariners | **Los Angeles Angels** | 50.6% | +1.1% | 4.3 - 4.2 | Grayson Rodriguez vs Bryan Woo |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| New York Mets @ Texas Rangers | 49.4% | 32.6% | 18.0% | 4.42 r | **4.00 r** |
-| Miami Marlins @ Chicago Cubs | 37.0% | 44.5% | 18.5% | 4.44 r | **4.00 r** |
-| Cincinnati Reds @ Atlanta Braves | 33.6% | 47.8% | 18.5% | 4.28 r | **4.00 r** |
-| Houston Astros @ Athletics | 36.7% | 44.1% | 19.2% | 4.27 r | **4.00 r** |
-| San Diego Padres @ Los Angeles Dodgers | 38.9% | 41.6% | 19.5% | 4.12 r | **4.00 r** |
-| Chicago White Sox @ Kansas City Royals | 40.2% | 41.3% | 18.6% | 4.40 r | **4.00 r** |
-| Arizona Diamondbacks @ Colorado Rockies | 45.7% | 39.5% | 14.7% | 6.61 r | **6.00 r** |
-| Tampa Bay Rays @ New York Yankees | 38.6% | 40.3% | 21.1% | 3.49 r | **3.00 r** |
-| Cleveland Guardians @ Boston Red Sox | 37.9% | 41.9% | 20.2% | 3.76 r | **4.00 r** |
-| Milwaukee Brewers @ Philadelphia Phillies | 45.0% | 36.0% | 19.0% | 4.19 r | **4.00 r** |
-| Los Angeles Angels @ Seattle Mariners | 37.2% | 41.9% | 20.9% | 3.54 r | **3.00 r** |
-| St. Louis Cardinals @ Pittsburgh Pirates | 38.9% | 41.3% | 19.8% | 3.98 r | **4.00 r** |
+| New York Mets @ Texas Rangers | 49.7% | 32.3% | 18.0% | 4.56 r | **4.00 r** |
+| Miami Marlins @ Chicago Cubs | 37.8% | 44.4% | 17.8% | 4.55 r | **4.00 r** |
+| Cincinnati Reds @ Atlanta Braves | 33.9% | 48.0% | 18.1% | 4.34 r | **4.00 r** |
+| Houston Astros @ Athletics | 36.3% | 46.0% | 17.8% | 4.69 r | **4.00 r** |
+| Chicago White Sox @ Kansas City Royals | 40.0% | 42.0% | 18.0% | 4.68 r | **4.00 r** |
+| San Diego Padres @ Los Angeles Dodgers | 39.6% | 41.8% | 18.6% | 4.19 r | **4.00 r** |
+| Arizona Diamondbacks @ Colorado Rockies | 45.6% | 40.3% | 14.2% | 6.64 r | **6.00 r** |
+| Tampa Bay Rays @ New York Yankees | 39.4% | 40.3% | 20.3% | 3.73 r | **3.00 r** |
+| Cleveland Guardians @ Boston Red Sox | 38.1% | 41.9% | 20.0% | 3.99 r | **4.00 r** |
+| Milwaukee Brewers @ Philadelphia Phillies | 45.1% | 36.6% | 18.2% | 4.40 r | **4.00 r** |
+| St. Louis Cardinals @ Pittsburgh Pirates | 39.1% | 42.0% | 18.9% | 4.17 r | **4.00 r** |
+| Los Angeles Angels @ Seattle Mariners | 37.7% | 41.7% | 20.6% | 3.64 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
