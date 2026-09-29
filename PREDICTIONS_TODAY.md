@@ -1,22 +1,22 @@
-# MLB Predictive Model Forecasts (2026-09-29 02:10:52 UTC)
+# MLB Predictive Model Forecasts (2026-09-29 12:13:34 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Chicago White Sox @ Houston Astros | **Houston Astros** | 63.0% | +26.1% | 4.6 - 5.5 | Hagen Smith vs AJ Blubaugh |
-| Boston Red Sox @ New York Yankees | **New York Yankees** | 62.2% | +24.5% | 4.2 - 5.0 | Payton Tolle vs Cam Schlittler |
-| Chicago Cubs @ San Diego Padres | **San Diego Padres** | 54.1% | +8.2% | 4.6 - 4.8 | Matthew Boyd vs Michael King |
-| Philadelphia Phillies @ Atlanta Braves | **Atlanta Braves** | 53.0% | +5.9% | 5.0 - 5.0 | Jesús Luzardo vs Chris Sale |
+| Chicago White Sox @ Houston Astros | **Houston Astros** | 63.3% | +26.5% | 4.5 - 5.4 | Hagen Smith vs AJ Blubaugh |
+| Boston Red Sox @ New York Yankees | **New York Yankees** | 62.4% | +24.8% | 4.2 - 5.0 | Payton Tolle vs Cam Schlittler |
+| Chicago Cubs @ San Diego Padres | **San Diego Padres** | 54.8% | +9.6% | 4.5 - 4.7 | Matthew Boyd vs Michael King |
+| Philadelphia Phillies @ Atlanta Braves | **Atlanta Braves** | 53.2% | +6.3% | 4.8 - 4.8 | Jesús Luzardo vs Chris Sale |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Chicago White Sox @ Houston Astros | 37.3% | 44.3% | 18.4% | 4.28 r | **4.00 r** |
-| Boston Red Sox @ New York Yankees | 33.5% | 44.9% | 21.5% | 3.33 r | **3.00 r** |
-| Chicago Cubs @ San Diego Padres | 34.6% | 45.0% | 20.4% | 3.71 r | **3.00 r** |
-| Philadelphia Phillies @ Atlanta Braves | 35.3% | 43.9% | 20.8% | 3.59 r | **3.00 r** |
+| Chicago White Sox @ Houston Astros | 36.5% | 44.2% | 19.3% | 4.21 r | **4.00 r** |
+| Boston Red Sox @ New York Yankees | 33.5% | 45.0% | 21.6% | 3.34 r | **3.00 r** |
+| Chicago Cubs @ San Diego Padres | 34.6% | 45.0% | 20.4% | 3.63 r | **3.00 r** |
+| Philadelphia Phillies @ Atlanta Braves | 34.9% | 43.7% | 21.4% | 3.45 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
