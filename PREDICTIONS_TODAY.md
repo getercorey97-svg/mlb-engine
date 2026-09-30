@@ -1,20 +1,22 @@
-# MLB Predictive Model Forecasts (2026-09-29 23:03:14 UTC)
+# MLB Predictive Model Forecasts (2026-09-30 01:25:04 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Chicago White Sox @ Houston Astros | **Houston Astros** | 63.9% | +27.8% | 4.6 - 5.6 | Hagen Smith vs AJ Blubaugh |
-| Boston Red Sox @ New York Yankees | **New York Yankees** | 62.8% | +25.7% | 4.2 - 5.1 | Payton Tolle vs Cam Schlittler |
-| Chicago Cubs @ San Diego Padres | **San Diego Padres** | 55.2% | +10.3% | 4.7 - 5.0 | Matthew Boyd vs Michael King |
+| Chicago White Sox @ Houston Astros | **Houston Astros** | 63.3% | +26.6% | 4.6 - 5.5 | Sean Burke vs Hunter Brown |
+| Boston Red Sox @ New York Yankees | **New York Yankees** | 62.9% | +25.8% | 4.2 - 5.1 | Sonny Gray vs Max Fried |
+| Chicago Cubs @ San Diego Padres | **San Diego Padres** | 55.5% | +11.0% | 4.7 - 4.9 | TBD vs Nick Pivetta |
+| Philadelphia Phillies @ Atlanta Braves | **Atlanta Braves** | 54.1% | +8.2% | 4.9 - 5.1 | Cristopher Sánchez vs Tyler Mahle |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Chicago White Sox @ Houston Astros | 36.6% | 44.9% | 18.6% | 4.34 r | **4.00 r** |
-| Boston Red Sox @ New York Yankees | 33.2% | 45.2% | 21.6% | 3.33 r | **3.00 r** |
-| Chicago Cubs @ San Diego Padres | 34.1% | 46.1% | 19.9% | 3.82 r | **4.00 r** |
+| Chicago White Sox @ Houston Astros | 35.2% | 45.7% | 19.1% | 4.19 r | **4.00 r** |
+| Boston Red Sox @ New York Yankees | 33.7% | 44.2% | 22.1% | 3.25 r | **3.00 r** |
+| Chicago Cubs @ San Diego Padres | 33.4% | 46.7% | 19.9% | 3.74 r | **4.00 r** |
+| Philadelphia Phillies @ Atlanta Braves | 38.7% | 41.4% | 19.9% | 3.86 r | **4.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
