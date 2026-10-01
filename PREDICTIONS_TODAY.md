@@ -1,16 +1,16 @@
-# MLB Predictive Model Forecasts (2026-10-01 19:59:03 UTC)
+# MLB Predictive Model Forecasts (2026-10-01 23:16:10 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Philadelphia Phillies @ Atlanta Braves | **Atlanta Braves** | 55.3% | +10.6% | 5.0 - 5.2 | Aaron Nola vs Ray Kerr |
+| Philadelphia Phillies @ Atlanta Braves | **Atlanta Braves** | 55.3% | +10.7% | 4.9 - 5.2 | Aaron Nola vs Ray Kerr |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Philadelphia Phillies @ Atlanta Braves | 28.8% | 53.8% | 17.5% | 4.28 r | **4.00 r** |
+| Philadelphia Phillies @ Atlanta Braves | 28.4% | 53.3% | 18.3% | 4.22 r | **4.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
