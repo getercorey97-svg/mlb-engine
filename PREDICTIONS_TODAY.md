@@ -1,22 +1,20 @@
-# MLB Predictive Model Forecasts (2026-10-03 18:27:12 UTC)
+# MLB Predictive Model Forecasts (2026-10-03 22:14:41 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| New York Yankees @ Tampa Bay Rays | **New York Yankees** | 66.9% | +33.9% | 6.3 - 4.6 | Gerrit Cole vs Drew Rasmussen |
-| Atlanta Braves @ Los Angeles Dodgers | **Los Angeles Dodgers** | 55.1% | +10.2% | 5.0 - 5.3 | Dylan Dodd vs Tarik Skubal |
-| San Diego Padres @ Milwaukee Brewers | **San Diego Padres** | 52.2% | +4.4% | 5.2 - 4.9 | Robbie Ray vs Jacob Misiorowski |
-| Chicago White Sox @ Cleveland Guardians | **Cleveland Guardians** | 52.1% | +4.3% | 4.3 - 4.3 | Hagen Smith vs Parker Messick |
+| New York Yankees @ Tampa Bay Rays | **New York Yankees** | 67.1% | +34.2% | 6.3 - 4.6 | Gerrit Cole vs Drew Rasmussen |
+| Atlanta Braves @ Los Angeles Dodgers | **Los Angeles Dodgers** | 55.2% | +10.4% | 5.1 - 5.3 | Dylan Dodd vs Tarik Skubal |
+| San Diego Padres @ Milwaukee Brewers | **San Diego Padres** | 51.9% | +3.8% | 5.2 - 4.9 | Robbie Ray vs Jacob Misiorowski |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| New York Yankees @ Tampa Bay Rays | 45.5% | 35.4% | 19.1% | 4.07 r | **4.00 r** |
-| Atlanta Braves @ Los Angeles Dodgers | 36.7% | 43.3% | 20.0% | 3.84 r | **4.00 r** |
-| San Diego Padres @ Milwaukee Brewers | 38.0% | 41.9% | 20.1% | 3.90 r | **4.00 r** |
-| Chicago White Sox @ Cleveland Guardians | 40.7% | 38.4% | 21.0% | 3.57 r | **3.00 r** |
+| New York Yankees @ Tampa Bay Rays | 45.0% | 35.2% | 19.8% | 3.95 r | **4.00 r** |
+| Atlanta Braves @ Los Angeles Dodgers | 36.4% | 43.4% | 20.2% | 3.80 r | **4.00 r** |
+| San Diego Padres @ Milwaukee Brewers | 37.8% | 42.1% | 20.1% | 3.80 r | **4.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
