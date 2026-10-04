@@ -1,18 +1,18 @@
-# MLB Predictive Model Forecasts (2026-10-04 18:29:02 UTC)
+# MLB Predictive Model Forecasts (2026-10-04 22:23:30 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Atlanta Braves @ Los Angeles Dodgers | **Los Angeles Dodgers** | 54.9% | +9.7% | 5.0 - 5.2 | Ray Kerr vs Blake Snell |
-| San Diego Padres @ Milwaukee Brewers | **San Diego Padres** | 52.1% | +4.2% | 5.2 - 4.9 | Michael King vs Logan Henderson |
+| Atlanta Braves @ Los Angeles Dodgers | **Los Angeles Dodgers** | 55.1% | +10.2% | 5.0 - 5.3 | Ray Kerr vs Blake Snell |
+| San Diego Padres @ Milwaukee Brewers | **San Diego Padres** | 51.8% | +3.6% | 5.2 - 4.9 | Michael King vs Logan Henderson |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Atlanta Braves @ Los Angeles Dodgers | 39.3% | 39.8% | 20.9% | 3.63 r | **3.00 r** |
-| San Diego Padres @ Milwaukee Brewers | 40.8% | 39.0% | 20.2% | 3.84 r | **4.00 r** |
+| Atlanta Braves @ Los Angeles Dodgers | 39.5% | 39.6% | 20.9% | 3.66 r | **3.00 r** |
+| San Diego Padres @ Milwaukee Brewers | 40.9% | 39.1% | 19.9% | 3.81 r | **4.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
