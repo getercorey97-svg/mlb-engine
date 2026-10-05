@@ -1,18 +1,18 @@
-# MLB Predictive Model Forecasts (2026-10-04 22:23:30 UTC)
+# MLB Predictive Model Forecasts (2026-10-05 01:07:27 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Atlanta Braves @ Los Angeles Dodgers | **Los Angeles Dodgers** | 55.1% | +10.2% | 5.0 - 5.3 | Ray Kerr vs Blake Snell |
-| San Diego Padres @ Milwaukee Brewers | **San Diego Padres** | 51.8% | +3.6% | 5.2 - 4.9 | Michael King vs Logan Henderson |
+| New York Yankees @ Tampa Bay Rays | **New York Yankees** | 65.4% | +30.8% | 5.9 - 4.3 | Cam Schlittler vs Freddy Peralta |
+| Chicago White Sox @ Cleveland Guardians | **Cleveland Guardians** | 51.7% | +3.3% | 4.2 - 4.2 | Anthony Kay vs Gavin Williams |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Atlanta Braves @ Los Angeles Dodgers | 39.5% | 39.6% | 20.9% | 3.66 r | **3.00 r** |
-| San Diego Padres @ Milwaukee Brewers | 40.9% | 39.1% | 19.9% | 3.81 r | **4.00 r** |
+| New York Yankees @ Tampa Bay Rays | 48.0% | 32.3% | 19.7% | 3.78 r | **4.00 r** |
+| Chicago White Sox @ Cleveland Guardians | 44.3% | 35.2% | 20.5% | 3.69 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
