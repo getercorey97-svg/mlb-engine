@@ -1,18 +1,18 @@
-# MLB Predictive Model Forecasts (2026-10-05 13:44:32 UTC)
+# MLB Predictive Model Forecasts (2026-10-05 21:44:23 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| New York Yankees @ Tampa Bay Rays | **New York Yankees** | 65.3% | +30.6% | 5.8 - 4.3 | Cam Schlittler vs Freddy Peralta |
-| Chicago White Sox @ Cleveland Guardians | **Cleveland Guardians** | 51.7% | +3.5% | 4.2 - 4.1 | Anthony Kay vs Gavin Williams |
+| New York Yankees @ Tampa Bay Rays | **New York Yankees** | 65.1% | +30.3% | 5.9 - 4.4 | Cam Schlittler vs Freddy Peralta |
+| Chicago White Sox @ Cleveland Guardians | **Cleveland Guardians** | 51.1% | +2.3% | 4.2 - 4.1 | Anthony Kay vs Gavin Williams |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| New York Yankees @ Tampa Bay Rays | 47.7% | 32.3% | 20.1% | 3.76 r | **3.00 r** |
-| Chicago White Sox @ Cleveland Guardians | 44.2% | 34.7% | 21.1% | 3.65 r | **3.00 r** |
+| New York Yankees @ Tampa Bay Rays | 47.4% | 32.6% | 20.0% | 3.81 r | **4.00 r** |
+| Chicago White Sox @ Cleveland Guardians | 44.6% | 34.4% | 20.9% | 3.65 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
