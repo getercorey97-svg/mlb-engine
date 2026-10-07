@@ -1,22 +1,22 @@
-# MLB Predictive Model Forecasts (2026-10-07 12:44:34 UTC)
+# MLB Predictive Model Forecasts (2026-10-07 20:20:43 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Tampa Bay Rays @ New York Yankees | **New York Yankees** | 62.7% | +25.5% | 4.0 - 4.8 | Nick Martinez vs Max Fried |
-| Los Angeles Dodgers @ Atlanta Braves | **Los Angeles Dodgers** | 56.0% | +12.1% | 5.2 - 4.5 | Tyler Glasnow vs Tyler Mahle |
-| Milwaukee Brewers @ San Diego Padres | **Milwaukee Brewers** | 51.9% | +3.8% | 4.6 - 4.3 | TBD vs Walker Buehler |
-| Cleveland Guardians @ Chicago White Sox | **Cleveland Guardians** | 51.6% | +3.3% | 4.4 - 4.1 | Daniel Espino vs Sean Newcomb |
+| Tampa Bay Rays @ New York Yankees | **New York Yankees** | 63.4% | +26.8% | 4.1 - 5.0 | Nick Martinez vs Max Fried |
+| Los Angeles Dodgers @ Atlanta Braves | **Los Angeles Dodgers** | 55.7% | +11.5% | 5.5 - 4.8 | Tyler Glasnow vs Tyler Mahle |
+| Cleveland Guardians @ Chicago White Sox | **Cleveland Guardians** | 51.5% | +3.1% | 4.6 - 4.3 | Daniel Espino vs Sean Newcomb |
+| Milwaukee Brewers @ San Diego Padres | **Milwaukee Brewers** | 51.3% | +2.5% | 4.9 - 4.6 | TBD vs Walker Buehler |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Tampa Bay Rays @ New York Yankees | 28.7% | 50.9% | 20.3% | 3.50 r | **3.00 r** |
-| Los Angeles Dodgers @ Atlanta Braves | 44.7% | 34.3% | 21.0% | 3.52 r | **3.00 r** |
-| Milwaukee Brewers @ San Diego Padres | 43.3% | 36.6% | 20.0% | 3.69 r | **3.00 r** |
-| Cleveland Guardians @ Chicago White Sox | 34.6% | 44.0% | 21.4% | 3.45 r | **3.00 r** |
+| Tampa Bay Rays @ New York Yankees | 28.7% | 51.4% | 20.0% | 3.64 r | **3.00 r** |
+| Los Angeles Dodgers @ Atlanta Braves | 44.6% | 35.1% | 20.3% | 3.74 r | **3.00 r** |
+| Cleveland Guardians @ Chicago White Sox | 34.4% | 44.5% | 21.1% | 3.59 r | **3.00 r** |
+| Milwaukee Brewers @ San Diego Padres | 43.4% | 36.5% | 20.1% | 3.93 r | **4.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
