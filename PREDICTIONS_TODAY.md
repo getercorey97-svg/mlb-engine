@@ -1,18 +1,22 @@
-# MLB Predictive Model Forecasts (2026-10-06 23:07:43 UTC)
+# MLB Predictive Model Forecasts (2026-10-07 01:43:44 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Los Angeles Dodgers @ Atlanta Braves | **Los Angeles Dodgers** | 55.4% | +10.8% | 5.5 - 4.8 | Yoshinobu Yamamoto vs Chris Sale |
-| Milwaukee Brewers @ San Diego Padres | **Milwaukee Brewers** | 52.1% | +4.2% | 5.0 - 4.7 | Dustin May vs Nick Pivetta |
+| Tampa Bay Rays @ New York Yankees | **New York Yankees** | 63.4% | +26.9% | 4.0 - 4.9 | Nick Martinez vs Max Fried |
+| Los Angeles Dodgers @ Atlanta Braves | **Los Angeles Dodgers** | 55.8% | +11.6% | 5.4 - 4.7 | Tyler Glasnow vs Tyler Mahle |
+| Cleveland Guardians @ Chicago White Sox | **Cleveland Guardians** | 51.5% | +2.9% | 4.5 - 4.2 | Daniel Espino vs Sean Newcomb |
+| Milwaukee Brewers @ San Diego Padres | **Milwaukee Brewers** | 51.1% | +2.1% | 4.8 - 4.5 | TBD vs TBD |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Los Angeles Dodgers @ Atlanta Braves | 38.6% | 40.2% | 21.2% | 3.59 r | **3.00 r** |
-| Milwaukee Brewers @ San Diego Padres | 37.2% | 42.9% | 19.9% | 3.83 r | **4.00 r** |
+| Tampa Bay Rays @ New York Yankees | 28.3% | 51.5% | 20.2% | 3.56 r | **3.00 r** |
+| Los Angeles Dodgers @ Atlanta Braves | 44.6% | 34.3% | 21.1% | 3.64 r | **3.00 r** |
+| Cleveland Guardians @ Chicago White Sox | 34.6% | 44.1% | 21.3% | 3.50 r | **3.00 r** |
+| Milwaukee Brewers @ San Diego Padres | 39.1% | 40.5% | 20.4% | 3.65 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
