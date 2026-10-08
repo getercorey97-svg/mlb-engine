@@ -1,16 +1,16 @@
-# MLB Predictive Model Forecasts (2026-10-08 20:23:02 UTC)
+# MLB Predictive Model Forecasts (2026-10-08 23:48:18 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Cleveland Guardians @ Chicago White Sox | **Cleveland Guardians** | 51.5% | +2.9% | 4.5 - 4.2 | Parker Messick vs Hagen Smith |
+| Cleveland Guardians @ Chicago White Sox | **Cleveland Guardians** | 51.7% | +3.4% | 4.4 - 4.1 | Parker Messick vs Hagen Smith |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Cleveland Guardians @ Chicago White Sox | 35.8% | 42.9% | 21.3% | 3.45 r | **3.00 r** |
+| Cleveland Guardians @ Chicago White Sox | 35.5% | 42.7% | 21.7% | 3.34 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
