@@ -1,20 +1,18 @@
-# MLB Predictive Model Forecasts (2026-10-07 23:38:13 UTC)
+# MLB Predictive Model Forecasts (2026-10-08 02:11:37 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Tampa Bay Rays @ New York Yankees | **New York Yankees** | 63.1% | +26.2% | 4.0 - 4.9 | Nick Martinez vs Max Fried |
-| Los Angeles Dodgers @ Atlanta Braves | **Los Angeles Dodgers** | 56.0% | +12.0% | 5.4 - 4.7 | Tyler Glasnow vs Tyler Mahle |
-| Milwaukee Brewers @ San Diego Padres | **Milwaukee Brewers** | 51.5% | +3.0% | 4.7 - 4.4 | Robert Gasser vs Walker Buehler |
+| Tampa Bay Rays @ New York Yankees | **New York Yankees** | 63.7% | +27.5% | 4.1 - 5.0 | Drew Rasmussen vs Carlos Rodón |
+| Cleveland Guardians @ Chicago White Sox | **Cleveland Guardians** | 51.1% | +2.2% | 4.4 - 4.2 | Parker Messick vs TBD |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Tampa Bay Rays @ New York Yankees | 28.6% | 50.8% | 20.6% | 3.52 r | **3.00 r** |
-| Los Angeles Dodgers @ Atlanta Braves | 44.6% | 34.8% | 20.5% | 3.66 r | **3.00 r** |
-| Milwaukee Brewers @ San Diego Padres | 41.1% | 39.1% | 19.8% | 3.88 r | **4.00 r** |
+| Tampa Bay Rays @ New York Yankees | 35.7% | 42.0% | 22.3% | 3.23 r | **3.00 r** |
+| Cleveland Guardians @ Chicago White Sox | 36.5% | 41.9% | 21.6% | 3.39 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
