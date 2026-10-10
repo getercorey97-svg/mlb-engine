@@ -1,16 +1,16 @@
-# MLB Predictive Model Forecasts (2026-10-10 19:04:23 UTC)
+# MLB Predictive Model Forecasts (2026-10-10 22:43:03 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Chicago White Sox @ Cleveland Guardians | **Cleveland Guardians** | 54.9% | +9.9% | 4.3 - 4.5 | Sean Burke vs Gavin Williams |
+| Chicago White Sox @ Cleveland Guardians | **Cleveland Guardians** | 55.2% | +10.4% | 4.2 - 4.4 | Sean Burke vs Gavin Williams |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Chicago White Sox @ Cleveland Guardians | 44.5% | 35.9% | 19.6% | 3.80 r | **4.00 r** |
+| Chicago White Sox @ Cleveland Guardians | 43.9% | 35.8% | 20.3% | 3.72 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
