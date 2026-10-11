@@ -1,16 +1,16 @@
-# MLB Predictive Model Forecasts (2026-10-11 19:16:49 UTC)
+# MLB Predictive Model Forecasts (2026-10-11 22:59:42 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Los Angeles Dodgers @ Milwaukee Brewers | **Los Angeles Dodgers** | 50.7% | +1.3% | 5.0 - 4.8 | Tarik Skubal vs Jacob Misiorowski |
+| Los Angeles Dodgers @ Milwaukee Brewers | **Los Angeles Dodgers** | 50.3% | +0.7% | 4.9 - 4.8 | Tarik Skubal vs Jacob Misiorowski |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Los Angeles Dodgers @ Milwaukee Brewers | 36.3% | 42.1% | 21.5% | 3.43 r | **3.00 r** |
+| Los Angeles Dodgers @ Milwaukee Brewers | 36.8% | 41.7% | 21.5% | 3.38 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
