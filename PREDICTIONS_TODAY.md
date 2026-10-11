@@ -1,16 +1,16 @@
-# MLB Predictive Model Forecasts (2026-10-10 22:43:03 UTC)
+# MLB Predictive Model Forecasts (2026-10-11 01:08:36 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Chicago White Sox @ Cleveland Guardians | **Cleveland Guardians** | 55.2% | +10.4% | 4.2 - 4.4 | Sean Burke vs Gavin Williams |
+| Los Angeles Dodgers @ Milwaukee Brewers | **Los Angeles Dodgers** | 50.4% | +0.8% | 4.8 - 4.7 | Tarik Skubal vs Jacob Misiorowski |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Chicago White Sox @ Cleveland Guardians | 43.9% | 35.8% | 20.3% | 3.72 r | **3.00 r** |
+| Los Angeles Dodgers @ Milwaukee Brewers | 35.8% | 42.1% | 22.0% | 3.27 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
