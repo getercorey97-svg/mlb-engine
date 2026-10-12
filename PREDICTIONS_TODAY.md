@@ -1,16 +1,18 @@
-# MLB Predictive Model Forecasts (2026-10-11 22:59:42 UTC)
+# MLB Predictive Model Forecasts (2026-10-12 01:33:12 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Los Angeles Dodgers @ Milwaukee Brewers | **Los Angeles Dodgers** | 50.3% | +0.7% | 4.9 - 4.8 | Tarik Skubal vs Jacob Misiorowski |
+| Cleveland Guardians @ Tampa Bay Rays | **Cleveland Guardians** | 53.2% | +6.5% | 4.4 - 4.0 | Foster Griffin vs Drew Rasmussen |
+| Los Angeles Dodgers @ Milwaukee Brewers | **Milwaukee Brewers** | 50.0% | +0.0% | 4.8 - 4.7 | Yoshinobu Yamamoto vs Logan Henderson |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Los Angeles Dodgers @ Milwaukee Brewers | 36.8% | 41.7% | 21.5% | 3.38 r | **3.00 r** |
+| Cleveland Guardians @ Tampa Bay Rays | 37.7% | 40.4% | 21.9% | 3.22 r | **3.00 r** |
+| Los Angeles Dodgers @ Milwaukee Brewers | 34.9% | 43.9% | 21.2% | 3.53 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
