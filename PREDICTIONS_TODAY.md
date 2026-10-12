@@ -1,18 +1,18 @@
-# MLB Predictive Model Forecasts (2026-10-12 14:33:18 UTC)
+# MLB Predictive Model Forecasts (2026-10-12 22:19:50 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Cleveland Guardians @ Tampa Bay Rays | **Cleveland Guardians** | 52.9% | +5.8% | 4.4 - 4.0 | Foster Griffin vs Drew Rasmussen |
-| Los Angeles Dodgers @ Milwaukee Brewers | **Milwaukee Brewers** | 50.7% | +1.4% | 4.9 - 4.8 | Yoshinobu Yamamoto vs Logan Henderson |
+| Cleveland Guardians @ Tampa Bay Rays | **Cleveland Guardians** | 52.8% | +5.7% | 4.4 - 4.0 | Foster Griffin vs Drew Rasmussen |
+| Los Angeles Dodgers @ Milwaukee Brewers | **Milwaukee Brewers** | 50.5% | +1.1% | 5.1 - 4.9 | Yoshinobu Yamamoto vs Logan Henderson |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Cleveland Guardians @ Tampa Bay Rays | 37.3% | 40.2% | 22.4% | 3.21 r | **3.00 r** |
-| Los Angeles Dodgers @ Milwaukee Brewers | 35.4% | 44.2% | 20.4% | 3.60 r | **3.00 r** |
+| Cleveland Guardians @ Tampa Bay Rays | 37.7% | 40.7% | 21.6% | 3.23 r | **3.00 r** |
+| Los Angeles Dodgers @ Milwaukee Brewers | 35.1% | 44.1% | 20.8% | 3.69 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
