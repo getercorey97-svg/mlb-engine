@@ -1,16 +1,16 @@
-# MLB Predictive Model Forecasts (2026-10-14 11:18:15 UTC)
+# MLB Predictive Model Forecasts (2026-10-14 19:05:49 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Milwaukee Brewers @ Los Angeles Dodgers | **Milwaukee Brewers** | 50.4% | +0.8% | 4.1 - 4.0 | Robert Gasser vs Blake Snell |
+| Milwaukee Brewers @ Los Angeles Dodgers | **Los Angeles Dodgers** | 50.1% | +0.2% | 4.4 - 4.2 | Robert Gasser vs Blake Snell |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Milwaukee Brewers @ Los Angeles Dodgers | 39.0% | 38.1% | 22.9% | 3.12 r | **3.00 r** |
+| Milwaukee Brewers @ Los Angeles Dodgers | 39.9% | 38.6% | 21.5% | 3.36 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
