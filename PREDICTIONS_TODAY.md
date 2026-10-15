@@ -1,18 +1,18 @@
-# MLB Predictive Model Forecasts (2026-10-15 00:43:49 UTC)
+# MLB Predictive Model Forecasts (2026-10-15 10:56:11 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Tampa Bay Rays @ Cleveland Guardians | **Cleveland Guardians** | 57.6% | +15.2% | 4.0 - 4.5 | Griffin Jax vs Gavin Williams |
-| Milwaukee Brewers @ Los Angeles Dodgers | **Milwaukee Brewers** | 51.0% | +2.0% | 4.4 - 4.2 | TBD vs Tyler Glasnow |
+| Tampa Bay Rays @ Cleveland Guardians | **Cleveland Guardians** | 57.6% | +15.2% | 4.0 - 4.4 | Griffin Jax vs Gavin Williams |
+| Milwaukee Brewers @ Los Angeles Dodgers | **Milwaukee Brewers** | 50.6% | +1.1% | 4.2 - 4.0 | TBD vs Tyler Glasnow |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Tampa Bay Rays @ Cleveland Guardians | 37.4% | 40.8% | 21.8% | 3.40 r | **3.00 r** |
-| Milwaukee Brewers @ Los Angeles Dodgers | 39.5% | 38.3% | 22.2% | 3.19 r | **3.00 r** |
+| Tampa Bay Rays @ Cleveland Guardians | 37.6% | 40.6% | 21.8% | 3.34 r | **3.00 r** |
+| Milwaukee Brewers @ Los Angeles Dodgers | 39.3% | 37.9% | 22.9% | 3.05 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
