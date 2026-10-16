@@ -1,16 +1,16 @@
-# MLB Predictive Model Forecasts (2026-10-16 10:48:09 UTC)
+# MLB Predictive Model Forecasts (2026-10-16 18:32:34 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Tampa Bay Rays @ Cleveland Guardians | **Cleveland Guardians** | 57.9% | +15.8% | 4.2 - 4.6 | Nick Martinez vs TBD |
+| Tampa Bay Rays @ Cleveland Guardians | **Cleveland Guardians** | 58.1% | +16.1% | 3.9 - 4.4 | Nick Martinez vs Shawn Armstrong |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Tampa Bay Rays @ Cleveland Guardians | 31.1% | 49.7% | 19.2% | 3.88 r | **4.00 r** |
+| Tampa Bay Rays @ Cleveland Guardians | 30.7% | 49.2% | 20.1% | 3.70 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
