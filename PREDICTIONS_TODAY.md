@@ -1,18 +1,16 @@
-# MLB Predictive Model Forecasts (2026-10-16 00:34:55 UTC)
+# MLB Predictive Model Forecasts (2026-10-16 10:48:09 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Tampa Bay Rays @ Cleveland Guardians | **Cleveland Guardians** | 58.1% | +16.3% | 4.0 - 4.5 | Nick Martinez vs TBD |
-| Milwaukee Brewers @ Los Angeles Dodgers | **Milwaukee Brewers** | 51.7% | +3.5% | 4.7 - 4.3 | TBD vs TBD |
+| Tampa Bay Rays @ Cleveland Guardians | **Cleveland Guardians** | 57.9% | +15.8% | 4.2 - 4.6 | Nick Martinez vs TBD |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Tampa Bay Rays @ Cleveland Guardians | 30.8% | 49.6% | 19.7% | 3.74 r | **4.00 r** |
-| Milwaukee Brewers @ Los Angeles Dodgers | 42.4% | 36.2% | 21.4% | 3.46 r | **3.00 r** |
+| Tampa Bay Rays @ Cleveland Guardians | 31.1% | 49.7% | 19.2% | 3.88 r | **4.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
