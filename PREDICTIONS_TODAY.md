@@ -1,16 +1,16 @@
-# MLB Predictive Model Forecasts (2026-10-18 21:37:25 UTC)
+# MLB Predictive Model Forecasts (2026-10-19 00:22:07 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Tampa Bay Rays @ Cleveland Guardians | **Cleveland Guardians** | 56.1% | +12.3% | 3.9 - 4.2 | Drew Rasmussen vs Parker Messick |
+| Cleveland Guardians @ Tampa Bay Rays | **Cleveland Guardians** | 56.1% | +12.3% | 4.3 - 3.7 | TBD vs Freddy Peralta |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Tampa Bay Rays @ Cleveland Guardians | 38.8% | 38.3% | 22.9% | 3.15 r | **3.00 r** |
+| Cleveland Guardians @ Tampa Bay Rays | 42.1% | 36.1% | 21.8% | 3.30 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
