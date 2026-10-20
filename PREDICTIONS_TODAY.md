@@ -1,16 +1,16 @@
-# MLB Predictive Model Forecasts (2026-10-19 22:56:57 UTC)
+# MLB Predictive Model Forecasts (2026-10-20 01:09:22 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Cleveland Guardians @ Tampa Bay Rays | **Cleveland Guardians** | 55.3% | +10.5% | 4.3 - 3.8 | Shawn Armstrong vs Freddy Peralta |
+| Cleveland Guardians @ Tampa Bay Rays | **Cleveland Guardians** | 54.6% | +9.2% | 4.2 - 3.8 | TBD vs TBD |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Cleveland Guardians @ Tampa Bay Rays | 41.3% | 36.7% | 22.0% | 3.34 r | **3.00 r** |
+| Cleveland Guardians @ Tampa Bay Rays | 40.8% | 37.4% | 21.8% | 3.29 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
