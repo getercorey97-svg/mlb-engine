@@ -1,16 +1,16 @@
-# MLB Predictive Model Forecasts (2026-10-24 00:56:34 UTC)
+# MLB Predictive Model Forecasts (2026-10-24 10:22:36 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Tampa Bay Rays @ Milwaukee Brewers | **Milwaukee Brewers** | 54.5% | +9.0% | 4.1 - 4.3 | Drew Rasmussen vs Logan Henderson |
+| Tampa Bay Rays @ Milwaukee Brewers | **Milwaukee Brewers** | 54.4% | +8.7% | 3.9 - 4.1 | Drew Rasmussen vs Logan Henderson |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Tampa Bay Rays @ Milwaukee Brewers | 40.9% | 36.6% | 22.5% | 3.26 r | **3.00 r** |
+| Tampa Bay Rays @ Milwaukee Brewers | 40.6% | 36.8% | 22.6% | 3.13 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
