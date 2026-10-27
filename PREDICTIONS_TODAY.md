@@ -1,16 +1,16 @@
-# MLB Predictive Model Forecasts (2026-10-26 23:11:45 UTC)
+# MLB Predictive Model Forecasts (2026-10-27 01:34:45 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Milwaukee Brewers @ Tampa Bay Rays | **Milwaukee Brewers** | 56.7% | +13.4% | 4.3 - 3.6 | Robert Gasser vs Freddy Peralta |
+| Milwaukee Brewers @ Tampa Bay Rays | **Milwaukee Brewers** | 56.9% | +13.8% | 4.3 - 3.6 | TBD vs TBD |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Milwaukee Brewers @ Tampa Bay Rays | 40.7% | 37.4% | 21.9% | 3.32 r | **3.00 r** |
+| Milwaukee Brewers @ Tampa Bay Rays | 41.9% | 36.0% | 22.1% | 3.28 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
