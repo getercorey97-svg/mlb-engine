@@ -1,16 +1,16 @@
-# MLB Predictive Model Forecasts (2026-10-28 01:32:57 UTC)
+# MLB Predictive Model Forecasts (2026-10-28 12:12:57 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Milwaukee Brewers @ Tampa Bay Rays | **Milwaukee Brewers** | 56.0% | +11.9% | 4.2 - 3.6 | TBD vs TBD |
+| Milwaukee Brewers @ Tampa Bay Rays | **Milwaukee Brewers** | 55.8% | +11.6% | 4.1 - 3.6 | Jacob Misiorowski vs TBD |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Milwaukee Brewers @ Tampa Bay Rays | 41.9% | 36.3% | 21.9% | 3.34 r | **3.00 r** |
+| Milwaukee Brewers @ Tampa Bay Rays | 44.1% | 32.7% | 23.2% | 3.08 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
