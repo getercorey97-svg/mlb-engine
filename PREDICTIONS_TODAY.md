@@ -1,16 +1,16 @@
-# MLB Predictive Model Forecasts (2026-10-27 23:01:42 UTC)
+# MLB Predictive Model Forecasts (2026-10-28 01:32:57 UTC)
 
 ### 🎯 Full Game Projections (50,000 Iterations)
 
 | Matchup | Best Pick | Win Prob | Edge | Proj Score | Pitchers |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Milwaukee Brewers @ Tampa Bay Rays | **Milwaukee Brewers** | 56.7% | +13.4% | 4.3 - 3.7 | Dustin May vs Griffin Jax |
+| Milwaukee Brewers @ Tampa Bay Rays | **Milwaukee Brewers** | 56.0% | +11.9% | 4.2 - 3.6 | TBD vs TBD |
 
 ### ⚡ First 5 (F5) Projections (Continuous L1 Median)
 
 | Matchup | F5 Away Prob | F5 Home Prob | F5 Tie Prob | Expected F5 Mean | Continuous Median |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Milwaukee Brewers @ Tampa Bay Rays | 39.9% | 38.9% | 21.2% | 3.49 r | **3.00 r** |
+| Milwaukee Brewers @ Tampa Bay Rays | 41.9% | 36.3% | 21.9% | 3.34 r | **3.00 r** |
 
 ### 🏏 Top Batter Hit Props (Log5 Component Model)
 
